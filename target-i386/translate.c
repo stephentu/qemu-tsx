@@ -5217,6 +5217,8 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
               printf("found XABORT\n");
               imm8 = insn_get(s, OT_BYTE);
               gen_helper_xabort(cpu_env, tcg_const_i32(imm8));
+              gen_eob(s);
+              s->is_jmp = DISAS_UPDATE;
               break;
             }
           case 0xc7:

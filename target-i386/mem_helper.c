@@ -157,6 +157,8 @@ void tlb_fill(CPUX86State *env, target_ulong addr, int is_write, int mmu_idx,
 void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 {
   printf("helper_xbegin(): abort=0x%llx\n", (unsigned long long) abort_addr);
+  printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
+  printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
   if (env->htm_nest_level++ == 0) {
     // begin of HTM region
     printf("htm region begin- checkpointing CPU state\n");
@@ -170,18 +172,41 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 void helper_xend(CPUX86State *env)
 {
   printf("helper_xend()\n");
-  // XXX: fix
+  // XXX: signal processor exception
   assert(env->htm_nest_level > 0);
   if (--env->htm_nest_level == 0) {
     printf("html region end\n");
+
+    // XXX: commit memory changes
   }
 }
 
 void helper_xabort(CPUX86State *env, int32_t imm8)
 {
   printf("helper_xabort(imm8=%d)\n", imm8);
+  printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
+  printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
   if (env->htm_nest_level == 0)
     // no-op
     return;
 
+  env->htm_nest_level = 0;
+
+  // restore register state
+  memcpy((char *) env,
+         (const char *) &env->htm_checkpoint_state,
+         sizeof(CPUX86StateCheckpoint));
+
+  // XXX: restore memory state
+
+  // set high bits of EAX to imm8
+  env->regs[R_EAX] |= imm8 << 24;
+
+  // XXX: what else do we need to do to EAX?
+
+  // go to abort handler
+  env->eip = env->htm_abort_eip;
+  printf("set env to go to eip=0x%llx\n", (unsigned long long) env->eip);
+  printf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
+  printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
 }
