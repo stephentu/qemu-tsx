@@ -900,6 +900,7 @@ typedef struct CPUX86State {
     /* For HTM */
     CPUX86StateCheckpoint htm_checkpoint_state;
     uint32_t htm_nest_level;
+    target_ulong htm_abort_eip;
 } CPUX86State;
 
 #include "cpu-qom.h"

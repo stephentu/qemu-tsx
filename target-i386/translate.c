@@ -5209,13 +5209,24 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
             ot = dflag + OT_WORD;
         modrm = cpu_ldub_code(cpu_single_env, s->pc++);
         if (modrm == 0xF8) {
-          // XBEGIN
-          int rel_offset;
-          rel_offset = cpu_ldl_code(cpu_single_env, s->pc);
-          s->pc += 4;
-          printf("found XBEGIN with rel32: %d-- JIT-ing call to helper\n",
-                 rel_offset);
-          gen_helper_xbegin(cpu_env, tcg_const_i32(rel_offset));
+          switch (b) {
+          case 0xc6:
+            {
+              int32_t imm8;
+              // XABORT
+              printf("found XABORT\n");
+              imm8 = insn_get(s, OT_BYTE);
+              gen_helper_xabort(cpu_env, tcg_const_i32(imm8));
+              break;
+            }
+          case 0xc7:
+            // XBEGIN
+            tval = (int32_t)insn_get(s, OT_LONG);
+            tval += s->pc - s->cs_base;
+            printf("found XBEGIN with rel32\n");
+            gen_helper_xbegin(cpu_env, tcg_const_i32(tval));
+            break;
+          }
           break;
         }
         mod = (modrm >> 6) & 3;
