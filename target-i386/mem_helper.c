@@ -153,3 +153,25 @@ void tlb_fill(CPUX86State *env, target_ulong addr, int is_write, int mmu_idx,
     }
 }
 #endif
+
+void helper_xbegin(CPUX86State *env, int32_t rel32)
+{
+  printf("helper_xbegin(): %d\n", rel32);
+  if (env->htm_nest_level++ == 0) {
+    // begin of HTM region
+    printf("htm region begin- checkpointing CPU state\n");
+    memcpy((char *) &env->htm_checkpoint_state,
+           (const char *) env,
+           sizeof(CPUX86StateCheckpoint));
+  }
+}
+
+void helper_xend(CPUX86State *env)
+{
+  printf("helper_xend()\n");
+  // XXX: fix
+  assert(env->htm_nest_level > 0);
+  if (--env->htm_nest_level == 0) {
+    printf("html region end\n");
+  }
+}

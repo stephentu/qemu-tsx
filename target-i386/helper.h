@@ -20,6 +20,8 @@ DEF_HELPER_3(imulq_T0_T1, tl, env, tl, tl)
 DEF_HELPER_2(divq_EAX, void, env, tl)
 DEF_HELPER_2(idivq_EAX, void, env, tl)
 #endif
+DEF_HELPER_2(xbegin, void, env, s32)
+DEF_HELPER_1(xend, void, env)
 
 DEF_HELPER_2(aam, void, env, int)
 DEF_HELPER_2(aad, void, env, int)

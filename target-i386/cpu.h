@@ -185,7 +185,7 @@
 #define HF2_VINTR_SHIFT      3 /* value of V_INTR_MASKING bit */
 
 #define HF2_GIF_MASK          (1 << HF2_GIF_SHIFT)
-#define HF2_HIF_MASK          (1 << HF2_HIF_SHIFT) 
+#define HF2_HIF_MASK          (1 << HF2_HIF_SHIFT)
 #define HF2_NMI_MASK          (1 << HF2_NMI_SHIFT)
 #define HF2_VINTR_MASK        (1 << HF2_VINTR_SHIFT)
 
@@ -670,6 +670,68 @@ typedef enum TPRAccess {
     TPR_ACCESS_WRITE,
 } TPRAccess;
 
+// this struct represents the checkpoint state of the CPU which we are capable
+// of restoring- in our impl, if an operation tries to modify something outside
+// the checkpointed state, it SHOULD abort. right now, we just copy a prefix
+// of CPUX86State
+typedef struct CPUX86StateCheckpoint {
+    /* standard registers */
+    target_ulong regs[CPU_NB_REGS];
+    target_ulong eip;
+    target_ulong eflags; /* eflags register. During CPU emulation, CC
+                        flags and DF are set to zero because they are
+                        stored elsewhere */
+
+    /* emulator internal eflags handling */
+    target_ulong cc_src;
+    target_ulong cc_dst;
+    uint32_t cc_op;
+    int32_t df; /* D flag : 1 if D = 0, -1 if D = 1 */
+    uint32_t hflags; /* TB flags, see HF_xxx constants. These flags
+                        are known at translation time. */
+    uint32_t hflags2; /* various other flags, see HF2_xxx constants. */
+
+    /* segments */
+    SegmentCache segs[6]; /* selector values */
+    SegmentCache ldt;
+    SegmentCache tr;
+    SegmentCache gdt; /* only base and limit are used */
+    SegmentCache idt; /* only base and limit are used */
+
+    target_ulong cr[5]; /* NOTE: cr1 is unused */
+    int32_t a20_mask;
+
+    /* FPU state */
+    unsigned int fpstt; /* top of stack index */
+    uint16_t fpus;
+    uint16_t fpuc;
+    uint8_t fptags[8];   /* 0 = valid, 1 = empty */
+    FPReg fpregs[8];
+    /* KVM-only so far */
+    uint16_t fpop;
+    uint64_t fpip;
+    uint64_t fpdp;
+
+    /* emulator internal variables */
+    float_status fp_status;
+    floatx80 ft0;
+
+    float_status mmx_status; /* for 3DNow! float ops */
+    float_status sse_status;
+    uint32_t mxcsr;
+    XMMReg xmm_regs[CPU_NB_REGS];
+    XMMReg xmm_t0;
+    MMXReg mmx_t0;
+    target_ulong cc_tmp; /* temporary for rcr/rcl */
+
+    /* sysenter registers */
+    uint32_t sysenter_cs;
+    target_ulong sysenter_esp;
+    target_ulong sysenter_eip;
+    uint64_t efer;
+    uint64_t star;
+} CPUX86StateCheckpoint;
+
 typedef struct CPUX86State {
     /* standard registers */
     target_ulong regs[CPU_NB_REGS];
@@ -834,6 +896,10 @@ typedef struct CPUX86State {
     uint64_t xcr0;
 
     TPRAccess tpr_access_type;
+
+    /* For HTM */
+    CPUX86StateCheckpoint htm_checkpoint_state;
+    uint32_t htm_nest_level;
 } CPUX86State;
 
 #include "cpu-qom.h"

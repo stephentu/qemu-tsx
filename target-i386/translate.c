@@ -5213,7 +5213,9 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
           int rel_offset;
           rel_offset = cpu_ldl_code(cpu_single_env, s->pc);
           s->pc += 4;
-          printf("found XBEGIN with rel32: %d\n", rel_offset);
+          printf("found XBEGIN with rel32: %d-- JIT-ing call to helper\n",
+                 rel_offset);
+          gen_helper_xbegin(cpu_env, tcg_const_i32(rel_offset));
           break;
         }
         mod = (modrm >> 6) & 3;
@@ -7168,6 +7170,7 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         modrm = cpu_ldub_code(cpu_single_env, s->pc++);
         if (modrm == 0xD5) {
           printf("XEND found\n");
+          gen_helper_xend(cpu_env);
           break;
         }
         mod = (modrm >> 6) & 3;
