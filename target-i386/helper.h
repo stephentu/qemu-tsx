@@ -23,6 +23,8 @@ DEF_HELPER_2(idivq_EAX, void, env, tl)
 DEF_HELPER_2(xbegin, void, env, tl)
 DEF_HELPER_1(xend, void, env)
 DEF_HELPER_2(xabort, void, env, s32)
+DEF_HELPER_3(htm_mem_load, void, env, tl, tl)
+DEF_HELPER_4(htm_mem_store, void, env, tl, tl, tl)
 
 DEF_HELPER_2(aam, void, env, int)
 DEF_HELPER_2(aad, void, env, int)

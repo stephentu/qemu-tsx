@@ -522,6 +522,17 @@ static inline void gen_op_lds_T0_A0(int idx)
 static inline void gen_op_ld_v(int idx, TCGv t0, TCGv a0)
 {
     int mem_index = (idx >> 2) - 1;
+    qemu_log_mask(CPU_LOG_TB_IN_ASM,
+        "gen_op_ld_v: t0=0x%x, a0=0x%x, mem_idx=0x%x\n",
+#if TARGET_LONG_BITS == 32
+        GET_TCGV_I32(t0),
+        GET_TCGV_I32(a0),
+#else
+        GET_TCGV_I64(t0),
+        GET_TCGV_I64(a0),
+#endif
+        mem_index);
+    gen_helper_htm_mem_load(cpu_env, a0, tcg_const_tl(mem_index));
     switch(idx & 3) {
     case 0:
         tcg_gen_qemu_ld8u(t0, a0, mem_index);
@@ -561,6 +572,17 @@ static inline void gen_op_ld_T1_A0(int idx)
 static inline void gen_op_st_v(int idx, TCGv t0, TCGv a0)
 {
     int mem_index = (idx >> 2) - 1;
+    qemu_log_mask(CPU_LOG_TB_IN_ASM,
+        "gen_op_st_v: t0=0x%x, a0=0x%x, mem_idx=0x%x\n",
+#if TARGET_LONG_BITS == 32
+        GET_TCGV_I32(t0),
+        GET_TCGV_I32(a0),
+#else
+        GET_TCGV_I64(t0),
+        GET_TCGV_I64(a0),
+#endif
+        mem_index);
+    gen_helper_htm_mem_store(cpu_env, t0, a0, tcg_const_tl(mem_index));
     switch(idx & 3) {
     case 0:
         tcg_gen_qemu_st8(t0, a0, mem_index);
@@ -5226,7 +5248,7 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
             tval = (int32_t)insn_get(s, OT_LONG);
             tval += s->pc - s->cs_base;
             printf("found XBEGIN with rel32\n");
-            gen_helper_xbegin(cpu_env, tcg_const_i32(tval));
+            gen_helper_xbegin(cpu_env, tcg_const_tl(tval));
             break;
           }
           break;

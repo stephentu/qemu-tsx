@@ -210,3 +210,20 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
   printf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
 }
+
+void helper_htm_mem_load(
+    CPUX86State *env, target_ulong a0, target_ulong idx)
+{
+  printf("helper_htm_mem_load(a0=0x%llx, idx=0x%llx)\n",
+      (unsigned long long) a0,
+      (unsigned long long) idx);
+}
+
+void helper_htm_mem_store(
+    CPUX86State *env, target_ulong t0, target_ulong a0, target_ulong idx)
+{
+  printf("helper_htm_mem_store(t0=0x%llx, a0=0x%llx, idx=0x%llx)\n",
+      (unsigned long long) t0,
+      (unsigned long long) a0,
+      (unsigned long long) idx);
+}
