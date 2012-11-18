@@ -212,18 +212,90 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
 }
 
 void helper_htm_mem_load(
-    CPUX86State *env, target_ulong a0, target_ulong idx)
+    CPUX86State *env, target_ulong a0, target_ulong mem_idx)
 {
   printf("helper_htm_mem_load(a0=0x%llx, idx=0x%llx)\n",
       (unsigned long long) a0,
-      (unsigned long long) idx);
+      (unsigned long long) mem_idx);
 }
 
 void helper_htm_mem_store(
-    CPUX86State *env, target_ulong t0, target_ulong a0, target_ulong idx)
+    CPUX86State *env, target_ulong t0, target_ulong a0, target_ulong mem_idx)
 {
   printf("helper_htm_mem_store(t0=0x%llx, a0=0x%llx, idx=0x%llx)\n",
       (unsigned long long) t0,
       (unsigned long long) a0,
-      (unsigned long long) idx);
+      (unsigned long long) mem_idx);
+}
+
+
+CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env)
+{
+  CPUX86CacheLine *ret;
+  if (!(ret = env->htm_free_list))
+    // no more free cache lines
+    return ret;
+  env->htm_free_list = ret->next;
+  ret->next          = 0;
+  return ret;
+}
+
+void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line)
+{
+  line->next         = env->htm_free_list;
+  env->htm_free_list = line;
+}
+
+CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno)
+{
+  target_ulong h;
+  CPUX86CacheLine *p;
+  h = X86_HTM_CNO_HASH_FCN(cno);
+  for (p = env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; p; p = p->next) {
+    if (p->cno == cno)
+      return p;
+  }
+  return 0;
+}
+
+bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry)
+{
+  target_ulong h;
+  CPUX86CacheLine **pp;
+  bool found;
+
+  h     = X86_HTM_CNO_HASH_FCN(entry->cno);
+  found = 0;
+
+  // assert that no other entry exists w/ the same entry, but
+  // different pointer value
+  for (pp = &env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; *pp; pp = &((*pp)->next)) {
+    if ((*pp)->cno == entry->cno) {
+      assert((*pp) == entry);
+      found = 1;
+    }
+  }
+
+  if (!found) {
+    entry->next = 0;
+    *pp         = entry;
+  }
+
+  return !found;
+}
+
+CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno)
+{
+  target_ulong h;
+  CPUX86CacheLine **pp, *ret;
+  h = X86_HTM_CNO_HASH_FCN(cno);
+  for (pp = &env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; *pp; pp = &((*pp)->next)) {
+    if ((*pp)->cno == cno) {
+      ret       = *pp;
+      *pp       = (*pp)->next;
+      ret->next = 0;
+      return ret;
+    }
+  }
+  return 0;
 }

@@ -732,6 +732,20 @@ typedef struct CPUX86StateCheckpoint {
     uint64_t star;
 } CPUX86StateCheckpoint;
 
+#define X86_CACHE_LINE_SIZE  64
+#define X86_CACHE_LINE_SHIFT 6
+#define X86_HTM_NBUFENTRIES  1024
+#define X86_HTM_NBUCKETS     (X86_HTM_NBUFENTRIES / 2)
+
+#define X86_HTM_CNO_HASH_FCN(cno) ((cno))
+#define X86_HTM_ADDR_TO_CNO(addr) ((addr) >> X86_CACHE_LINE_SHIFT)
+
+typedef struct CPUX86CacheLine {
+  target_ulong cno; /* cache line number */
+  struct CPUX86CacheLine *next; /* next pointer, for linked-lists */
+  uint8_t data[X86_CACHE_LINE_SIZE];
+} CPUX86CacheLine;
+
 typedef struct CPUX86State {
     /* standard registers */
     target_ulong regs[CPU_NB_REGS];
@@ -901,6 +915,10 @@ typedef struct CPUX86State {
     CPUX86StateCheckpoint htm_checkpoint_state;
     uint32_t htm_nest_level;
     target_ulong htm_abort_eip;
+
+    CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
+    CPUX86CacheLine *htm_free_list;
+    CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
 } CPUX86State;
 
 #include "cpu-qom.h"
@@ -1260,5 +1278,13 @@ void do_smm_enter(CPUX86State *env1);
 void cpu_report_tpr_access(CPUX86State *env, TPRAccess access);
 
 void enable_kvm_pv_eoi(void);
+
+/* mem_helper.c */
+CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env);
+void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line);
+
+CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
+bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry);
+CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
 
 #endif /* CPU_I386_H */
