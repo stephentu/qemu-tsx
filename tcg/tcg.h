@@ -124,7 +124,7 @@ typedef struct TCGRelocation {
     int type;
     uint8_t *ptr;
     tcg_target_long addend;
-} TCGRelocation; 
+} TCGRelocation;
 
 typedef struct TCGLabel {
     int has_value;
@@ -394,7 +394,7 @@ struct TCGContext {
     int nb_globals;
     int nb_temps;
     /* index of free temps, -1 if none */
-    int first_free_temp[TCG_TYPE_COUNT * 2]; 
+    int first_free_temp[TCG_TYPE_COUNT * 2];
 
     /* goto_tb support */
     uint8_t *code_buf;
@@ -408,7 +408,7 @@ struct TCGContext {
     uint8_t *op_sync_args;  /* for each operation, each bit tells if the
                                corresponding output argument needs to be
                                sync to memory. */
-    
+
     /* tells in which temporary a given register is. It does not take
        into account fixed registers */
     int reg_to_temp[TCG_TARGET_NB_REGS];
@@ -616,6 +616,7 @@ void tcg_add_target_add_op_defs(const TCGTargetOpDef *tdefs);
 #define tcg_global_mem_new_ptr(R, O, N) \
     TCGV_NAT_TO_PTR(tcg_global_mem_new_i32((R), (O), (N)))
 #define tcg_temp_new_ptr() TCGV_NAT_TO_PTR(tcg_temp_new_i32())
+#define tcg_temp_local_new_ptr() TCGV_NAT_TO_PTR(tcg_temp_local_new_i32())
 #define tcg_temp_free_ptr(T) tcg_temp_free_i32(TCGV_PTR_TO_NAT(T))
 #else
 #define TCGV_NAT_TO_PTR(n) MAKE_TCGV_PTR(GET_TCGV_I64(n))
@@ -627,6 +628,7 @@ void tcg_add_target_add_op_defs(const TCGTargetOpDef *tdefs);
 #define tcg_global_mem_new_ptr(R, O, N) \
     TCGV_NAT_TO_PTR(tcg_global_mem_new_i64((R), (O), (N)))
 #define tcg_temp_new_ptr() TCGV_NAT_TO_PTR(tcg_temp_new_i64())
+#define tcg_temp_local_new_ptr() TCGV_NAT_TO_PTR(tcg_temp_local_new_i64())
 #define tcg_temp_free_ptr(T) tcg_temp_free_i64(TCGV_PTR_TO_NAT(T))
 #endif
 

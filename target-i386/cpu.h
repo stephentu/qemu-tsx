@@ -737,8 +737,11 @@ typedef struct CPUX86StateCheckpoint {
 #define X86_HTM_NBUFENTRIES  1024
 #define X86_HTM_NBUCKETS     (X86_HTM_NBUFENTRIES / 2)
 
-#define X86_HTM_CNO_HASH_FCN(cno) ((cno))
-#define X86_HTM_ADDR_TO_CNO(addr) ((addr) >> X86_CACHE_LINE_SHIFT)
+#define X86_HTM_CNO_HASH_FCN(cno)    ((cno))
+#define X86_HTM_ADDR_TO_CNO(addr)    ((addr) >> X86_CACHE_LINE_SHIFT)
+#define X86_HTM_ADDR_CL_OFFSET(addr) ((addr) % X86_CACHE_LINE_SHIFT)
+#define X86_HTM_CNO_TO_ADDR(cno)     ((unsigned long)(cno) << X86_CACHE_LINE_SHIFT)
+#define X86_HTM_IN_TXN(env)          ((env)->htm_nest_level)
 
 typedef struct CPUX86CacheLine {
   target_ulong cno; /* cache line number */

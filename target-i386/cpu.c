@@ -1901,6 +1901,15 @@ static void x86_cpu_reset(CPUState *s)
     // no HTM nesting to begin with
     env->htm_nest_level = 0;
 
+    env->htm_free_list = 0;
+    for (i = 0; i < X86_HTM_NBUFENTRIES; i++) {
+      env->htm_cache_lines[i].next = env->htm_free_list;
+      env->htm_free_list = &env->htm_cache_lines[i];
+    }
+
+    for (i = 0; i < X86_HTM_NBUCKETS; i++)
+      env->htm_hash_table[i] = 0;
+
 #if !defined(CONFIG_USER_ONLY)
     /* We hard-wire the BSP to the first CPU. */
     if (env->cpu_index == 0) {
