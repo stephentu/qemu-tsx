@@ -211,23 +211,57 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
   printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
 }
 
-void helper_htm_mem_load(
+target_ulong helper_htm_mem_load(
     CPUX86State *env, uint64_t a0, uint32_t idx)
 {
   target_ulong cno;
   CPUX86CacheLine *cline;
+  uint8_t *p;
 
-  if (X86_HTM_IN_TXN(env)) {
-    printf("helper_htm_mem_load(a0=0x%llx, idx=0x%llx) in txn\n",
-           (unsigned long long) a0,
-           (unsigned long long) idx);
+  assert(X86_HTM_IN_TXN(env));
 
-    // convert a0 to a cache line number
-    cno = X86_HTM_ADDR_TO_CNO(a0);
-    if ((cline = cpu_htm_hash_table_lookup(env, cno))) {
-      printf("cache hit! a0=0x%llx\n", (unsigned long long) a0);
-    }
+  printf("helper_htm_mem_load(a0=0x%llx, idx=0x%llx) in txn\n",
+         (unsigned long long) a0,
+         (unsigned long long) idx);
+
+  // convert a0 to a cache line number
+  cno = X86_HTM_ADDR_TO_CNO(a0);
+  if ((cline = cpu_htm_hash_table_lookup(env, cno))) {
+    printf("cache hit! a0=0x%llx\n", (unsigned long long) a0);
+    // load from cache line
+    p = (uint8_t *)(&cline->data + X86_HTM_ADDR_CL_OFFSET(a0));
+  } else {
+    // load from memory
+    p = (uint8_t *) a0;
   }
+
+  switch (idx & 3) {
+  case 0:
+    // ld8
+    return (target_ulong) *p;
+
+  case 1:
+    // ld16
+    return (target_ulong) *((uint16_t *)p);
+
+  case 2:
+    // ld32
+    return (target_ulong) *((uint32_t *)p);
+
+  default:
+  case 3:
+#ifdef TARGET_X86_64
+    // ld64
+    return (target_ulong) *((uint64_t *)p);
+
+#else
+    /* Should never happen on 32-bit targets.  */
+    assert(false);
+#endif
+    break;
+  }
+
+  return 0;
 }
 
 void helper_htm_mem_store(
@@ -241,66 +275,65 @@ void helper_htm_mem_store(
   uint16_t u16;
   uint32_t u32;
 
-  if (X86_HTM_IN_TXN(env)) {
-    printf("helper_htm_mem_store(t0=0x%llx, a0=0x%llx, idx=0x%llx) in txn\n",
-           (unsigned long long) t0,
-           (unsigned long long) a0,
-           (unsigned long long) idx);
+  assert(X86_HTM_IN_TXN(env));
 
-    // convert a0 to a cache line number
-    cno = X86_HTM_ADDR_TO_CNO(a0);
+  printf("helper_htm_mem_store(t0=0x%llx, a0=0x%llx, idx=0x%llx) in txn\n",
+         (unsigned long long) t0,
+         (unsigned long long) a0,
+         (unsigned long long) idx);
 
-    // load the cache line into per-cpu buffer
-    if (!(cline = cpu_htm_hash_table_lookup(env, cno))) {
+  // convert a0 to a cache line number
+  cno = X86_HTM_ADDR_TO_CNO(a0);
 
-      // not found, need to allocate a new cache line
-      cline = cpu_htm_get_free_cache_line(env);
-      if (!cline) {
-        // XXX: abort the txn!
-        assert(false);
-      }
+  // load the cache line into per-cpu buffer
+  if (!(cline = cpu_htm_hash_table_lookup(env, cno))) {
 
-      // read the cache line from memory, to fill the buffer
-      memmove(&cline->data, (void*) X86_HTM_CNO_TO_ADDR(cno), X86_CACHE_LINE_SIZE);
-
-      cline->cno = cno;
-      if (!(r = cpu_htm_hash_table_insert(env, cline)))
-        assert(false);
-    }
-
-    cstart = (uint8_t *) &cline->data;
-
-    switch (idx & 3) {
-    case 0:
-      // st8
-      u8 = t0;
-      *((uint8_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u8;
-      break;
-
-    case 1:
-      // st16
-      u16 = t0;
-      *((uint16_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u16;
-      break;
-
-    case 2:
-      // st32
-      u32 = t0;
-      *((uint32_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u32;
-      break;
-
-    default:
-    case 3:
-#ifdef TARGET_X86_64
-      // st64
-      *((uint64_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = t0;
-#else
-      /* Should never happen on 32-bit targets.  */
+    // not found, need to allocate a new cache line
+    cline = cpu_htm_get_free_cache_line(env);
+    if (!cline) {
+      // XXX: abort the txn!
       assert(false);
-#endif
-      break;
     }
 
+    // read the cache line from memory, to fill the buffer
+    memmove(&cline->data, (void*) X86_HTM_CNO_TO_ADDR(cno), X86_CACHE_LINE_SIZE);
+
+    cline->cno = cno;
+    if (!(r = cpu_htm_hash_table_insert(env, cline)))
+      assert(false);
+  }
+
+  cstart = (uint8_t *) &cline->data;
+
+  switch (idx & 3) {
+  case 0:
+    // st8
+    u8 = t0;
+    *((uint8_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u8;
+    break;
+
+  case 1:
+    // st16
+    u16 = t0;
+    *((uint16_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u16;
+    break;
+
+  case 2:
+    // st32
+    u32 = t0;
+    *((uint32_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = u32;
+    break;
+
+  default:
+  case 3:
+#ifdef TARGET_X86_64
+    // st64
+    *((uint64_t *)(cstart + X86_HTM_ADDR_CL_OFFSET(a0))) = t0;
+#else
+    /* Should never happen on 32-bit targets.  */
+    assert(false);
+#endif
+    break;
   }
 }
 
