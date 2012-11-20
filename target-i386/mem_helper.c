@@ -163,6 +163,27 @@ void tlb_fill(CPUX86State *env, target_ulong addr, int is_write, int mmu_idx,
 }
 #endif
 
+/**
+ * Assumes env is currently in a txn
+ */
+static inline void cpu_htm_low_level_abort(CPUX86State *env)
+{
+  assert(env->htm_nest_level);
+
+  env->htm_nest_level = 0;
+
+  // restore register state
+  memcpy((char *) env,
+         (const char *) &env->htm_checkpoint_state,
+         sizeof(CPUX86StateCheckpoint));
+
+  // restore memory state
+  cpu_htm_hash_table_reset(env);
+
+  // go to abort handler
+  env->eip = env->htm_abort_eip;
+}
+
 static void bad_cache_line_call(CPUX86CacheLine *line)
 {
   assert(false);
@@ -237,23 +258,14 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
     // no-op
     return;
 
-  env->htm_nest_level = 0;
-
-  // restore register state
-  memcpy((char *) env,
-         (const char *) &env->htm_checkpoint_state,
-         sizeof(CPUX86StateCheckpoint));
-
-  // restore memory state
-  cpu_htm_hash_table_reset(env);
+  // restore architectural state, set EIP appropriately
+  cpu_htm_low_level_abort(env);
 
   // set high bits of EAX to imm8
   env->regs[R_EAX] |= imm8 << 24;
 
   // XXX: what else do we need to do to EAX?
 
-  // go to abort handler
-  env->eip = env->htm_abort_eip;
   printf("set env to go to eip=0x%llx\n", (unsigned long long) env->eip);
   printf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
@@ -486,8 +498,8 @@ void helper_htm_mem_store(
     if (cno0 == cno1) {
       cline0 = cline1 = load_cacheline(env, cno0, true);
       if (!cline0) {
-        // XXX: abort txn
-        assert(false);
+        cpu_htm_low_level_abort(env);
+        cpu_loop_exit(env); /* jump back to QEMU CPU loop */
       }
       p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
       p1 = 0;
@@ -497,8 +509,8 @@ void helper_htm_mem_store(
       cline0 = load_cacheline(env, cno0, true);
       cline1 = load_cacheline(env, cno1, true);
       if (!cline0 || !cline1) {
-        // XXX: abort txn
-        assert(false);
+        cpu_htm_low_level_abort(env);
+        cpu_loop_exit(env); /* jump back to QEMU CPU loop */
       }
       SANITY_ASSERT(cline0 != cline1);
       split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
