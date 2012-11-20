@@ -163,54 +163,6 @@ void tlb_fill(CPUX86State *env, target_ulong addr, int is_write, int mmu_idx,
 }
 #endif
 
-//static inline target_ulong
-//do_memory_load(uint8_t *p, int idx, bool sign)
-//{
-//  switch (idx & 3) {
-//  case 0:
-//    // ld8
-//
-//    if (sign)
-//      return (target_ulong) ((int8_t)*p);
-//    else
-//      return (target_ulong) *p;
-//
-//  case 1:
-//    // ld16
-//
-//    if (sign)
-//      return (target_ulong) ((int16_t)tswap16(*((uint16_t *)p)));
-//    else
-//      return (target_ulong) tswap16(*((uint16_t *)p));
-//
-//  case 2:
-//    // ld32
-//
-//    if (sign)
-//      return (target_ulong) ((int32_t)tswap32(*((uint32_t *)p)));
-//    else
-//      return (target_ulong) tswap32(*((uint32_t *)p));
-//
-//  default:
-//  case 3:
-//#ifdef TARGET_X86_64
-//    // ld64
-//
-//    if (sign)
-//      return (target_ulong) ((int64_t)tswap64(*((uint64_t *)p)));
-//    else
-//      return (target_ulong) tswap64(*((uint64_t *)p));
-//
-//#else
-//    /* Should never happen on 32-bit targets.  */
-//    assert(false);
-//#endif
-//    break;
-//  }
-//
-//  return 0;
-//}
-
 static void bad_cache_line_call(CPUX86CacheLine *line)
 {
   assert(false);
@@ -382,7 +334,8 @@ static inline target_ulong helper_htm_mem_load_helper(
 
     // convert a0 to cache line number(s)
     cno0 = X86_HTM_ADDR_TO_CNO(a0);
-    cno1 = X86_HTM_ADDR_TO_CNO(a0 + size);
+    cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
+      cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
     SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
 
     if (cno0 == cno1) {
@@ -390,6 +343,7 @@ static inline target_ulong helper_htm_mem_load_helper(
       if (cline0) {
         p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
         p1 = 0;
+        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
       } else {
         p0 = (uint8_t *)((uintptr_t)a0);
         p1 = 0;
@@ -397,18 +351,22 @@ static inline target_ulong helper_htm_mem_load_helper(
     } else {
       cline0 = load_cacheline(env, cno0, false);
       cline1 = load_cacheline(env, cno1, false);
-      SANITY_ASSERT(cline0 != cline1);
+      SANITY_ASSERT((!cline0 && !cline1) || (cline0 != cline1));
       split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
 
-      if (cline0)
+      if (cline0) {
         p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-      else
+        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+      } else
         p0 = (uint8_t *)((uintptr_t)a0);
 
-      if (cline1)
+      if (cline1) {
         p1 = (uint8_t *)(&cline1->data[0]);
-      else
+        SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
+      } else
         p1 = (uint8_t *)((uintptr_t)a0 + split);
+
+      SANITY_ASSERT(size > split);
     }
 
   } else {
@@ -417,11 +375,14 @@ static inline target_ulong helper_htm_mem_load_helper(
   }
 
   SANITY_ASSERT(size >= split);
+  SANITY_ASSERT((size != split) || !p1);
+
   do_split_read(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
 
   switch (idx & 3) {
   case 0:
     SANITY_ASSERT(!p1);
+    SANITY_ASSERT(split == 1);
     if (sign)
       return (target_ulong) (int8_t)buf[0];
     else
@@ -511,7 +472,8 @@ void helper_htm_mem_store(
 
     // convert a0 to cache line number(s)
     cno0 = X86_HTM_ADDR_TO_CNO(a0);
-    cno1 = X86_HTM_ADDR_TO_CNO(a0 + size);
+    cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
+      cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
     SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
 
     printf("helper_htm_mem_store: store %d bytes t0=(0x%llx) "
@@ -529,6 +491,8 @@ void helper_htm_mem_store(
       }
       p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
       p1 = 0;
+
+      SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
     } else {
       cline0 = load_cacheline(env, cno0, true);
       cline1 = load_cacheline(env, cno1, true);
@@ -540,6 +504,10 @@ void helper_htm_mem_store(
       split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
       p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
       p1 = (uint8_t *)(&cline1->data[0]);
+
+      SANITY_ASSERT(size > split);
+      SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+      SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
     }
   } else {
     p0 = (uint8_t *)((uintptr_t)a0);
@@ -547,6 +515,7 @@ void helper_htm_mem_store(
   }
 
   SANITY_ASSERT(size >= split);
+  SANITY_ASSERT((size != split) || !p1);
 
   // see tci.c
 
