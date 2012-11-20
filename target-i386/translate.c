@@ -626,223 +626,41 @@ static inline void gen_op_addq_A0_reg_sN(int shift, int reg)
 
 static inline void gen_op_lds_T0_A0(int idx)
 {
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_ld8s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_ld16s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    default:
-    case 2:
-        tcg_gen_qemu_ld32s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    }
-}
-
-static inline void gen_helper_htm_mem_load_coerce(TCGv dst, TCGv addr, int idx)
-{
-#if TARGET_LONG_BITS == 32
-    gen_helper_htm_mem_load(dst, cpu_env,
-        MAKE_TCGV_I64(GET_TCGV_I32(addr)), tcg_const_i32(idx));
-#else
-    gen_helper_htm_mem_load(dst, cpu_env, addr, tcg_const_i32(idx));
-#endif
-}
-
-typedef enum GenOpLdVType {
-  GEN_OP_LD_V_T0  = 0,
-  GEN_OP_LD_V_T1  = 1,
-  GEN_OP_LD_V_ARG = 2,
-} GenOpLdVType;
-
-static inline void gen_op_ld_v_op_type(int idx, GenOpLdVType op_type, TCGv t0, TCGv a0)
-{
-#if TARGET_LONG_BITS == 32
-    assert(op_type != GEN_OP_LD_V_ARG ||
-           tcg_ctx.temps[GET_TCGV_I32(t0)].temp_local);
-#else
-    assert(op_type != GEN_OP_LD_V_ARG ||
-           tcg_ctx.temps[GET_TCGV_I64(t0)].temp_local);
-#endif
-
-    TCGv tmp0, /* holds htm_nest_level */
-         tmp2, /* holds a0 */
-         tmp3; /* holds ret value from helper */
-
-    int __attribute__((unused)) bypass_label,
-        __attribute__((unused)) end_label;
-
-    qemu_log_mask(CPU_LOG_TB_IN_ASM,
-        "gen_op_ld_v_op_type: t0=0x%x, a0=0x%x, mem_idx=0x%x\n",
-#if TARGET_LONG_BITS == 32
-        GET_TCGV_I32(t0), GET_TCGV_I32(a0),
-#else
-        GET_TCGV_I64(t0), GET_TCGV_I64(a0),
-#endif
-        idx);
-
-    int mem_index = (idx >> 2) - 1;
-
-    tmp0 = tcg_temp_new();
-    tmp2 = tcg_temp_local_new(); // needs to be local
-    tmp3 = tcg_temp_local_new(); // needs to be local
-
-    tcg_gen_mov_tl(tmp2, a0);
-
-    HACK_stash_registers_across_bb();
-
-    bypass_label = gen_new_label();
-    end_label = gen_new_label();
-
-    //tcg_gen_ld_tl(tmp0, cpu_env, offsetof(CPUX86State, htm_nest_level));
-    //tcg_gen_brcondi_tl(TCG_COND_EQ, tmp0, 0, bypass_label);
-
-    //gen_helper_htm_mem_load_coerce(tmp3, tmp2, idx);
-    //tcg_gen_br(end_label);
-
-    gen_set_label(bypass_label);
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_ld8u(tmp3, tmp2, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_ld16u(tmp3, tmp2, mem_index);
-        break;
-    case 2:
-        tcg_gen_qemu_ld32u(tmp3, tmp2, mem_index);
-        break;
-    default:
-    case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_ld64(tmp3, tmp2, mem_index);
-#endif
-        break;
-    }
-
-    //gen_set_label(end_label);
-
-    tcg_temp_free(tmp0);
-    tcg_temp_free(tmp2);
-
-    HACK_restore_registers_across_bb();
-
-    switch (op_type) {
-    case GEN_OP_LD_V_T0:
-      tcg_gen_mov_tl(cpu_T[0], tmp3);
-      break;
-    case GEN_OP_LD_V_T1:
-      tcg_gen_mov_tl(cpu_T[1], tmp3);
-      break;
-    case GEN_OP_LD_V_ARG:
-      // assume arg is a local reg, so it's preserved
-      // across BBs
-      tcg_gen_mov_tl(t0, tmp3);
-      break;
-    }
-
-    tcg_temp_free(tmp3);
+  TCGv tmp;
+  tmp = tcg_temp_new();
+  gen_helper_htm_mem_loads(tmp, cpu_env, cpu_A0, tcg_const_i32(idx));
+  tcg_gen_mov_tl(cpu_T[0], tmp);
+  tcg_temp_free(tmp);
 }
 
 static inline void gen_op_ld_v(int idx, TCGv t0, TCGv a0)
 {
-    gen_op_ld_v_op_type(idx, GEN_OP_LD_V_ARG, t0, a0);
+  TCGv tmp;
+  tmp = tcg_temp_new();
+  gen_helper_htm_mem_loadu(tmp, cpu_env, a0, tcg_const_i32(idx));
+  tcg_gen_mov_tl(t0, tmp);
+  tcg_temp_free(tmp);
 }
 
 /* XXX: always use ldu or lds */
 static inline void gen_op_ld_T0_A0(int idx)
 {
-    gen_op_ld_v_op_type(idx, GEN_OP_LD_V_T0, cpu_T[0], cpu_A0);
+    gen_op_ld_v(idx, cpu_T[0], cpu_A0);
 }
 
 static inline void gen_op_ldu_T0_A0(int idx)
 {
-    gen_op_ld_v_op_type(idx, GEN_OP_LD_V_T0, cpu_T[0], cpu_A0);
+    gen_op_ld_v(idx, cpu_T[0], cpu_A0);
 }
 
 static inline void gen_op_ld_T1_A0(int idx)
 {
-    gen_op_ld_v_op_type(idx, GEN_OP_LD_V_T1, cpu_T[1], cpu_A0);
-}
-
-static inline void gen_helper_htm_mem_store_coerce(TCGv arg, TCGv addr, int idx)
-{
-#if TARGET_LONG_BITS == 32
-    gen_helper_htm_mem_store(cpu_env,
-        MAKE_TCGV_I64(GET_TCGV_I32(arg)),
-        MAKE_TCGV_I64(GET_TCGV_I32(addr)),
-        tcg_const_i32(idx));
-#else
-    gen_helper_htm_mem_store(cpu_env, arg, addr, tcg_const_i32(idx));
-#endif
+    gen_op_ld_v(idx, cpu_T[1], cpu_A0);
 }
 
 static inline void gen_op_st_v(int idx, TCGv t0, TCGv a0)
 {
-    TCGv tmp0, /* holds htm_nest_level */
-         tmp1, /* holds t0 */
-         tmp2; /* holds a0 */
-
-    int bypass_label, end_label;
-
-    qemu_log_mask(CPU_LOG_TB_IN_ASM,
-        "gen_op_st_v: t0=0x%x, a0=0x%x, mem_idx=0x%x\n",
-#if TARGET_LONG_BITS == 32
-        GET_TCGV_I32(t0), GET_TCGV_I32(a0),
-#else
-        GET_TCGV_I64(t0), GET_TCGV_I64(a0),
-#endif
-        idx);
-
-    int mem_index = (idx >> 2) - 1;
-
-    tmp0 = tcg_temp_new();
-    tmp1 = tcg_temp_local_new(); // needs to be local
-    tmp2 = tcg_temp_local_new(); // needs to be local
-
-    tcg_gen_mov_tl(tmp1, t0);
-    tcg_gen_mov_tl(tmp2, a0);
-
-    HACK_stash_registers_across_bb();
-
-    bypass_label = gen_new_label();
-    end_label = gen_new_label();
-
-    tcg_gen_ld_tl(tmp0, cpu_env, offsetof(CPUX86State, htm_nest_level));
-    tcg_gen_brcondi_tl(TCG_COND_EQ, tmp0, 0, bypass_label);
-
-    gen_helper_htm_mem_store_coerce(tmp1, tmp2, idx);
-    //tcg_gen_br(end_label); // XXX: won't work until we can commit memory
-
-    gen_set_label(bypass_label);
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_st8(tmp1, tmp2, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_st16(tmp1, tmp2, mem_index);
-        break;
-    case 2:
-        tcg_gen_qemu_st32(tmp1, tmp2, mem_index);
-        break;
-    default:
-    case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_st64(tmp1, tmp2, mem_index);
-#endif
-        break;
-    }
-
-    gen_set_label(end_label);
-
-    tcg_temp_free(tmp0);
-    tcg_temp_free(tmp1);
-    tcg_temp_free(tmp2);
-
-    HACK_restore_registers_across_bb();
+    gen_helper_htm_mem_store(cpu_env, t0, a0, tcg_const_i32(idx));
 }
 
 static inline void gen_op_st_T0_A0(int idx)

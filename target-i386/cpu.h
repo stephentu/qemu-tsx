@@ -739,7 +739,7 @@ typedef struct CPUX86StateCheckpoint {
 
 #define X86_HTM_CNO_HASH_FCN(cno)    ((cno))
 #define X86_HTM_ADDR_TO_CNO(addr)    ((addr) >> X86_CACHE_LINE_SHIFT)
-#define X86_HTM_ADDR_CL_OFFSET(addr) ((addr) % X86_CACHE_LINE_SHIFT)
+#define X86_HTM_ADDR_CL_OFFSET(addr) ((addr) % X86_CACHE_LINE_SIZE)
 #define X86_HTM_CNO_TO_ADDR(cno)     ((unsigned long)(cno) << X86_CACHE_LINE_SHIFT)
 #define X86_HTM_IN_TXN(env)          ((env)->htm_nest_level)
 
@@ -1289,5 +1289,7 @@ void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line);
 CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
 bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry);
 CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
+void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*));
+void cpu_htm_hash_table_reset(CPUX86State *env);
 
 #endif /* CPU_I386_H */
