@@ -21,7 +21,6 @@
 
 #include "config.h"
 #include "qemu-common.h"
-#include <pthread.h>
 
 #ifdef TARGET_X86_64
 #define TARGET_LONG_BITS 64
@@ -750,7 +749,6 @@ typedef struct CPUX86CacheLine {
   uint8_t data[X86_CACHE_LINE_SIZE];
 } CPUX86CacheLine;
 
-
 typedef struct CPUX86State {
     /* standard registers */
     target_ulong regs[CPU_NB_REGS];
@@ -918,36 +916,13 @@ typedef struct CPUX86State {
 
     /* For HTM */
     CPUX86StateCheckpoint htm_checkpoint_state;
-    target_ulong htm_abort_eip;
-    //XXX access to htm flags should be protected by mutex
-    //Im using the global lock table's mutex to serialize all
-    // HTM helper calls.
     uint32_t htm_nest_level;
-    //flag to be set when a transaction is open. 
-    // If true, then the transaction must abort
-    // before if commits.
-    bool htm_abort_flag;
+    target_ulong htm_abort_eip;
 
     CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
     CPUX86CacheLine *htm_free_list;
     CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
-    //for lock table linked list
-    struct CPUX86State *htm_lock_table_next;
-
 } CPUX86State;
-
-
-typedef struct CPUX86CacheLineLockLockTableEntry{
-    target_ulong cno; /* cache line number */
-    struct CPUX86CacheLineLockTableEntry *next; /* for linked-lists */
-    
-    CPUX86State *writer;
-    CPUX86State *readers;
-    
-
-} CPUX86CLTE;
-
-
 
 #include "cpu-qom.h"
 
@@ -1316,13 +1291,5 @@ bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry);
 CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
 void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*));
 void cpu_htm_hash_table_reset(CPUX86State *env);
-
-
-void init_CL_lock_table(void);
-void CL_lock_table_write(CPUX86State *env, target_ulong cno);
-void CL_lock_table_read(CPUX86State *env, target_ulong cno);
-void CL_lock_table_clear_env(CPUX86State *env);
-
-
 
 #endif /* CPU_I386_H */
