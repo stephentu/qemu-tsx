@@ -734,8 +734,13 @@ typedef struct CPUX86StateCheckpoint {
 
 #define X86_CACHE_LINE_SIZE  64
 #define X86_CACHE_LINE_SHIFT 6
+
 #define X86_HTM_NBUFENTRIES  1024
 #define X86_HTM_NBUCKETS     (X86_HTM_NBUFENTRIES / 2)
+
+#define X86_HTM_NMEMENTRIES  (X86_HTM_NBUFENTRIES * 16)
+#define X86_HTM_MAXOWNERS    16
+#define X86_HTM_NMEMBUCKETS  (X86_HTM_NMEMENTRIES / 2)
 
 #define X86_HTM_CNO_HASH_FCN(cno)    ((cno))
 #define X86_HTM_ADDR_TO_CNO(addr)    ((addr) >> X86_CACHE_LINE_SHIFT)
@@ -743,6 +748,9 @@ typedef struct CPUX86StateCheckpoint {
 #define X86_HTM_CNO_TO_ADDR(cno)     ((unsigned long)(cno) << X86_CACHE_LINE_SHIFT)
 #define X86_HTM_IN_TXN(env)          ((env)->htm_nest_level)
 
+/**
+ * The data structure which holds dirty cache lines in per-CPU store buffers
+ */
 typedef struct CPUX86CacheLine {
   target_ulong cno; /* cache line number */
   struct CPUX86CacheLine *next; /* next pointer, for linked-lists */
@@ -918,11 +926,28 @@ typedef struct CPUX86State {
     CPUX86StateCheckpoint htm_checkpoint_state;
     uint32_t htm_nest_level;
     target_ulong htm_abort_eip;
+    bool htm_needs_abort;
 
     CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
     CPUX86CacheLine *htm_free_list;
     CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
 } CPUX86State;
+
+typedef enum HTMLockMode {
+  HTM_LOCK_NONE = 0,  /* init mode */
+  HTM_LOCK_SHARED,    /* read mode */
+  HTM_LOCK_EXCLUSIVE  /* write mode */
+} HTMLockMode;
+
+/**
+ * The data structure entry which manages the shared memory amongst all CPUs
+ */
+typedef struct CPUX86CacheLineEntry {
+  target_ulong cno; /* cache line number */
+  struct CPUX86CacheLineEntry *next; /* next pointer, for linked-lists */
+  HTMLockMode mode; /* lock mode (r/w) */
+  CPUX86State *owners[X86_HTM_MAXOWNERS]; /* should be exactly one for exclusive mode */
+} CPUX86CacheLineEntry;
 
 #include "cpu-qom.h"
 

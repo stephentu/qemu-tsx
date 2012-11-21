@@ -1900,6 +1900,7 @@ static void x86_cpu_reset(CPUState *s)
 
     // no HTM nesting to begin with
     env->htm_nest_level = 0;
+    env->htm_needs_abort = false;
 
     env->htm_free_list = 0;
     for (i = 0; i < X86_HTM_NBUFENTRIES; i++) {

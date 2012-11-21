@@ -164,23 +164,314 @@ void tlb_fill(CPUX86State *env, target_ulong addr, int is_write, int mmu_idx,
 #endif
 
 /**
+ * Very coarse grain memory latching for now.
+ *
+ * XXX: fixme
+ */
+static spinlock_t cpu_mem_lock = SPIN_LOCK_UNLOCKED;
+
+static inline void lock_cpu_mem(void)
+{
+#if defined(CONFIG_USER_ONLY)
+  if (spin_lock(&cpu_mem_lock))
+    assert(false);
+#else
+  spin_lock(&cpu_mem_lock);
+#endif
+}
+
+static inline void unlock_cpu_mem(void)
+{
+#if defined(CONFIG_USER_ONLY)
+  if (spin_unlock(&cpu_mem_lock))
+    assert(false);
+#else
+  spin_unlock(&cpu_mem_lock);
+#endif
+}
+
+static CPUX86CacheLineEntry cpu_htm_mem_entries[X86_HTM_NMEMENTRIES];
+static CPUX86CacheLineEntry *cpu_htm_mem_hash_table[X86_HTM_NMEMBUCKETS];
+
+static CPUX86CacheLineEntry*
+cpu_htm_mem_free_list_init(void)
+{
+  CPUX86CacheLineEntry *ret;
+  int i;
+  ret = 0;
+  for (i = 0; i < X86_HTM_NMEMENTRIES; i++) {
+    cpu_htm_mem_entries[i].next = ret;
+    ret = &cpu_htm_mem_entries[i];
+  }
+  return ret;
+}
+
+static CPUX86CacheLineEntry**
+cpu_htm_mem_free_list(void)
+{
+  static CPUX86CacheLineEntry *free_list = 0;
+  if (free_list)
+    return &free_list;
+  lock_cpu_mem();
+  if (!free_list)
+    free_list = cpu_htm_mem_free_list_init();
+  unlock_cpu_mem();
+  assert(free_list);
+  return &free_list;
+}
+
+
+
+static void
+cpu_htm_mem_entry_return(CPUX86CacheLineEntry *entry)
+{
+  CPUX86CacheLineEntry **free_list;
+  free_list = cpu_htm_mem_free_list();
+  entry->next = *free_list;
+  *free_list = entry;
+}
+
+#if defined(CONFIG_USER_ONLY)
+static bool
+cpu_htm_mem_hash_table_insert(CPUX86CacheLineEntry **ht, CPUX86CacheLineEntry *entry)
+{
+  target_ulong h;
+  CPUX86CacheLineEntry **pp;
+  bool found;
+
+  h     = X86_HTM_CNO_HASH_FCN(entry->cno);
+  found = 0;
+
+  // assert that no other entry exists w/ the same entry, but
+  // different pointer value
+  for (pp = &ht[h % X86_HTM_NMEMBUCKETS]; *pp; pp = &((*pp)->next)) {
+    if ((*pp)->cno == entry->cno) {
+      assert((*pp) == entry);
+      found = 1;
+    }
+  }
+
+  if (!found) {
+    entry->next = 0;
+    *pp         = entry;
+  }
+
+  return !found;
+}
+
+static CPUX86CacheLineEntry*
+cpu_htm_mem_free_entry(void)
+{
+  CPUX86CacheLineEntry *ret, **free_list;
+  free_list = cpu_htm_mem_free_list();
+  if (!*free_list)
+    return 0;
+  ret = *free_list;
+  *free_list = ret->next;
+  ret->next = 0;
+  return ret;
+}
+
+static CPUX86CacheLineEntry*
+cpu_htm_mem_hash_table_lookup(CPUX86CacheLineEntry **ht, target_ulong cno)
+{
+  target_ulong h;
+  CPUX86CacheLineEntry *p;
+  h = X86_HTM_CNO_HASH_FCN(cno);
+  for (p = ht[h % X86_HTM_NMEMBUCKETS]; p; p = p->next) {
+    if (p->cno == cno)
+      return p;
+  }
+  return 0;
+}
+
+static CPUX86CacheLineEntry*
+cpu_htm_mem_hash_table_lookup_or_create(CPUX86CacheLineEntry **ht, target_ulong cno)
+{
+  CPUX86CacheLineEntry *ret;
+  if (!(ret = cpu_htm_mem_hash_table_lookup(ht, cno)))
+    if ((ret = cpu_htm_mem_free_entry())) {
+      ret->cno = cno;
+      ret->mode = HTM_LOCK_NONE;
+      memset(&ret->owners[0], 0, sizeof(CPUX86State*) * X86_HTM_MAXOWNERS);
+      if (!cpu_htm_mem_hash_table_insert(ht, ret))
+        assert(false);
+    }
+  return ret;
+}
+
+//static CPUX86CacheLineEntry*
+//cpu_htm_mem_hash_table_remove(CPUX86CacheLineEntry **ht, target_ulong cno)
+//{
+//  target_ulong h;
+//  CPUX86CacheLineEntry **pp, *ret;
+//  h = X86_HTM_CNO_HASH_FCN(cno);
+//  for (pp = &ht[h % X86_HTM_NMEMBUCKETS]; *pp; pp = &((*pp)->next)) {
+//    if ((*pp)->cno == cno) {
+//      ret       = *pp;
+//      *pp       = (*pp)->next;
+//      ret->next = 0;
+//      return ret;
+//    }
+//  }
+//  return 0;
+//}
+#endif /* defined(CONFIG_USER_ONLY) */
+
+static inline bool
+cpu_htm_mem_entry_is_owner(
+    const CPUX86CacheLineEntry *entry,
+    HTMLockMode mode, const CPUX86State *env)
+{
+  int i;
+  if (entry->mode != mode)
+    return false;
+  for (i = 0; i < X86_HTM_MAXOWNERS; i++)
+    if (entry->owners[i] == env)
+      return true;
+  return false;
+}
+
+/**
+ * Does each byte in [p, p+n) equal val
+ */
+static inline bool
+mem_byte_eq(const uint8_t *p, size_t n, uint8_t val)
+{
+  size_t i;
+  for (i = 0; i < n; i++)
+    if (p[i] != val)
+      return false;
+  return true;
+}
+
+static inline void
+cpu_htm_mem_hash_table_remove_env(
+    CPUX86CacheLineEntry **ht,
+    CPUX86State *env)
+{
+  int i, j, cnt;
+  CPUX86CacheLineEntry **pp, *p;
+  CPUX86State *buf[X86_HTM_MAXOWNERS] = {0};
+
+  // XXX: inefficient implementation
+  // iterate through each entry and remove this env from owners.
+  // if this owner was the last one, remove the entry from the table
+  for (i = 0; i < X86_HTM_NMEMBUCKETS; i++) {
+    for (pp = &cpu_htm_mem_hash_table[i]; *pp; pp = &((*pp)->next)) {
+      cnt = 0;
+      for (j = 0; j < X86_HTM_MAXOWNERS; j++) {
+        if ((*pp)->owners[j] == env)
+          ; // purge
+        else if ((*pp)->owners[j])
+          // copy over
+          buf[cnt++] = (*pp)->owners[j];
+        else
+          // done
+          break;
+      }
+      if (cnt == 0) {
+        // purge it
+        p       = *pp;
+        *pp     = (*pp)->next;
+        p->next = 0;
+        cpu_htm_mem_entry_return(p);
+      } else {
+        // update owners list
+        memcpy(&((*pp)->owners[0]), &buf[0], sizeof(env) * X86_HTM_MAXOWNERS);
+      }
+    }
+  }
+}
+
+static inline bool
+cpu_htm_mem_entry_upgrade_owner(
+    CPUX86CacheLineEntry *entry,
+    HTMLockMode mode, CPUX86State *env)
+{
+  int i;
+  const size_t owners_size = sizeof(entry) * X86_HTM_MAXOWNERS;
+
+  // need to supply a locking mode
+  SANITY_ASSERT(mode > HTM_LOCK_NONE);
+
+  switch (entry->mode) {
+  case HTM_LOCK_NONE:
+    // no one previously held the lock, so any upgrade is fine
+    SANITY_ASSERT(mem_byte_eq((const uint8_t *) &entry->owners[0], owners_size, 0));
+    entry->mode = mode;
+    entry->owners[0] = env;
+    return true;
+
+  case HTM_LOCK_SHARED:
+    if (mode == HTM_LOCK_SHARED) {
+      if (cpu_htm_mem_entry_is_owner(entry, mode, env))
+        // already owner
+        return true;
+
+      for (i = 0; i < X86_HTM_MAXOWNERS; i++) {
+        if (!entry->owners[i]) {
+          entry->owners[i] = env;
+          return true;
+        } else {
+          SANITY_ASSERT(entry->owners[i] != env);
+        }
+      }
+
+      // could not find entry
+      return false;
+
+    } else {
+      // exclusive mode
+      SANITY_ASSERT(entry->owners[0]);
+      if (entry->owners[0] == env &&
+          mem_byte_eq((const uint8_t *) &entry->owners[1], owners_size - sizeof(entry), 0)) {
+        // single reader -> exclusive writer upgrade
+        entry->mode = HTM_LOCK_EXCLUSIVE;
+        return true;
+      }
+
+      // cannot become owner
+      return false;
+    }
+
+  case HTM_LOCK_EXCLUSIVE:
+    // only if it already owns the write lock
+    return entry->owners[0] == env;
+
+  default:
+    assert(false); // should not happen
+  }
+
+  return false;
+}
+
+/**
  * Assumes env is currently in a txn
+ *
+ * WARNING: assumes that mem_lock is held!
  */
 static inline void cpu_htm_low_level_abort(CPUX86State *env)
 {
   assert(env->htm_nest_level);
 
   env->htm_nest_level = 0;
+  env->htm_needs_abort = 0;
 
   // restore register state
   memcpy((char *) env,
          (const char *) &env->htm_checkpoint_state,
          sizeof(CPUX86StateCheckpoint));
 
-  // restore memory state
+  // restore local memory state
   cpu_htm_hash_table_reset(env);
 
-  // go to abort handler
+  // restore global memory state - this is a no-op
+
+  // release locks
+  cpu_htm_mem_hash_table_remove_env(cpu_htm_mem_hash_table, env);
+
+  // set env eip to abort handler
   env->eip = env->htm_abort_eip;
 }
 
@@ -194,6 +485,14 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
   printf("helper_xbegin(): abort=0x%llx\n", (unsigned long long) abort_addr);
   printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
+
+  if (env->htm_needs_abort) {
+    lock_cpu_mem();
+    cpu_htm_low_level_abort(env);
+    unlock_cpu_mem();
+    cpu_loop_exit(env);
+  }
+
   if (env->htm_nest_level++ == 0) {
     // begin of HTM region
     printf("htm region begin- checkpointing CPU state\n");
@@ -201,6 +500,7 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
            (const char *) env,
            sizeof(CPUX86StateCheckpoint));
     env->htm_abort_eip = abort_addr;
+    env->htm_needs_abort = 0;
 
     // assert no dirty cache lines (since we were previously not in txn)
     cpu_htm_hash_table_iterate(env, bad_cache_line_call);
@@ -237,16 +537,30 @@ void helper_xend(CPUX86State *env)
   printf("helper_xend()\n");
   // XXX: signal processor exception
   assert(env->htm_nest_level > 0);
-  if (--env->htm_nest_level == 0) {
-    printf("htm region end\n");
 
-    // commit memory changes
-    cpu_htm_hash_table_iterate(env, cache_line_commit);
-    cpu_htm_hash_table_reset(env);
+  lock_cpu_mem();
+  {
+    if (env->htm_needs_abort) {
+      cpu_htm_low_level_abort(env);
+      unlock_cpu_mem();
+      cpu_loop_exit(env); // does not return
+    }
 
-    printf("memory changes commited\n");
-    assert(env->htm_nest_level == 0);
+    if (--env->htm_nest_level == 0) {
+      printf("htm region end\n");
+
+      // commit memory changes
+      cpu_htm_hash_table_iterate(env, cache_line_commit);
+      cpu_htm_hash_table_reset(env);
+
+      // release locks
+      cpu_htm_mem_hash_table_remove_env(cpu_htm_mem_hash_table, env);
+
+      printf("memory changes commited\n");
+      assert(env->htm_nest_level == 0);
+    }
   }
+  unlock_cpu_mem();
 }
 
 void helper_xabort(CPUX86State *env, int32_t imm8)
@@ -258,8 +572,16 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
     // no-op
     return;
 
-  // restore architectural state, set EIP appropriately
-  cpu_htm_low_level_abort(env);
+  lock_cpu_mem();
+  {
+    SANITY_ASSERT(env->htm_nest_level);
+    env->htm_nest_level = 0;
+    env->htm_needs_abort = 0;
+
+    // restore architectural state, set EIP appropriately
+    cpu_htm_low_level_abort(env);
+  }
+  unlock_cpu_mem();
 
   // set high bits of EAX to imm8
   env->regs[R_EAX] |= imm8 << 24;
@@ -334,99 +656,171 @@ static inline target_ulong helper_htm_mem_load_helper(
   SANITY_ASSERT(sizeof(target_ulong) <= X86_CACHE_LINE_SIZE);
 
   target_ulong cno0, cno1; /* need at most two cache lines */
+  target_ulong retval;
   CPUX86CacheLine *cline0, *cline1;
+  CPUX86CacheLineEntry *gline0, *gline1;
 
   uint8_t *p0, *p1, buf[sizeof(target_ulong)];
   uint32_t split, size;
 
+  const char *reason;
+
   size = mem_idx_to_size(idx);
   split = size;
 
-  if (X86_HTM_IN_TXN(env)) {
+  // convert a0 to cache line number(s)
+  cno0 = X86_HTM_ADDR_TO_CNO(a0);
+  cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
+    cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
+  SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
 
-    // convert a0 to cache line number(s)
-    cno0 = X86_HTM_ADDR_TO_CNO(a0);
-    cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
-      cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
-    SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
-
-    if (cno0 == cno1) {
-      cline0 = cline1 = load_cacheline(env, cno0, false);
-      if (cline0) {
-        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-        p1 = 0;
-        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-      } else {
-        p0 = (uint8_t *)((uintptr_t)a0);
-        p1 = 0;
+  lock_cpu_mem();
+  {
+    if (X86_HTM_IN_TXN(env)) {
+      if (env->htm_needs_abort) {
+        reason = "aborted by another CPU";
+        goto abort_txn;
       }
+
+      if (cno0 == cno1) {
+        gline0 = gline1 =
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        if (!gline0) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_SHARED, env)) {
+          reason = "could not acquire read lock";
+          goto abort_txn;
+        }
+
+        // owner of (at least a) read lock, proceed with read
+        cline0 = cline1 = load_cacheline(env, cno0, false);
+        if (cline0) {
+          p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
+          p1 = 0;
+          SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+        } else {
+          p0 = (uint8_t *)((uintptr_t)a0);
+          p1 = 0;
+        }
+      } else {
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        if (!gline0) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_SHARED, env)) {
+          reason = "could not acquire read lock";
+          goto abort_txn;
+        }
+
+        if (!gline1) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline1, HTM_LOCK_SHARED, env)) {
+          reason = "could not acquire read lock";
+          goto abort_txn;
+        }
+
+        cline0 = load_cacheline(env, cno0, false);
+        cline1 = load_cacheline(env, cno1, false);
+        SANITY_ASSERT((!cline0 && !cline1) || (cline0 != cline1));
+        split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
+
+        if (cline0) {
+          p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
+          SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+        } else
+          p0 = (uint8_t *)((uintptr_t)a0);
+
+        if (cline1) {
+          p1 = (uint8_t *)(&cline1->data[0]);
+          SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
+        } else
+          p1 = (uint8_t *)((uintptr_t)a0 + split);
+
+        SANITY_ASSERT(size > split);
+      }
+
     } else {
-      cline0 = load_cacheline(env, cno0, false);
-      cline1 = load_cacheline(env, cno1, false);
-      SANITY_ASSERT((!cline0 && !cline1) || (cline0 != cline1));
-      split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
+      if (cno0 == cno1) {
+        gline0 = gline1 =
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+      } else {
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+      }
 
-      if (cline0) {
-        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-      } else
-        p0 = (uint8_t *)((uintptr_t)a0);
+      if (gline0 && gline0->mode == HTM_LOCK_EXCLUSIVE) {
+        // must abort writer
+        SANITY_ASSERT(gline0->owners[0]->htm_nest_level);
+        gline0->owners[0]->htm_needs_abort = true;
+      }
 
-      if (cline1) {
-        p1 = (uint8_t *)(&cline1->data[0]);
-        SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
-      } else
-        p1 = (uint8_t *)((uintptr_t)a0 + split);
+      if (gline1 && gline1->mode == HTM_LOCK_EXCLUSIVE) {
+        // must abort writer
+        SANITY_ASSERT(gline1->owners[0]->htm_nest_level);
+        gline1->owners[0]->htm_needs_abort = true;
+      }
 
-      SANITY_ASSERT(size > split);
+      // note the entries are cleaned up by the cpu's abort process, so we
+      // leave them for now
+
+      p0 = (uint8_t *)((uintptr_t)a0);
+      p1 = 0;
     }
 
-  } else {
-    p0 = (uint8_t *)((uintptr_t)a0);
-    p1 = 0;
-  }
+    SANITY_ASSERT(size >= split);
+    SANITY_ASSERT((size != split) || !p1);
 
-  SANITY_ASSERT(size >= split);
-  SANITY_ASSERT((size != split) || !p1);
+    do_split_read(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
 
-  do_split_read(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
+    switch (idx & 3) {
+    case 0:
+      SANITY_ASSERT(!p1);
+      SANITY_ASSERT(split == 1);
+      if (sign)
+        retval = (target_ulong) (int8_t)buf[0];
+      else
+        retval = (target_ulong) buf[0];
 
-  switch (idx & 3) {
-  case 0:
-    SANITY_ASSERT(!p1);
-    SANITY_ASSERT(split == 1);
-    if (sign)
-      return (target_ulong) (int8_t)buf[0];
-    else
-      return (target_ulong) buf[0];
+    case 1:
+      if (sign)
+        retval = (target_ulong) (int16_t)tswap16(*((uint16_t *)buf));
+      else
+        retval = (target_ulong) tswap16(*((uint16_t *)buf));
 
-  case 1:
-    if (sign)
-      return (target_ulong) (int16_t)tswap16(*((uint16_t *)buf));
-    else
-      return (target_ulong) tswap16(*((uint16_t *)buf));
+    case 2:
+      if (sign)
+        retval = (target_ulong) (int32_t)tswap32(*((uint32_t *)buf));
+      else
+        retval = (target_ulong) tswap32(*((uint32_t *)buf));
 
-  case 2:
-    if (sign)
-      return (target_ulong) (int32_t)tswap32(*((uint32_t *)buf));
-    else
-      return (target_ulong) tswap32(*((uint32_t *)buf));
-
-  default:
-  case 3:
+    default:
+    case 3:
 #ifdef TARGET_X86_64
-    if (sign)
-      return (target_ulong) (int64_t)tswap64(*((uint64_t *)buf));
-    else
-      return (target_ulong) tswap64(*((uint64_t *)buf));
+      if (sign)
+        retval = (target_ulong) (int64_t)tswap64(*((uint64_t *)buf));
+      else
+        retval = (target_ulong) tswap64(*((uint64_t *)buf));
 #else
-    /* Should never happen on 32-bit targets.  */
-    assert(false);
+      /* Should never happen on 32-bit targets.  */
+      assert(false);
 #endif
-    break;
+      break;
+    }
   }
+  unlock_cpu_mem();
 
-  // not reached
+  return retval;
+
+  /** WARNING: mem lock is held when coming here */
+abort_txn:
+  SANITY_ASSERT(X86_HTM_IN_TXN(env));
+  printf("aborting txn because: %s\n", reason);
+  cpu_htm_low_level_abort(env);
+  unlock_cpu_mem();
+  cpu_loop_exit(env);
   return 0;
 }
 #else
@@ -466,11 +860,13 @@ void helper_htm_mem_store(
 {
   target_ulong cno0, cno1; /* need at most two cache lines */
   CPUX86CacheLine *cline0, *cline1;
+  CPUX86CacheLineEntry *gline0, *gline1;
 
+  int i;
   uint8_t *p0, *p1, buf[sizeof(t0)];
   uint32_t split, size;
 
-  cline0 = cline1 = 0;
+  const char *reason;
 
   // split means the following:
   // the first split bytes of buf are written to [p0, p0 + split)
@@ -480,89 +876,163 @@ void helper_htm_mem_store(
   size = mem_idx_to_size(idx);
   split = size;
 
-  if (X86_HTM_IN_TXN(env)) {
+  // convert a0 to cache line number(s)
+  cno0 = X86_HTM_ADDR_TO_CNO(a0);
+  cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
+    cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
+  SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
 
-    // convert a0 to cache line number(s)
-    cno0 = X86_HTM_ADDR_TO_CNO(a0);
-    cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
-      cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
-    SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
+  lock_cpu_mem();
+  {
+    if (X86_HTM_IN_TXN(env)) {
 
-    printf("helper_htm_mem_store: store %d bytes t0=(0x%llx) "
-           "into addr=(0x%llx), cache_line_addr=(0x%llx)\n",
-           size,
-           (unsigned long long) t0,
-           (unsigned long long) a0,
-           (unsigned long long) X86_HTM_CNO_TO_ADDR(cno0));
+      printf("helper_htm_mem_store: store %d bytes t0=(0x%llx) "
+             "into addr=(0x%llx), cache_line_addr=(0x%llx)\n",
+             size,
+             (unsigned long long) t0,
+             (unsigned long long) a0,
+             (unsigned long long) X86_HTM_CNO_TO_ADDR(cno0));
 
-    if (cno0 == cno1) {
-      cline0 = cline1 = load_cacheline(env, cno0, true);
-      if (!cline0) {
-        cpu_htm_low_level_abort(env);
-        cpu_loop_exit(env); /* jump back to QEMU CPU loop */
+      if (env->htm_needs_abort) {
+        reason = "aborted by another CPU";
+        goto abort_txn;
       }
-      p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-      p1 = 0;
 
-      SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+      if (cno0 == cno1) {
+        gline0 = gline1 =
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        if (!gline0) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_EXCLUSIVE, env)) {
+          reason = "could not acquire write lock";
+          goto abort_txn;
+        }
+
+        cline0 = cline1 = load_cacheline(env, cno0, true);
+        if (!cline0) {
+          reason = "no local table space";
+          goto abort_txn;
+        }
+        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
+        p1 = 0;
+
+        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+      } else {
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        if (!gline0) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_EXCLUSIVE, env)) {
+          reason = "could not acquire write lock";
+          goto abort_txn;
+        }
+
+        if (!gline1) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(gline1, HTM_LOCK_EXCLUSIVE, env)) {
+          reason = "could not acquire write lock";
+          goto abort_txn;
+        }
+
+        cline0 = load_cacheline(env, cno0, true);
+        cline1 = load_cacheline(env, cno1, true);
+        if (!cline0 || !cline1) {
+          reason = "no local table space";
+          goto abort_txn;
+        }
+        SANITY_ASSERT(cline0 != cline1);
+        split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
+        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
+        p1 = (uint8_t *)(&cline1->data[0]);
+
+        SANITY_ASSERT(size > split);
+        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
+        SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
+      }
     } else {
-      cline0 = load_cacheline(env, cno0, true);
-      cline1 = load_cacheline(env, cno1, true);
-      if (!cline0 || !cline1) {
-        cpu_htm_low_level_abort(env);
-        cpu_loop_exit(env); /* jump back to QEMU CPU loop */
+      if (cno0 == cno1) {
+        gline0 = gline1 =
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+      } else {
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
       }
-      SANITY_ASSERT(cline0 != cline1);
-      split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
-      p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-      p1 = (uint8_t *)(&cline1->data[0]);
 
-      SANITY_ASSERT(size > split);
-      SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-      SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
+      // non-txn writes abort all txns holding any sort of lock
+
+      if (gline0 && gline0->mode != HTM_LOCK_NONE) {
+        for (i = 0; i < X86_HTM_MAXOWNERS; i++) {
+          if (!gline0->owners[i])
+            continue;
+          SANITY_ASSERT(gline0->owners[i]->htm_nest_level);
+          gline0->owners[i]->htm_needs_abort = 1;
+        }
+      }
+
+      if (gline1 && gline1->mode != HTM_LOCK_NONE) {
+        for (i = 0; i < X86_HTM_MAXOWNERS; i++) {
+          if (!gline1->owners[i])
+            continue;
+          SANITY_ASSERT(gline1->owners[i]->htm_nest_level);
+          gline1->owners[i]->htm_needs_abort = 1;
+        }
+      }
+
+      p0 = (uint8_t *)((uintptr_t)a0);
+      p1 = 0;
     }
-  } else {
-    p0 = (uint8_t *)((uintptr_t)a0);
-    p1 = 0;
-  }
 
-  SANITY_ASSERT(size >= split);
-  SANITY_ASSERT((size != split) || !p1);
+    SANITY_ASSERT(size >= split);
+    SANITY_ASSERT((size != split) || !p1);
 
-  // see tci.c
+    // see tci.c
 
-  switch (idx & 3) {
-  case 0:
-    // st8
-    SANITY_ASSERT(!p1);
-    SANITY_ASSERT(split == 1);
-    *(p0 + GUEST_BASE) = (uint8_t)t0;
-    break;
+    switch (idx & 3) {
+    case 0:
+      // st8
+      SANITY_ASSERT(!p1);
+      SANITY_ASSERT(split == 1);
+      *(p0 + GUEST_BASE) = (uint8_t)t0;
+      break;
 
-  case 1:
-    // st16
-    *((uint16_t *)buf) = tswap16(t0);
-    do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-    break;
+    case 1:
+      // st16
+      *((uint16_t *)buf) = tswap16(t0);
+      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
+      break;
 
-  case 2:
-    // st32
-    *((uint32_t *)buf) = tswap32(t0);
-    do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-    break;
+    case 2:
+      // st32
+      *((uint32_t *)buf) = tswap32(t0);
+      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
+      break;
 
-  default:
-  case 3:
+    default:
+    case 3:
 #ifdef TARGET_X86_64
-    // st64
-    *((uint64_t *)buf) = tswap64(t0);
-    do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
+      // st64
+      *((uint64_t *)buf) = tswap64(t0);
+      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
 #else
-    /* Should never happen on 32-bit targets.  */
-    assert(false);
+      /* Should never happen on 32-bit targets.  */
+      assert(false);
 #endif
-    break;
+      break;
+    }
   }
+  unlock_cpu_mem();
+  return;
+
+  /** WARNING: mem lock is held when coming here */
+abort_txn:
+  SANITY_ASSERT(X86_HTM_IN_TXN(env));
+  printf("aborting txn because: %s\n", reason);
+  cpu_htm_low_level_abort(env);
+  unlock_cpu_mem();
+  cpu_loop_exit(env);
 }
 #else
 void helper_htm_mem_store(
