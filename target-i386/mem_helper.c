@@ -37,6 +37,7 @@
 
 static spinlock_t global_cpu_lock = SPIN_LOCK_UNLOCKED;
 
+
 void helper_lock(void)
 {
     spin_lock(&global_cpu_lock);
@@ -191,6 +192,7 @@ static void bad_cache_line_call(CPUX86CacheLine *line)
 
 void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 {
+  helper_lock();
   printf("helper_xbegin(): abort=0x%llx\n", (unsigned long long) abort_addr);
   printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
@@ -201,10 +203,11 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
            (const char *) env,
            sizeof(CPUX86StateCheckpoint));
     env->htm_abort_eip = abort_addr;
-
+    env->htm_abort_flag = false;
     // assert no dirty cache lines (since we were previously not in txn)
     cpu_htm_hash_table_iterate(env, bad_cache_line_call);
   }
+  helper_unlock();
 }
 
 #if defined(CONFIG_USER_ONLY)
@@ -234,11 +237,25 @@ static void cache_line_commit(CPUX86CacheLine *line)
 
 void helper_xend(CPUX86State *env)
 {
+  //serialize with global cpu lock
+  helper_lock();
   printf("helper_xend()\n");
+
+  //check abort flag
+  if(env->htm_abort_flag){
+      printf("reached xend with abort flag set, aborting.\n");
+      helper_unlock();
+      //shouldn't return
+      helper_xabort(env,0);
+      return;
+  }
+
   // XXX: signal processor exception
   assert(env->htm_nest_level > 0);
   if (--env->htm_nest_level == 0) {
     printf("htm region end\n");
+
+    //TODO: remove env from global lock table
 
     // commit memory changes
     cpu_htm_hash_table_iterate(env, cache_line_commit);
@@ -247,16 +264,24 @@ void helper_xend(CPUX86State *env)
     printf("memory changes commited\n");
     assert(env->htm_nest_level == 0);
   }
+  helper_unlock();
 }
 
 void helper_xabort(CPUX86State *env, int32_t imm8)
 {
+  //serialize with global cpu lock
+  helper_lock();
+
   printf("helper_xabort(imm8=%d)\n", imm8);
   printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
-  if (env->htm_nest_level == 0)
+  if (env->htm_nest_level == 0){
+    helper_unlock();
     // no-op
     return;
+  }
+
+  //TODO: remove env from global lock table
 
   // restore architectural state, set EIP appropriately
   cpu_htm_low_level_abort(env);
@@ -269,6 +294,7 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
   printf("set env to go to eip=0x%llx\n", (unsigned long long) env->eip);
   printf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
+  helper_unlock();
 }
 
 static inline uint32_t
@@ -296,6 +322,8 @@ load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
     cline = cpu_htm_get_free_cache_line(env);
     if (!cline)
       // cannot load cachline
+      //XXX Shouldn't this cause an abort? i.e. we've exhausted
+      // our txn buffer?
       return 0;
 
     // read the cache line from memory, to fill the buffer
@@ -666,4 +694,159 @@ void cpu_htm_hash_table_reset(CPUX86State *env)
   for (i = 0; i < X86_HTM_NBUCKETS; i++) {
     env->htm_hash_table[i] = 0;
   }
+}
+
+// The global lock table for our cache lines
+static CPUX86CLTE *htm_CL_entries[X86_HTM_NBUFENTRIES];
+
+void init_CL_lock_table(void){
+
+    //acquire the global cpu lock
+    helper_lock();
+
+    int i;
+
+    //init all entries
+    for(i=0;i < X86_HTM_NBUFENTRIES; i++){
+        CPUX86CLTE *entry = htm_CL_entries[i];
+        //XXX this is assuming cno's are 0-NBUFENTRIES
+        entry->cno = i;
+        entry->writer = NULL;
+        entry->readers = NULL;
+        entry->next = NULL;
+
+    }
+
+    //release the mutex
+    helper_unlock();
+}
+
+/**
+ ** This denotes that some cpu (denoted by env) is writing
+ ** to the cache line denoted by cno. This means we have to
+ ** abort any open transactions reading or writing to cno (
+ ** if they are from other cpus).
+ ** Additionally, if env is in a transaction, it gets set as
+ ** cno's writer in the global lock table. 
+ **/
+void CL_lock_table_write(CPUX86State *env, target_ulong cno){
+    helper_lock();
+
+    assert(cno < X86_HTM_NBUFENTRIES);
+    CPUX86CLTE *entry = htm_CL_entries[cno];
+
+    if(entry->writer && entry->writer != env){
+        //should be no readers
+        assert(!entry->readers);
+        //set abort flag on old writer
+        entry->writer->htm_abort_flag = true;
+        
+    }
+
+    else if(entry->readers){
+        //its ok if the env is the only reader
+        //we are allowed to write to a location we have
+        //previously written
+        if(entry->readers != env || entry->readers->htm_lock_table_next){
+            //iterate through readers and set their abort flags
+            while(entry->readers){
+                entry->readers->htm_abort_flag = true;
+                entry->readers = entry->readers->htm_lock_table_next;
+            }
+            
+
+        }
+        //XXX set readers list to NULL (do this here in case we are the only
+        // reader
+        entry->readers = NULL;
+    }
+
+    //update entry with new writer if in txn
+    if(env->htm_nest_level>0)
+        entry->writer = env; 
+
+    helper_unlock();
+}
+/**
+ ** This denotes that some cpu (denoted by env) is reading
+ ** the cache line denoted by cno. If there is a writer in
+ ** an open transaction, we have to abort it (if its from
+ ** another cpu).
+ ** Additionally, if env is in a transaction, it gets added
+ ** to cno's list of readers in the global lock table (if not
+ ** already in it).
+ **/
+void CL_lock_table_read(CPUX86State *env, target_ulong cno){
+    helper_lock();
+
+    assert(cno < X86_HTM_NBUFENTRIES);
+    CPUX86CLTE *entry = htm_CL_entries[cno];
+
+    if(entry->writer && entry->writer!=env){
+        //should be no readers
+        assert(!entry->readers);
+        //set abort flag on old writer
+        entry->writer->htm_abort_flag = true;
+    }
+
+    //if in txn, update readers
+    if(env->htm_nest_level>0){
+        env->htm_lock_table_next = entry->readers;
+        entry->readers = env;
+    }
+
+    helper_unlock();
+}
+
+/**
+ ** Removes this env from every global cache line
+ ** in the lock table. Occurs when a transaction is
+ ** ending. This method assumes the global cpu lock
+ ** is already held. It also assumes that env's
+ ** local cache line table is still there and is in
+ ** a txn.
+ **/
+void CL_lock_table_clear_env(CPUX86State *env){
+    //go through every cache line in htm hash table
+    int i;
+    CPUX86CacheLine *p;
+    CPUX86CLTE *pentry;
+
+    for (i = 0; i < X86_HTM_NBUCKETS; i++) {
+        for (p = env->htm_hash_table[i]; p; p = p->next) {
+            //find the cache line entry in the global table
+            pentry = htm_CL_entries[p->cno];
+            //remove env from it
+            if(pentry->writer == env){
+                assert(!pentry->readers);
+                pentry->writer = NULL;
+            }
+            else{
+                assert(!pentry->writer);
+                assert(pentry->readers);
+                //check if its first in the list
+                if(pentry->readers == env){
+                    pentry->readers = env->htm_lock_table_next;
+                    continue;
+                }
+                //find it in the readers and remove it
+                CPUX86State *prev = pentry->readers;
+                CPUX86State *readers = prev->htm_lock_table_next;
+                //since env has to be in here somewhere
+                assert(readers);
+
+                while(readers){
+                    if(readers == env){
+                        prev->htm_lock_table_next = 
+                            readers->htm_lock_table_next;
+                        break;
+                    }
+                    prev = readers;
+                    readers = prev->htm_lock_table_next;
+                }
+            }
+
+        }
+    }
+
 }
