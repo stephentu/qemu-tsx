@@ -739,7 +739,6 @@ typedef struct CPUX86StateCheckpoint {
 #define X86_HTM_NBUCKETS     (X86_HTM_NBUFENTRIES / 2)
 
 #define X86_HTM_NMEMENTRIES  (X86_HTM_NBUFENTRIES * 16)
-#define X86_HTM_MAXOWNERS    16
 #define X86_HTM_NMEMBUCKETS  (X86_HTM_NMEMENTRIES / 2)
 
 #define X86_HTM_CNO_HASH_FCN(cno)    ((cno))
@@ -926,11 +925,18 @@ typedef struct CPUX86State {
     CPUX86StateCheckpoint htm_checkpoint_state;
     uint32_t htm_nest_level;
     target_ulong htm_abort_eip;
+
+    //flag to be set when a transaction is open.
+    // If true, then the transaction must abort
+    // before if commits.
     bool htm_needs_abort;
 
     CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
     CPUX86CacheLine *htm_free_list;
     CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
+
+    //for lock table linked list
+    struct CPUX86State *htm_lock_table_next;
 } CPUX86State;
 
 typedef enum HTMLockMode {
@@ -946,7 +952,7 @@ typedef struct CPUX86CacheLineEntry {
   target_ulong cno; /* cache line number */
   struct CPUX86CacheLineEntry *next; /* next pointer, for linked-lists */
   HTMLockMode mode; /* lock mode (r/w) */
-  CPUX86State *owners[X86_HTM_MAXOWNERS]; /* should be exactly one for exclusive mode */
+  CPUX86State *owners; /* should be exactly one for exclusive mode */
 } CPUX86CacheLineEntry;
 
 #include "cpu-qom.h"
