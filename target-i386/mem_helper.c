@@ -565,8 +565,6 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
   lock_cpu_mem();
   {
     SANITY_ASSERT(env->htm_nest_level);
-    env->htm_nest_level = 0;
-    env->htm_needs_abort = 0;
 
     // restore architectural state, set EIP appropriately
     cpu_htm_low_level_abort(env);
