@@ -33,6 +33,12 @@
 #define SANITY_ASSERT(x)
 #endif /* SANITY_CHECKING */
 
+#define QPRINTF(env, fmt, ...) \
+  do { \
+    printf("%s:%d: env=(0x%llx): ", __func__, __LINE__, (unsigned long long) (env)); \
+    printf(fmt, __VA_ARGS__); \
+  } while (0)
+
 /* broken thread support */
 
 static spinlock_t global_cpu_lock = SPIN_LOCK_UNLOCKED;
@@ -190,6 +196,7 @@ static inline void unlock_cpu_mem(void)
 #endif
 }
 
+static spinlock_t init_lock = SPIN_LOCK_UNLOCKED;
 static CPUX86CacheLineEntry cpu_htm_mem_entries[X86_HTM_NMEMENTRIES];
 static CPUX86CacheLineEntry *cpu_htm_mem_hash_table[X86_HTM_NMEMBUCKETS];
 
@@ -212,15 +219,13 @@ cpu_htm_mem_free_list(void)
   static CPUX86CacheLineEntry *free_list = 0;
   if (free_list)
     return &free_list;
-  lock_cpu_mem();
+  spin_lock(&init_lock);
   if (!free_list)
     free_list = cpu_htm_mem_free_list_init();
-  unlock_cpu_mem();
+  spin_unlock(&init_lock);
   assert(free_list);
   return &free_list;
 }
-
-
 
 static void
 cpu_htm_mem_entry_return(CPUX86CacheLineEntry *entry)
@@ -286,11 +291,11 @@ cpu_htm_mem_hash_table_lookup(CPUX86CacheLineEntry **ht, target_ulong cno)
 }
 
 static CPUX86CacheLineEntry*
-cpu_htm_mem_hash_table_lookup_or_create(CPUX86CacheLineEntry **ht, target_ulong cno)
+cpu_htm_mem_hash_table_lookup_or_create(CPUX86CacheLineEntry **ht, target_ulong cno, bool create)
 {
   CPUX86CacheLineEntry *ret;
   if (!(ret = cpu_htm_mem_hash_table_lookup(ht, cno)))
-    if ((ret = cpu_htm_mem_free_entry())) {
+    if (create && (ret = cpu_htm_mem_free_entry())) {
       ret->cno = cno;
       ret->mode = HTM_LOCK_NONE;
       memset(&ret->owners[0], 0, sizeof(CPUX86State*) * X86_HTM_MAXOWNERS);
@@ -300,22 +305,6 @@ cpu_htm_mem_hash_table_lookup_or_create(CPUX86CacheLineEntry **ht, target_ulong 
   return ret;
 }
 
-//static CPUX86CacheLineEntry*
-//cpu_htm_mem_hash_table_remove(CPUX86CacheLineEntry **ht, target_ulong cno)
-//{
-//  target_ulong h;
-//  CPUX86CacheLineEntry **pp, *ret;
-//  h = X86_HTM_CNO_HASH_FCN(cno);
-//  for (pp = &ht[h % X86_HTM_NMEMBUCKETS]; *pp; pp = &((*pp)->next)) {
-//    if ((*pp)->cno == cno) {
-//      ret       = *pp;
-//      *pp       = (*pp)->next;
-//      ret->next = 0;
-//      return ret;
-//    }
-//  }
-//  return 0;
-//}
 #endif /* defined(CONFIG_USER_ONLY) */
 
 static inline bool
@@ -358,7 +347,7 @@ cpu_htm_mem_hash_table_remove_env(
   // iterate through each entry and remove this env from owners.
   // if this owner was the last one, remove the entry from the table
   for (i = 0; i < X86_HTM_NMEMBUCKETS; i++) {
-    for (pp = &cpu_htm_mem_hash_table[i]; *pp; pp = &((*pp)->next)) {
+    for (pp = &cpu_htm_mem_hash_table[i]; *pp;) {
       cnt = 0;
       for (j = 0; j < X86_HTM_MAXOWNERS; j++) {
         if ((*pp)->owners[j] == env)
@@ -379,6 +368,7 @@ cpu_htm_mem_hash_table_remove_env(
       } else {
         // update owners list
         memcpy(&((*pp)->owners[0]), &buf[0], sizeof(env) * X86_HTM_MAXOWNERS);
+        pp = &((*pp)->next);
       }
     }
   }
@@ -674,6 +664,8 @@ static inline target_ulong helper_htm_mem_load_helper(
     cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
   SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
 
+  //QPRINTF(env, "loading addr=(0x%llx)\n", (unsigned long long) a0);
+
   lock_cpu_mem();
   {
     if (X86_HTM_IN_TXN(env)) {
@@ -684,7 +676,7 @@ static inline target_ulong helper_htm_mem_load_helper(
 
       if (cno0 == cno1) {
         gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
         if (!gline0) {
           reason = "no global table space";
           goto abort_txn;
@@ -704,8 +696,8 @@ static inline target_ulong helper_htm_mem_load_helper(
           p1 = 0;
         }
       } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, true);
         if (!gline0) {
           reason = "no global table space";
           goto abort_txn;
@@ -745,22 +737,31 @@ static inline target_ulong helper_htm_mem_load_helper(
     } else {
       if (cno0 == cno1) {
         gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
       } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, false);
       }
+
+      if (gline0)
+        QPRINTF(env, "gline0 != null cno0=(%d)\n", (int) cno0);
+      if (gline1)
+        QPRINTF(env, "gline1 != null cno1=(%d)\n", (int) cno1);
 
       if (gline0 && gline0->mode == HTM_LOCK_EXCLUSIVE) {
         // must abort writer
+        SANITY_ASSERT(gline0->owners[0]);
         SANITY_ASSERT(gline0->owners[0]->htm_nest_level);
         gline0->owners[0]->htm_needs_abort = true;
+        QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) gline0->owners[0]);
       }
 
       if (gline1 && gline1->mode == HTM_LOCK_EXCLUSIVE) {
         // must abort writer
+        SANITY_ASSERT(gline1->owners[0]);
         SANITY_ASSERT(gline1->owners[0]->htm_nest_level);
         gline1->owners[0]->htm_needs_abort = true;
+        QPRINTF(env, "aborting txn on env=(0x%llu)\n", (unsigned long long) gline1->owners[0]);
       }
 
       // note the entries are cleaned up by the cpu's abort process, so we
@@ -783,18 +784,21 @@ static inline target_ulong helper_htm_mem_load_helper(
         retval = (target_ulong) (int8_t)buf[0];
       else
         retval = (target_ulong) buf[0];
+      break;
 
     case 1:
       if (sign)
         retval = (target_ulong) (int16_t)tswap16(*((uint16_t *)buf));
       else
         retval = (target_ulong) tswap16(*((uint16_t *)buf));
+      break;
 
     case 2:
       if (sign)
         retval = (target_ulong) (int32_t)tswap32(*((uint32_t *)buf));
       else
         retval = (target_ulong) tswap32(*((uint32_t *)buf));
+      break;
 
     default:
     case 3:
@@ -803,6 +807,7 @@ static inline target_ulong helper_htm_mem_load_helper(
         retval = (target_ulong) (int64_t)tswap64(*((uint64_t *)buf));
       else
         retval = (target_ulong) tswap64(*((uint64_t *)buf));
+      break;
 #else
       /* Should never happen on 32-bit targets.  */
       assert(false);
@@ -817,7 +822,7 @@ static inline target_ulong helper_htm_mem_load_helper(
   /** WARNING: mem lock is held when coming here */
 abort_txn:
   SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  printf("aborting txn because: %s\n", reason);
+  QPRINTF(env, "aborting txn because: %s\n", reason);
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit(env);
@@ -886,12 +891,12 @@ void helper_htm_mem_store(
   {
     if (X86_HTM_IN_TXN(env)) {
 
-      printf("helper_htm_mem_store: store %d bytes t0=(0x%llx) "
-             "into addr=(0x%llx), cache_line_addr=(0x%llx)\n",
-             size,
-             (unsigned long long) t0,
-             (unsigned long long) a0,
-             (unsigned long long) X86_HTM_CNO_TO_ADDR(cno0));
+      QPRINTF(env, "helper_htm_mem_store: store %d bytes t0=(0x%llx) "
+              "into addr=(0x%llx), cache_line_addr=(0x%llx)\n",
+              size,
+              (unsigned long long) t0,
+              (unsigned long long) a0,
+              (unsigned long long) X86_HTM_CNO_TO_ADDR(cno0));
 
       if (env->htm_needs_abort) {
         reason = "aborted by another CPU";
@@ -900,7 +905,7 @@ void helper_htm_mem_store(
 
       if (cno0 == cno1) {
         gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
         if (!gline0) {
           reason = "no global table space";
           goto abort_txn;
@@ -919,8 +924,8 @@ void helper_htm_mem_store(
 
         SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
       } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, true);
         if (!gline0) {
           reason = "no global table space";
           goto abort_txn;
@@ -955,10 +960,10 @@ void helper_htm_mem_store(
     } else {
       if (cno0 == cno1) {
         gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
+          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
       } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1);
+        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
+        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, false);
       }
 
       // non-txn writes abort all txns holding any sort of lock
@@ -966,18 +971,20 @@ void helper_htm_mem_store(
       if (gline0 && gline0->mode != HTM_LOCK_NONE) {
         for (i = 0; i < X86_HTM_MAXOWNERS; i++) {
           if (!gline0->owners[i])
-            continue;
+            break;
           SANITY_ASSERT(gline0->owners[i]->htm_nest_level);
           gline0->owners[i]->htm_needs_abort = 1;
+          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) gline0->owners[0]);
         }
       }
 
       if (gline1 && gline1->mode != HTM_LOCK_NONE) {
         for (i = 0; i < X86_HTM_MAXOWNERS; i++) {
           if (!gline1->owners[i])
-            continue;
+            break;
           SANITY_ASSERT(gline1->owners[i]->htm_nest_level);
           gline1->owners[i]->htm_needs_abort = 1;
+          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) gline1->owners[0]);
         }
       }
 
@@ -1029,7 +1036,7 @@ void helper_htm_mem_store(
   /** WARNING: mem lock is held when coming here */
 abort_txn:
   SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  printf("aborting txn because: %s\n", reason);
+  QPRINTF(env, "aborting txn because: %s\n", reason);
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit(env);
