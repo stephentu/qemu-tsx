@@ -450,6 +450,7 @@ void tcg_add_target_add_op_defs(const TCGTargetOpDef *tdefs);
 #define tcg_global_reg_new_ptr tcg_global_reg_new_i32
 #define tcg_global_mem_new_ptr tcg_global_mem_new_i32
 #define tcg_temp_new_ptr tcg_temp_new_i32
+#define tcg_temp_local_new_ptr tcg_temp_local_new_i32
 #define tcg_temp_free_ptr tcg_temp_free_i32
 #else
 #define tcg_const_ptr tcg_const_i64
@@ -460,6 +461,7 @@ void tcg_add_target_add_op_defs(const TCGTargetOpDef *tdefs);
 #define tcg_global_reg_new_ptr tcg_global_reg_new_i64
 #define tcg_global_mem_new_ptr tcg_global_mem_new_i64
 #define tcg_temp_new_ptr tcg_temp_new_i64
+#define tcg_temp_local_new_ptr tcg_temp_local_new_i64
 #define tcg_temp_free_ptr tcg_temp_free_i64
 #endif
 

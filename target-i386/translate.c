@@ -73,6 +73,20 @@ static TCGv_i32 cpu_tmp2_i32, cpu_tmp3_i32;
 static TCGv_i64 cpu_tmp1_i64;
 static TCGv cpu_tmp5;
 
+/**
+ * This is a necessary evil, until we define a new TCG instruction
+ * to avoid having to do this
+ */
+
+static TCGv cpu_A0_stash, cpu_T_stash[2], cpu_T3_stash,
+            cpu_tmp0_stash, cpu_tmp4_stash;
+static TCGv_ptr cpu_ptr0_stash, cpu_ptr1_stash;
+static TCGv_i32 cpu_tmp2_i32_stash, cpu_tmp3_i32_stash;
+static TCGv_i64 cpu_tmp1_i64_stash;
+static TCGv cpu_tmp5_stash;
+
+static bool HACK_in_stash;
+
 static uint8_t gen_opc_cc_op[OPC_BUF_SIZE];
 
 #include "gen-icount.h"
@@ -181,6 +195,114 @@ enum {
     OR_TMP1,
     OR_A0, /* temporary register used when doing address evaluation */
 };
+
+
+/**
+ * WARNING: this hack only saves registers which are global
+ * temporary registers. If you are holding a non-local register
+ * across an invocation of this function, you are fucked.
+ */
+static inline void HACK_stash_registers_across_bb(void)
+{
+  assert(!HACK_in_stash);
+
+  cpu_A0_stash = tcg_temp_local_new();
+  cpu_T_stash[0] = tcg_temp_local_new();
+  cpu_T_stash[1] = tcg_temp_local_new();
+  cpu_T3_stash = tcg_temp_local_new();
+  cpu_tmp0_stash = tcg_temp_local_new();
+  cpu_tmp4_stash = tcg_temp_local_new();
+
+  cpu_ptr0_stash = tcg_temp_local_new_ptr();
+  cpu_ptr1_stash = tcg_temp_local_new_ptr();
+
+  cpu_tmp2_i32_stash = tcg_temp_local_new_i32();
+  cpu_tmp3_i32_stash = tcg_temp_local_new_i32();
+
+  cpu_tmp1_i64_stash = tcg_temp_local_new_i64();
+
+  cpu_tmp5_stash = tcg_temp_local_new();
+
+  tcg_gen_mov_tl(cpu_A0_stash, cpu_A0);
+  tcg_gen_mov_tl(cpu_T_stash[0], cpu_T[0]);
+  tcg_gen_mov_tl(cpu_T_stash[1], cpu_T[1]);
+  tcg_gen_mov_tl(cpu_T3_stash, cpu_T3);
+  tcg_gen_mov_tl(cpu_tmp0_stash, cpu_tmp0);
+  tcg_gen_mov_tl(cpu_tmp4_stash, cpu_tmp4);
+
+#if TARGET_LONG_BITS == 32
+  tcg_gen_mov_i32(
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr0_stash)),
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr0)));
+  tcg_gen_mov_i32(
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr1_stash)),
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr1)));
+#else
+  tcg_gen_mov_i64(
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr0_stash)),
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr0)));
+  tcg_gen_mov_i64(
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr1_stash)),
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr1)));
+#endif
+
+  tcg_gen_mov_i32(cpu_tmp2_i32_stash, cpu_tmp2_i32);
+  tcg_gen_mov_i32(cpu_tmp3_i32_stash, cpu_tmp3_i32);
+
+  tcg_gen_mov_i64(cpu_tmp1_i64_stash, cpu_tmp1_i64);
+  tcg_gen_mov_tl(cpu_tmp5_stash, cpu_tmp5);
+
+  HACK_in_stash = true;
+}
+
+static inline void HACK_restore_registers_across_bb(void)
+{
+  assert(HACK_in_stash);
+
+  tcg_gen_mov_tl(cpu_A0, cpu_A0_stash);
+  tcg_gen_mov_tl(cpu_T[0], cpu_T_stash[0]);
+  tcg_gen_mov_tl(cpu_T[1], cpu_T_stash[0]);
+  tcg_gen_mov_tl(cpu_T3, cpu_T3_stash);
+  tcg_gen_mov_tl(cpu_tmp0, cpu_tmp0_stash);
+  tcg_gen_mov_tl(cpu_tmp4, cpu_tmp4_stash);
+
+#if TARGET_LONG_BITS == 32
+  tcg_gen_mov_i32(
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr0)),
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr0_stash)));
+  tcg_gen_mov_i32(
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr1)),
+      MAKE_TCGV_I32(GET_TCGV_PTR(cpu_ptr1_stash)));
+#else
+  tcg_gen_mov_i64(
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr0)),
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr0_stash)));
+  tcg_gen_mov_i64(
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr1)),
+      MAKE_TCGV_I64(GET_TCGV_PTR(cpu_ptr1_stash)));
+#endif
+
+  tcg_gen_mov_i32(cpu_tmp2_i32, cpu_tmp2_i32_stash);
+  tcg_gen_mov_i32(cpu_tmp3_i32, cpu_tmp3_i32_stash);
+
+  tcg_gen_mov_i64(cpu_tmp1_i64, cpu_tmp1_i64_stash);
+  tcg_gen_mov_tl(cpu_tmp5, cpu_tmp5_stash);
+
+  tcg_temp_free(cpu_A0_stash);
+  tcg_temp_free(cpu_T_stash[0]);
+  tcg_temp_free(cpu_T_stash[1]);
+  tcg_temp_free(cpu_T3_stash);
+  tcg_temp_free(cpu_tmp0_stash);
+  tcg_temp_free(cpu_tmp4_stash);
+  tcg_temp_free_ptr(cpu_ptr0_stash);
+  tcg_temp_free_ptr(cpu_ptr1_stash);
+  tcg_temp_free_i32(cpu_tmp2_i32_stash);
+  tcg_temp_free_i32(cpu_tmp3_i32_stash);
+  tcg_temp_free_i64(cpu_tmp1_i64_stash);
+  tcg_temp_free(cpu_tmp5_stash);
+
+  HACK_in_stash = false;
+}
 
 static inline void gen_op_movl_T0_0(void)
 {
@@ -372,7 +494,7 @@ static inline void gen_op_addq_A0_im(int64_t val)
     tcg_gen_addi_tl(cpu_A0, cpu_A0, val);
 }
 #endif
-    
+
 static void gen_add_A0_im(DisasContext *s, int val)
 {
 #ifdef TARGET_X86_64
@@ -495,42 +617,20 @@ static inline void gen_op_addq_A0_reg_sN(int shift, int reg)
 
 static inline void gen_op_lds_T0_A0(int idx)
 {
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_ld8s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_ld16s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    default:
-    case 2:
-        tcg_gen_qemu_ld32s(cpu_T[0], cpu_A0, mem_index);
-        break;
-    }
+  TCGv tmp;
+  tmp = tcg_temp_new();
+  gen_helper_htm_mem_loads(tmp, cpu_env, cpu_A0, tcg_const_i32(idx));
+  tcg_gen_mov_tl(cpu_T[0], tmp);
+  tcg_temp_free(tmp);
 }
 
 static inline void gen_op_ld_v(int idx, TCGv t0, TCGv a0)
 {
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_ld8u(t0, a0, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_ld16u(t0, a0, mem_index);
-        break;
-    case 2:
-        tcg_gen_qemu_ld32u(t0, a0, mem_index);
-        break;
-    default:
-    case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_ld64(t0, a0, mem_index);
-#endif
-        break;
-    }
+    TCGv tmp;
+    tmp = tcg_temp_new();
+    gen_helper_htm_mem_loadu(tmp, cpu_env, a0, tcg_const_i32(idx));
+    tcg_gen_mov_tl(t0, tmp);
+    tcg_temp_free(tmp);
 }
 
 /* XXX: always use ldu or lds */
@@ -551,25 +651,7 @@ static inline void gen_op_ld_T1_A0(int idx)
 
 static inline void gen_op_st_v(int idx, TCGv t0, TCGv a0)
 {
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-    case 0:
-        tcg_gen_qemu_st8(t0, a0, mem_index);
-        break;
-    case 1:
-        tcg_gen_qemu_st16(t0, a0, mem_index);
-        break;
-    case 2:
-        tcg_gen_qemu_st32(t0, a0, mem_index);
-        break;
-    default:
-    case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_st64(t0, a0, mem_index);
-#endif
-        break;
-    }
+    gen_helper_htm_mem_store(cpu_env, t0, a0, tcg_const_i32(idx));
 }
 
 static inline void gen_op_st_T0_A0(int idx)
@@ -4900,7 +4982,7 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
             gen_lea_modrm(s, modrm, &reg_addr, &offset_addr);
             gen_helper_cmpxchg16b(cpu_A0);
         } else
-#endif        
+#endif
         {
             if (!(s->cpuid_features & CPUID_CX8))
                 goto illegal_op;
@@ -5074,6 +5156,30 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         else
             ot = dflag + OT_WORD;
         modrm = ldub_code(s->pc++);
+        if (modrm == 0xF8) {
+          switch (b) {
+          case 0xc6:
+            {
+              int32_t imm8;
+              // XABORT
+              printf("found XABORT\n");
+              imm8 = insn_get(s, OT_BYTE);
+              gen_helper_xabort(cpu_env, tcg_const_i32(imm8));
+              gen_eob(s);
+              s->is_jmp = DISAS_UPDATE;
+              break;
+            }
+          case 0xc7:
+            // XBEGIN
+            tval = (int32_t)insn_get(s, OT_LONG);
+            tval += s->pc - s->cs_base;
+            printf("found XBEGIN with rel32\n");
+            gen_helper_xbegin(cpu_env, tcg_const_tl(tval));
+            break;
+          }
+          break;
+        }
+
         mod = (modrm >> 6) & 3;
         if (mod != 3) {
             s->rip_offset = insn_const_size(ot);
@@ -7018,6 +7124,11 @@ static target_ulong disas_insn(DisasContext *s, target_ulong pc_start)
         break;
     case 0x101:
         modrm = ldub_code(s->pc++);
+        if (modrm == 0xD5) {
+            printf("XEND found\n");
+            gen_helper_xend(cpu_env);
+            break;
+        }
         mod = (modrm >> 6) & 3;
         op = (modrm >> 3) & 7;
         rm = modrm & 7;
@@ -7782,6 +7893,8 @@ static inline void gen_intermediate_code_internal(CPUState *env,
     if (!dc->addseg && (dc->vm86 || !dc->pe || !dc->code32))
         printf("ERROR addseg\n");
 #endif
+
+    HACK_in_stash = false;
 
     cpu_T[0] = tcg_temp_new();
     cpu_T[1] = tcg_temp_new();
