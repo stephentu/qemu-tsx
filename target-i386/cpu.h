@@ -609,6 +609,93 @@ typedef struct {
 
 #define NB_MMU_MODES 2
 
+// this struct represents the checkpoint state of the CPU which we are capable
+// of restoring- in our impl, if an operation tries to modify something outside
+// the checkpointed state, it SHOULD abort. right now, we just copy a prefix
+// of CPUX86State
+typedef struct CPUX86StateCheckpoint {
+    /* standard registers */
+    target_ulong regs[CPU_NB_REGS];
+    target_ulong eip;
+    target_ulong eflags; /* eflags register. During CPU emulation, CC
+                        flags and DF are set to zero because they are
+                        stored elsewhere */
+
+    /* emulator internal eflags handling */
+    target_ulong cc_src;
+    target_ulong cc_dst;
+    uint32_t cc_op;
+    int32_t df; /* D flag : 1 if D = 0, -1 if D = 1 */
+    uint32_t hflags; /* TB flags, see HF_xxx constants. These flags
+                        are known at translation time. */
+    uint32_t hflags2; /* various other flags, see HF2_xxx constants. */
+
+    /* segments */
+    SegmentCache segs[6]; /* selector values */
+    SegmentCache ldt;
+    SegmentCache tr;
+    SegmentCache gdt; /* only base and limit are used */
+    SegmentCache idt; /* only base and limit are used */
+
+    target_ulong cr[5]; /* NOTE: cr1 is unused */
+    int32_t a20_mask;
+
+    /* FPU state */
+    unsigned int fpstt; /* top of stack index */
+    uint16_t fpus;
+    uint16_t fpuc;
+    uint8_t fptags[8];   /* 0 = valid, 1 = empty */
+    FPReg fpregs[8];
+    /* KVM-only so far */
+    uint16_t fpop;
+    uint64_t fpip;
+    uint64_t fpdp;
+
+    /* emulator internal variables */
+    float_status fp_status;
+    floatx80 ft0;
+
+    float_status mmx_status; /* for 3DNow! float ops */
+    float_status sse_status;
+    uint32_t mxcsr;
+    XMMReg xmm_regs[CPU_NB_REGS];
+    XMMReg xmm_t0;
+    MMXReg mmx_t0;
+    target_ulong cc_tmp; /* temporary for rcr/rcl */
+
+    /* sysenter registers */
+    uint32_t sysenter_cs;
+    target_ulong sysenter_esp;
+    target_ulong sysenter_eip;
+    uint64_t efer;
+    uint64_t star;
+} CPUX86StateCheckpoint;
+
+#define X86_CACHE_LINE_SIZE  64
+#define X86_CACHE_LINE_SHIFT 6
+
+#define X86_HTM_NBUFENTRIES  1024
+#define X86_HTM_NBUCKETS     (X86_HTM_NBUFENTRIES / 2)
+
+#define X86_HTM_NMEMENTRIES  (X86_HTM_NBUFENTRIES * 16)
+#define X86_HTM_NMEMBUCKETS  (X86_HTM_NMEMENTRIES / 2)
+
+#define X86_HTM_CNO_HASH_FCN(cno)    ((cno))
+#define X86_HTM_ADDR_TO_CNO(addr)    ((addr) >> X86_CACHE_LINE_SHIFT)
+#define X86_HTM_ADDR_CL_OFFSET(addr) ((addr) % X86_CACHE_LINE_SIZE)
+#define X86_HTM_CNO_TO_ADDR(cno)     ((unsigned long)(cno) << X86_CACHE_LINE_SHIFT)
+#define X86_HTM_IN_TXN(env)          ((env)->htm_nest_level)
+
+/**
+ * The data structure which holds dirty cache lines in per-CPU store buffers
+ */
+typedef struct CPUX86CacheLine {
+  target_ulong cno; /* cache line number */
+  struct CPUX86CacheLine *next; /* next pointer, for linked-lists */
+  uint8_t data[X86_CACHE_LINE_SIZE];
+} CPUX86CacheLine;
+
+
 typedef struct CPUX86State {
     /* standard registers */
     target_ulong regs[CPU_NB_REGS];
@@ -755,7 +842,42 @@ typedef struct CPUX86State {
     XMMReg ymmh_regs[CPU_NB_REGS];
 
     uint64_t xcr0;
+
+    /* For HTM */
+    CPUX86StateCheckpoint htm_checkpoint_state;
+    uint32_t htm_nest_level;
+    target_ulong htm_abort_eip;
+
+    //flag to be set when a transaction is open.
+    // If true, then the transaction must abort
+    // before if commits.
+    bool htm_needs_abort;
+
+    CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
+    CPUX86CacheLine *htm_free_list;
+    CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
+
+    //for lock table linked list
+    struct CPUX86State *htm_lock_table_next;
+
+
 } CPUX86State;
+
+typedef enum HTMLockMode {
+  HTM_LOCK_NONE = 0,  /* init mode */
+  HTM_LOCK_SHARED,    /* read mode */
+  HTM_LOCK_EXCLUSIVE  /* write mode */
+} HTMLockMode;
+
+/**
+ * The data structure entry which manages the shared memory amongst all CPUs
+ */
+typedef struct CPUX86CacheLineEntry {
+  target_ulong cno; /* cache line number */
+  struct CPUX86CacheLineEntry *next; /* next pointer, for linked-lists */
+  HTMLockMode mode; /* lock mode (r/w) */
+  CPUX86State *owners; /* should be exactly one for exclusive mode */
+} CPUX86CacheLineEntry;
 
 CPUX86State *cpu_x86_init(const char *cpu_model);
 int cpu_x86_exec(CPUX86State *s);
@@ -986,4 +1108,16 @@ static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
 
 void do_cpu_init(CPUState *env);
 void do_cpu_sipi(CPUState *env);
+
+/* mem_helper.c */
+CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env);
+void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line);
+
+CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
+bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry);
+CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
+void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*));
+void cpu_htm_hash_table_reset(CPUX86State *env);
+
+
 #endif /* CPU_I386_H */

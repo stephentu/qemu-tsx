@@ -103,6 +103,20 @@ void cpu_reset(CPUX86State *env)
     cpu_breakpoint_remove_all(env, BP_CPU);
     cpu_watchpoint_remove_all(env, BP_CPU);
 
+    // no HTM nesting to begin with
+    env->htm_nest_level = 0;
+    env->htm_needs_abort = false;
+
+    env->htm_free_list = 0;
+    for (i = 0; i < X86_HTM_NBUFENTRIES; i++) {
+      env->htm_cache_lines[i].next = env->htm_free_list;
+      env->htm_free_list = &env->htm_cache_lines[i];
+    }
+
+    for (i = 0; i < X86_HTM_NBUCKETS; i++)
+      env->htm_hash_table[i] = 0;
+
+
     env->mcg_status = 0;
 }
 
