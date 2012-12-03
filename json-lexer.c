@@ -18,8 +18,6 @@
 #include "qemu-common.h"
 #include "json-lexer.h"
 
-#define MAX_TOKEN_SIZE (64ULL << 20)
-
 /*
  * \"([^\\\"]|(\\\"\\'\\\\\\/\\b\\f\\n\\r\\t\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]))*\"
  * '([^\\']|(\\\"\\'\\\\\\/\\b\\f\\n\\r\\t\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]))*'
@@ -30,7 +28,7 @@
  */
 
 enum json_lexer_state {
-    IN_ERROR = 0,
+    ERROR = 0,
     IN_DQ_UCODE3,
     IN_DQ_UCODE2,
     IN_DQ_UCODE1,
@@ -105,8 +103,7 @@ static const uint8_t json_lexer[][256] =  {
         ['u'] = IN_DQ_UCODE0,
     },
     [IN_DQ_STRING] = {
-        [1 ... 0xBF] = IN_DQ_STRING,
-        [0xC2 ... 0xF4] = IN_DQ_STRING,
+        [1 ... 0xFF] = IN_DQ_STRING,
         ['\\'] = IN_DQ_STRING_ESCAPE,
         ['"'] = JSON_STRING,
     },
@@ -145,8 +142,7 @@ static const uint8_t json_lexer[][256] =  {
         ['u'] = IN_SQ_UCODE0,
     },
     [IN_SQ_STRING] = {
-        [1 ... 0xBF] = IN_SQ_STRING,
-        [0xC2 ... 0xF4] = IN_SQ_STRING,
+        [1 ... 0xFF] = IN_SQ_STRING,
         ['\\'] = IN_SQ_STRING_ESCAPE,
         ['\''] = JSON_STRING,
     },
@@ -154,7 +150,7 @@ static const uint8_t json_lexer[][256] =  {
     /* Zero */
     [IN_ZERO] = {
         TERMINAL(JSON_INTEGER),
-        ['0' ... '9'] = IN_ERROR,
+        ['0' ... '9'] = ERROR,
         ['.'] = IN_MANTISSA,
     },
 
@@ -276,7 +272,7 @@ void json_lexer_init(JSONLexer *lexer, JSONLexerEmitter func)
     lexer->x = lexer->y = 0;
 }
 
-static int json_lexer_feed_char(JSONLexer *lexer, char ch, bool flush)
+static int json_lexer_feed_char(JSONLexer *lexer, char ch)
 {
     int char_consumed, new_state;
 
@@ -301,48 +297,18 @@ static int json_lexer_feed_char(JSONLexer *lexer, char ch, bool flush)
         case JSON_KEYWORD:
         case JSON_STRING:
             lexer->emit(lexer, lexer->token, new_state, lexer->x, lexer->y);
-            /* fall through */
         case JSON_SKIP:
             QDECREF(lexer->token);
             lexer->token = qstring_new();
             new_state = IN_START;
             break;
-        case IN_ERROR:
-            /* XXX: To avoid having previous bad input leaving the parser in an
-             * unresponsive state where we consume unpredictable amounts of
-             * subsequent "good" input, percolate this error state up to the
-             * tokenizer/parser by forcing a NULL object to be emitted, then
-             * reset state.
-             *
-             * Also note that this handling is required for reliable channel
-             * negotiation between QMP and the guest agent, since chr(0xFF)
-             * is placed at the beginning of certain events to ensure proper
-             * delivery when the channel is in an unknown state. chr(0xFF) is
-             * never a valid ASCII/UTF-8 sequence, so this should reliably
-             * induce an error/flush state.
-             */
-            lexer->emit(lexer, lexer->token, JSON_ERROR, lexer->x, lexer->y);
-            QDECREF(lexer->token);
-            lexer->token = qstring_new();
-            new_state = IN_START;
-            lexer->state = new_state;
-            return 0;
+        case ERROR:
+            return -EINVAL;
         default:
             break;
         }
         lexer->state = new_state;
-    } while (!char_consumed && !flush);
-
-    /* Do not let a single token grow to an arbitrarily large size,
-     * this is a security consideration.
-     */
-    if (lexer->token->length > MAX_TOKEN_SIZE) {
-        lexer->emit(lexer, lexer->token, lexer->state, lexer->x, lexer->y);
-        QDECREF(lexer->token);
-        lexer->token = qstring_new();
-        lexer->state = IN_START;
-    }
-
+    } while (!char_consumed);
     return 0;
 }
 
@@ -353,7 +319,7 @@ int json_lexer_feed(JSONLexer *lexer, const char *buffer, size_t size)
     for (i = 0; i < size; i++) {
         int err;
 
-        err = json_lexer_feed_char(lexer, buffer[i], false);
+        err = json_lexer_feed_char(lexer, buffer[i]);
         if (err < 0) {
             return err;
         }
@@ -364,7 +330,7 @@ int json_lexer_feed(JSONLexer *lexer, const char *buffer, size_t size)
 
 int json_lexer_flush(JSONLexer *lexer)
 {
-    return lexer->state == IN_START ? 0 : json_lexer_feed_char(lexer, 0, true);
+    return lexer->state == IN_START ? 0 : json_lexer_feed_char(lexer, 0);
 }
 
 void json_lexer_destroy(JSONLexer *lexer)

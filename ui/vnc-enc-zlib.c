@@ -35,14 +35,14 @@ void *vnc_zlib_zalloc(void *x, unsigned items, unsigned size)
     size *= items;
     size = (size + ZALLOC_ALIGNMENT - 1) & ~(ZALLOC_ALIGNMENT - 1);
 
-    p = g_malloc0(size);
+    p = qemu_mallocz(size);
 
     return (p);
 }
 
 void vnc_zlib_zfree(void *x, void *addr)
 {
-    g_free(addr);
+    qemu_free(addr);
 }
 
 static void vnc_zlib_start(VncState *vs)

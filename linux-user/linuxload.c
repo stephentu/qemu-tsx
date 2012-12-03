@@ -26,6 +26,22 @@ abi_long memcpy_to_target(abi_ulong dest, const void *src,
     return 0;
 }
 
+static int in_group_p(gid_t g)
+{
+    /* return TRUE if we're in the specified group, FALSE otherwise */
+    int		ngroup;
+    int		i;
+    gid_t	grouplist[NGROUPS];
+
+    ngroup = getgroups(NGROUPS, grouplist);
+    for(i = 0; i < ngroup; i++) {
+	if(grouplist[i] == g) {
+	    return 1;
+	}
+    }
+    return 0;
+}
+
 static int count(char ** vec)
 {
     int		i;
@@ -41,7 +57,7 @@ static int prepare_binprm(struct linux_binprm *bprm)
 {
     struct stat		st;
     int mode;
-    int retval;
+    int retval, id_change;
 
     if(fstat(bprm->fd, &st) < 0) {
 	return(-errno);
@@ -57,10 +73,14 @@ static int prepare_binprm(struct linux_binprm *bprm)
 
     bprm->e_uid = geteuid();
     bprm->e_gid = getegid();
+    id_change = 0;
 
     /* Set-uid? */
     if(mode & S_ISUID) {
     	bprm->e_uid = st.st_uid;
+	if(bprm->e_uid != geteuid()) {
+	    id_change = 1;
+	}
     }
 
     /* Set-gid? */
@@ -71,6 +91,9 @@ static int prepare_binprm(struct linux_binprm *bprm)
      */
     if ((mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) {
 	bprm->e_gid = st.st_gid;
+	if (!in_group_p(bprm->e_gid)) {
+		id_change = 1;
+	}
     }
 
     retval = read(bprm->fd, bprm->buf, BPRM_BUF_SIZE);
@@ -140,9 +163,8 @@ int loader_exec(const char * filename, char ** argv, char ** envp,
     bprm->p = TARGET_PAGE_SIZE*MAX_ARG_PAGES-sizeof(unsigned int);
     memset(bprm->page, 0, sizeof(bprm->page));
     retval = open(filename, O_RDONLY);
-    if (retval < 0) {
-        return -errno;
-    }
+    if (retval < 0)
+        return retval;
     bprm->fd = retval;
     bprm->filename = (char *)filename;
     bprm->argc = count(argv);
@@ -166,7 +188,8 @@ int loader_exec(const char * filename, char ** argv, char ** envp,
             retval = load_flt_binary(bprm,regs,infop);
 #endif
         } else {
-            return -ENOEXEC;
+            fprintf(stderr, "Unknown binary format\n");
+            return -1;
         }
     }
 
@@ -178,7 +201,7 @@ int loader_exec(const char * filename, char ** argv, char ** envp,
 
     /* Something went wrong, return the inode and free the argument pages*/
     for (i=0 ; i<MAX_ARG_PAGES ; i++) {
-        g_free(bprm->page[i]);
+        free(bprm->page[i]);
     }
     return(retval);
 }

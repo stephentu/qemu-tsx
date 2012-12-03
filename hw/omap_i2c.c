@@ -19,20 +19,13 @@
 #include "hw.h"
 #include "i2c.h"
 #include "omap.h"
-#include "sysbus.h"
 
-
-typedef struct OMAPI2CState {
-    SysBusDevice busdev;
-    MemoryRegion iomem;
+struct omap_i2c_s {
     qemu_irq irq;
     qemu_irq drq[2];
     i2c_bus *bus;
 
     uint8_t revision;
-    void *iclk;
-    void *fclk;
-
     uint8_t mask;
     uint16_t stat;
     uint16_t dma;
@@ -46,12 +39,12 @@ typedef struct OMAPI2CState {
     uint8_t divider;
     uint8_t times[2];
     uint16_t test;
-} OMAPI2CState;
+};
 
 #define OMAP2_INTR_REV	0x34
 #define OMAP2_GC_REV	0x34
 
-static void omap_i2c_interrupts_update(OMAPI2CState *s)
+static void omap_i2c_interrupts_update(struct omap_i2c_s *s)
 {
     qemu_set_irq(s->irq, s->stat & s->mask);
     if ((s->dma >> 15) & 1)					/* RDMA_EN */
@@ -60,7 +53,7 @@ static void omap_i2c_interrupts_update(OMAPI2CState *s)
         qemu_set_irq(s->drq[1], (s->stat >> 4) & 1);		/* XRDY */
 }
 
-static void omap_i2c_fifo_run(OMAPI2CState *s)
+static void omap_i2c_fifo_run(struct omap_i2c_s *s)
 {
     int ack = 1;
 
@@ -128,10 +121,8 @@ static void omap_i2c_fifo_run(OMAPI2CState *s)
         s->control &= ~(1 << 1);				/* STP */
 }
 
-static void omap_i2c_reset(DeviceState *dev)
+void omap_i2c_reset(struct omap_i2c_s *s)
 {
-    OMAPI2CState *s = FROM_SYSBUS(OMAPI2CState,
-                                  sysbus_from_qdev(dev));
     s->mask = 0;
     s->stat = 0;
     s->dma = 0;
@@ -149,9 +140,9 @@ static void omap_i2c_reset(DeviceState *dev)
     s->test = 0;
 }
 
-static uint32_t omap_i2c_read(void *opaque, hwaddr addr)
+static uint32_t omap_i2c_read(void *opaque, target_phys_addr_t addr)
 {
-    OMAPI2CState *s = opaque;
+    struct omap_i2c_s *s = (struct omap_i2c_s *) opaque;
     int offset = addr & OMAP_MPUI_REG_MASK;
     uint16_t ret;
 
@@ -248,10 +239,10 @@ static uint32_t omap_i2c_read(void *opaque, hwaddr addr)
     return 0;
 }
 
-static void omap_i2c_write(void *opaque, hwaddr addr,
+static void omap_i2c_write(void *opaque, target_phys_addr_t addr,
                 uint32_t value)
 {
-    OMAPI2CState *s = opaque;
+    struct omap_i2c_s *s = (struct omap_i2c_s *) opaque;
     int offset = addr & OMAP_MPUI_REG_MASK;
     int nack;
 
@@ -317,14 +308,14 @@ static void omap_i2c_write(void *opaque, hwaddr addr,
         }
 
         if (value & 2)
-            omap_i2c_reset(&s->busdev.qdev);
+            omap_i2c_reset(s);
         break;
 
     case 0x24:	/* I2C_CON */
         s->control = value & 0xcf87;
         if (~value & (1 << 15)) {				/* I2C_EN */
             if (s->revision < OMAP2_INTR_REV)
-                omap_i2c_reset(&s->busdev.qdev);
+                omap_i2c_reset(s);
             break;
         }
         if ((value & (1 << 15)) && !(value & (1 << 10))) {	/* MST */
@@ -390,10 +381,10 @@ static void omap_i2c_write(void *opaque, hwaddr addr,
     }
 }
 
-static void omap_i2c_writeb(void *opaque, hwaddr addr,
+static void omap_i2c_writeb(void *opaque, target_phys_addr_t addr,
                 uint32_t value)
 {
-    OMAPI2CState *s = opaque;
+    struct omap_i2c_s *s = (struct omap_i2c_s *) opaque;
     int offset = addr & OMAP_MPUI_REG_MASK;
 
     switch (offset) {
@@ -418,75 +409,62 @@ static void omap_i2c_writeb(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps omap_i2c_ops = {
-    .old_mmio = {
-        .read = {
-            omap_badwidth_read16,
-            omap_i2c_read,
-            omap_badwidth_read16,
-        },
-        .write = {
-            omap_i2c_writeb, /* Only the last fifo write can be 8 bit.  */
-            omap_i2c_write,
-            omap_badwidth_write16,
-        },
-    },
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const omap_i2c_readfn[] = {
+    omap_badwidth_read16,
+    omap_i2c_read,
+    omap_badwidth_read16,
 };
 
-static int omap_i2c_init(SysBusDevice *dev)
-{
-    OMAPI2CState *s = FROM_SYSBUS(OMAPI2CState, dev);
-
-    if (!s->fclk) {
-        hw_error("omap_i2c: fclk not connected\n");
-    }
-    if (s->revision >= OMAP2_INTR_REV && !s->iclk) {
-        /* Note that OMAP1 doesn't have a separate interface clock */
-        hw_error("omap_i2c: iclk not connected\n");
-    }
-    sysbus_init_irq(dev, &s->irq);
-    sysbus_init_irq(dev, &s->drq[0]);
-    sysbus_init_irq(dev, &s->drq[1]);
-    memory_region_init_io(&s->iomem, &omap_i2c_ops, s, "omap.i2c",
-                          (s->revision < OMAP2_INTR_REV) ? 0x800 : 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
-    s->bus = i2c_init_bus(&dev->qdev, NULL);
-    return 0;
-}
-
-static Property omap_i2c_properties[] = {
-    DEFINE_PROP_UINT8("revision", OMAPI2CState, revision, 0),
-    DEFINE_PROP_PTR("iclk", OMAPI2CState, iclk),
-    DEFINE_PROP_PTR("fclk", OMAPI2CState, fclk),
-    DEFINE_PROP_END_OF_LIST(),
+static CPUWriteMemoryFunc * const omap_i2c_writefn[] = {
+    omap_i2c_writeb,	/* Only the last fifo write can be 8 bit.  */
+    omap_i2c_write,
+    omap_badwidth_write16,
 };
 
-static void omap_i2c_class_init(ObjectClass *klass, void *data)
+struct omap_i2c_s *omap_i2c_init(target_phys_addr_t base,
+                qemu_irq irq, qemu_irq *dma, omap_clk clk)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-    k->init = omap_i2c_init;
-    dc->props = omap_i2c_properties;
-    dc->reset = omap_i2c_reset;
+    int iomemtype;
+    struct omap_i2c_s *s = (struct omap_i2c_s *)
+            qemu_mallocz(sizeof(struct omap_i2c_s));
+
+    /* TODO: set a value greater or equal to real hardware */
+    s->revision = 0x11;
+    s->irq = irq;
+    s->drq[0] = dma[0];
+    s->drq[1] = dma[1];
+    s->bus = i2c_init_bus(NULL, "i2c");
+    omap_i2c_reset(s);
+
+    iomemtype = cpu_register_io_memory(omap_i2c_readfn,
+                    omap_i2c_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x800, iomemtype);
+
+    return s;
 }
 
-static TypeInfo omap_i2c_info = {
-    .name = "omap_i2c",
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(OMAPI2CState),
-    .class_init = omap_i2c_class_init,
-};
-
-static void omap_i2c_register_types(void)
+struct omap_i2c_s *omap2_i2c_init(struct omap_target_agent_s *ta,
+                qemu_irq irq, qemu_irq *dma, omap_clk fclk, omap_clk iclk)
 {
-    type_register_static(&omap_i2c_info);
+    int iomemtype;
+    struct omap_i2c_s *s = (struct omap_i2c_s *)
+            qemu_mallocz(sizeof(struct omap_i2c_s));
+
+    s->revision = 0x34;
+    s->irq = irq;
+    s->drq[0] = dma[0];
+    s->drq[1] = dma[1];
+    s->bus = i2c_init_bus(NULL, "i2c");
+    omap_i2c_reset(s);
+
+    iomemtype = l4_register_io_memory(omap_i2c_readfn,
+                    omap_i2c_writefn, s);
+    omap_l4_attach(ta, 0, iomemtype);
+
+    return s;
 }
 
-i2c_bus *omap_i2c_bus(DeviceState *omap_i2c)
+i2c_bus *omap_i2c_bus(struct omap_i2c_s *s)
 {
-    OMAPI2CState *s = FROM_SYSBUS(OMAPI2CState, sysbus_from_qdev(omap_i2c));
     return s->bus;
 }
-
-type_init(omap_i2c_register_types)

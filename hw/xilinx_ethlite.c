@@ -50,7 +50,6 @@
 struct xlx_ethlite
 {
     SysBusDevice busdev;
-    MemoryRegion mmio;
     qemu_irq irq;
     NICState *nic;
     NICConf conf;
@@ -71,8 +70,7 @@ static inline void eth_pulse_irq(struct xlx_ethlite *s)
     }
 }
 
-static uint64_t
-eth_read(void *opaque, hwaddr addr, unsigned int size)
+static uint32_t eth_readl (void *opaque, target_phys_addr_t addr)
 {
     struct xlx_ethlite *s = opaque;
     uint32_t r = 0;
@@ -92,20 +90,23 @@ eth_read(void *opaque, hwaddr addr, unsigned int size)
             D(qemu_log("%s %x=%x\n", __func__, addr * 4, r));
             break;
 
+        /* Rx packet data is endian fixed at the way into the rx rams. This
+         * speeds things up because the ethlite MAC does not have a len
+         * register. That means the CPU will issue MMIO reads for the entire
+         * 2k rx buffer even for small packets.
+         */
         default:
-            r = tswap32(s->regs[addr]);
+            r = s->regs[addr];
             break;
     }
     return r;
 }
 
 static void
-eth_write(void *opaque, hwaddr addr,
-          uint64_t val64, unsigned int size)
+eth_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
 {
     struct xlx_ethlite *s = opaque;
     unsigned int base = 0;
-    uint32_t value = val64;
 
     addr >>= 2;
     switch (addr) 
@@ -144,23 +145,22 @@ eth_write(void *opaque, hwaddr addr,
             s->regs[addr] = value;
             break;
 
+        /* Packet data, make sure it stays BE.  */
         default:
-            s->regs[addr] = tswap32(value);
+            s->regs[addr] = cpu_to_be32(value);
             break;
     }
 }
 
-static const MemoryRegionOps eth_ops = {
-    .read = eth_read,
-    .write = eth_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4
-    }
+static CPUReadMemoryFunc * const eth_read[] = {
+    NULL, NULL, &eth_readl,
 };
 
-static int eth_can_rx(NetClientState *nc)
+static CPUWriteMemoryFunc * const eth_write[] = {
+    NULL, NULL, &eth_writel,
+};
+
+static int eth_can_rx(VLANClientState *nc)
 {
     struct xlx_ethlite *s = DO_UPCAST(NICState, nc, nc)->opaque;
     int r;
@@ -168,10 +168,11 @@ static int eth_can_rx(NetClientState *nc)
     return r;
 }
 
-static ssize_t eth_rx(NetClientState *nc, const uint8_t *buf, size_t size)
+static ssize_t eth_rx(VLANClientState *nc, const uint8_t *buf, size_t size)
 {
     struct xlx_ethlite *s = DO_UPCAST(NICState, nc, nc)->opaque;
     unsigned int rxbase = s->rxbuf * (0x800 / 4);
+    int i;
 
     /* DA filter.  */
     if (!(buf[0] & 0x80) && memcmp(&s->conf.macaddr.a[0], buf, 6))
@@ -185,6 +186,12 @@ static ssize_t eth_rx(NetClientState *nc, const uint8_t *buf, size_t size)
     D(qemu_log("%s %d rxbase=%x\n", __func__, size, rxbase));
     memcpy(&s->regs[rxbase + R_RX_BUF0], buf, size);
 
+    /* Bring it into host endianess.  */
+    for (i = 0; i < ((size + 3) / 4); i++) {
+       uint32_t d = s->regs[rxbase + R_RX_BUF0 + i];
+       s->regs[rxbase + R_RX_BUF0 + i] = be32_to_cpu(d);
+    }
+
     s->regs[rxbase + R_RX_CTRL0] |= CTRL_S;
     if (s->regs[rxbase + R_RX_CTRL0] & CTRL_I)
         eth_pulse_irq(s);
@@ -194,7 +201,7 @@ static ssize_t eth_rx(NetClientState *nc, const uint8_t *buf, size_t size)
     return size;
 }
 
-static void eth_cleanup(NetClientState *nc)
+static void eth_cleanup(VLANClientState *nc)
 {
     struct xlx_ethlite *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -202,7 +209,7 @@ static void eth_cleanup(NetClientState *nc)
 }
 
 static NetClientInfo net_xilinx_ethlite_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_TYPE_NIC,
     .size = sizeof(NICState),
     .can_receive = eth_can_rx,
     .receive = eth_rx,
@@ -212,47 +219,36 @@ static NetClientInfo net_xilinx_ethlite_info = {
 static int xilinx_ethlite_init(SysBusDevice *dev)
 {
     struct xlx_ethlite *s = FROM_SYSBUS(typeof (*s), dev);
+    int regs;
 
     sysbus_init_irq(dev, &s->irq);
     s->rxbuf = 0;
 
-    memory_region_init_io(&s->mmio, &eth_ops, s, "xlnx.xps-ethernetlite",
-                                                                    R_MAX * 4);
-    sysbus_init_mmio(dev, &s->mmio);
+    regs = cpu_register_io_memory(eth_read, eth_write, s, DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, R_MAX * 4, regs);
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&net_xilinx_ethlite_info, &s->conf,
-                          object_get_typename(OBJECT(dev)), dev->qdev.id, s);
+                          dev->qdev.info->name, dev->qdev.id, s);
     qemu_format_nic_info_str(&s->nic->nc, s->conf.macaddr.a);
     return 0;
 }
 
-static Property xilinx_ethlite_properties[] = {
-    DEFINE_PROP_UINT32("tx-ping-pong", struct xlx_ethlite, c_tx_pingpong, 1),
-    DEFINE_PROP_UINT32("rx-ping-pong", struct xlx_ethlite, c_rx_pingpong, 1),
-    DEFINE_NIC_PROPERTIES(struct xlx_ethlite, conf),
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo xilinx_ethlite_info = {
+    .init = xilinx_ethlite_init,
+    .qdev.name  = "xilinx,ethlite",
+    .qdev.size  = sizeof(struct xlx_ethlite),
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_UINT32("txpingpong", struct xlx_ethlite, c_tx_pingpong, 1),
+        DEFINE_PROP_UINT32("rxpingpong", struct xlx_ethlite, c_rx_pingpong, 1),
+        DEFINE_NIC_PROPERTIES(struct xlx_ethlite, conf),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void xilinx_ethlite_class_init(ObjectClass *klass, void *data)
+static void xilinx_ethlite_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = xilinx_ethlite_init;
-    dc->props = xilinx_ethlite_properties;
+    sysbus_register_withprop(&xilinx_ethlite_info);
 }
 
-static TypeInfo xilinx_ethlite_info = {
-    .name          = "xlnx.xps-ethernetlite",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(struct xlx_ethlite),
-    .class_init    = xilinx_ethlite_class_init,
-};
-
-static void xilinx_ethlite_register_types(void)
-{
-    type_register_static(&xilinx_ethlite_info);
-}
-
-type_init(xilinx_ethlite_register_types)
+device_init(xilinx_ethlite_register)

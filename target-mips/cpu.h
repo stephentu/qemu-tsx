@@ -1,19 +1,24 @@
 #if !defined (__MIPS_CPU_H__)
 #define __MIPS_CPU_H__
 
-//#define DEBUG_OP
-
 #define TARGET_HAS_ICE 1
 
 #define ELF_MACHINE	EM_MIPS
 
-#define CPUArchState struct CPUMIPSState
+#define CPUState struct CPUMIPSState
 
 #include "config.h"
 #include "qemu-common.h"
 #include "mips-defs.h"
 #include "cpu-defs.h"
 #include "softfloat.h"
+
+// uint_fast8_t and uint_fast16_t not in <sys/int_types.h>
+// XXX: move that elsewhere
+#if defined(CONFIG_SOLARIS) && CONFIG_SOLARIS_VERSION < 10
+typedef unsigned char           uint_fast8_t;
+typedef unsigned int            uint_fast16_t;
+#endif
 
 struct CPUMIPSState;
 
@@ -37,11 +42,11 @@ typedef struct CPUMIPSTLBContext CPUMIPSTLBContext;
 struct CPUMIPSTLBContext {
     uint32_t nb_tlb;
     uint32_t tlb_in_use;
-    int (*map_address) (struct CPUMIPSState *env, hwaddr *physical, int *prot, target_ulong address, int rw, int access_type);
-    void (*helper_tlbwi)(struct CPUMIPSState *env);
-    void (*helper_tlbwr)(struct CPUMIPSState *env);
-    void (*helper_tlbp)(struct CPUMIPSState *env);
-    void (*helper_tlbr)(struct CPUMIPSState *env);
+    int (*map_address) (struct CPUMIPSState *env, target_phys_addr_t *physical, int *prot, target_ulong address, int rw, int access_type);
+    void (*helper_tlbwi) (void);
+    void (*helper_tlbwr) (void);
+    void (*helper_tlbp) (void);
+    void (*helper_tlbr) (void);
     union {
         struct {
             r4k_tlb_t tlb[MIPS_TLB_MAX];
@@ -58,7 +63,7 @@ union fpr_t {
     uint32_t w[2]; /* binary single fixed-point */
 };
 /* define FP_ENDIAN_IDX to access the same location
- * in the fpr_t union regardless of the host endianness
+ * in the fpr_t union regardless of the host endianess
  */
 #if defined(HOST_WORDS_BIGENDIAN)
 #  define FP_ENDIAN_IDX 1
@@ -411,11 +416,11 @@ struct CPUMIPSState {
     /* We waste some space so we can handle shadow registers like TCs. */
     TCState tcs[MIPS_SHADOW_SET_MAX];
     CPUMIPSFPUContext fpus[MIPS_FPU_MAX];
-    /* QEMU */
+    /* Qemu */
     int error_code;
     uint32_t hflags;    /* CPU State */
     /* TMASK defines different execution modes */
-#define MIPS_HFLAG_TMASK  0xC07FF
+#define MIPS_HFLAG_TMASK  0x007FF
 #define MIPS_HFLAG_MODE   0x00007 /* execution modes                    */
     /* The KSU flags must be the lowest bits in hflags. The flag order
        must be the same as defined for CP0 Status. This allows to use
@@ -453,9 +458,6 @@ struct CPUMIPSState {
 #define MIPS_HFLAG_BDS32  0x10000 /* branch requires 32-bit delay slot  */
 #define MIPS_HFLAG_BX     0x20000 /* branch exchanges execution mode    */
 #define MIPS_HFLAG_BMASK  (MIPS_HFLAG_BMASK_BASE | MIPS_HFLAG_BMASK_EXT)
-    /* MIPS DSP resources access. */
-#define MIPS_HFLAG_DSP   0x40000  /* Enable access to MIPS DSP resources. */
-#define MIPS_HFLAG_DSPR2 0x80000  /* Enable access to MIPS DSPR2 resources. */
     target_ulong btarget;        /* Jump / branch target               */
     target_ulong bcond;          /* Branch condition (if needed)       */
 
@@ -479,26 +481,25 @@ struct CPUMIPSState {
     struct QEMUTimer *timer; /* Internal timer */
 };
 
-#include "cpu-qom.h"
-
 #if !defined(CONFIG_USER_ONLY)
-int no_mmu_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
+int no_mmu_map_address (CPUMIPSState *env, target_phys_addr_t *physical, int *prot,
                         target_ulong address, int rw, int access_type);
-int fixed_mmu_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
+int fixed_mmu_map_address (CPUMIPSState *env, target_phys_addr_t *physical, int *prot,
                            target_ulong address, int rw, int access_type);
-int r4k_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
+int r4k_map_address (CPUMIPSState *env, target_phys_addr_t *physical, int *prot,
                      target_ulong address, int rw, int access_type);
-void r4k_helper_tlbwi(CPUMIPSState *env);
-void r4k_helper_tlbwr(CPUMIPSState *env);
-void r4k_helper_tlbp(CPUMIPSState *env);
-void r4k_helper_tlbr(CPUMIPSState *env);
+void r4k_helper_tlbwi (void);
+void r4k_helper_tlbwr (void);
+void r4k_helper_tlbp (void);
+void r4k_helper_tlbr (void);
 
-void cpu_unassigned_access(CPUMIPSState *env, hwaddr addr,
-                           int is_write, int is_exec, int unused, int size);
+void do_unassigned_access(target_phys_addr_t addr, int is_write, int is_exec,
+                          int unused, int size);
 #endif
 
 void mips_cpu_list (FILE *f, fprintf_function cpu_fprintf);
 
+#define cpu_init cpu_mips_init
 #define cpu_exec cpu_mips_exec
 #define cpu_gen_code cpu_mips_gen_code
 #define cpu_signal_handler cpu_mips_signal_handler
@@ -512,12 +513,12 @@ void mips_cpu_list (FILE *f, fprintf_function cpu_fprintf);
 #define MMU_MODE1_SUFFIX _super
 #define MMU_MODE2_SUFFIX _user
 #define MMU_USER_IDX 2
-static inline int cpu_mmu_index (CPUMIPSState *env)
+static inline int cpu_mmu_index (CPUState *env)
 {
     return env->hflags & MIPS_HFLAG_KSU;
 }
 
-static inline void cpu_clone_regs(CPUMIPSState *env, target_ulong newsp)
+static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
 {
     if (newsp)
         env->active_tc.gpr[29] = newsp;
@@ -525,7 +526,7 @@ static inline void cpu_clone_regs(CPUMIPSState *env, target_ulong newsp)
     env->active_tc.gpr[2] = 0;
 }
 
-static inline int cpu_mips_hw_interrupts_pending(CPUMIPSState *env)
+static inline int cpu_mips_hw_interrupts_pending(CPUState *env)
 {
     int32_t pending;
     int32_t status;
@@ -534,10 +535,6 @@ static inline int cpu_mips_hw_interrupts_pending(CPUMIPSState *env)
     if (!(env->CP0_Status & (1 << CP0St_IE)) ||
         (env->CP0_Status & (1 << CP0St_EXL)) ||
         (env->CP0_Status & (1 << CP0St_ERL)) ||
-        /* Note that the TCStatus IXMT field is initialized to zero,
-           and only MT capable cores can set it to one. So we don't
-           need to check for MT capabilities here.  */
-        (env->active_tc.CP0_TCStatus & (1 << CP0TCSt_IXMT)) ||
         (env->hflags & MIPS_HFLAG_DM)) {
         /* Interrupts are disabled */
         return 0;
@@ -613,60 +610,40 @@ enum {
     EXCP_MDMX,
     EXCP_C2E,
     EXCP_CACHE, /* 32 */
-    EXCP_DSPDIS,
 
-    EXCP_LAST = EXCP_DSPDIS,
+    EXCP_LAST = EXCP_CACHE,
 };
 /* Dummy exception for conditional stores.  */
 #define EXCP_SC 0x100
 
-/*
- * This is an interrnally generated WAKE request line.
- * It is driven by the CPU itself. Raised when the MT
- * block wants to wake a VPE from an inactive state and
- * cleared when VPE goes from active to inactive.
- */
-#define CPU_INTERRUPT_WAKE CPU_INTERRUPT_TGT_INT_0
-
 int cpu_mips_exec(CPUMIPSState *s);
-MIPSCPU *cpu_mips_init(const char *cpu_model);
+CPUMIPSState *cpu_mips_init(const char *cpu_model);
+//~ uint32_t cpu_mips_get_clock (void);
 int cpu_mips_signal_handler(int host_signum, void *pinfo, void *puc);
 
-static inline CPUMIPSState *cpu_init(const char *cpu_model)
-{
-    MIPSCPU *cpu = cpu_mips_init(cpu_model);
-    if (cpu == NULL) {
-        return NULL;
-    }
-    return &cpu->env;
-}
-
-/* TODO QOM'ify CPU reset and remove */
-void cpu_state_reset(CPUMIPSState *s);
-
 /* mips_timer.c */
-uint32_t cpu_mips_get_random (CPUMIPSState *env);
-uint32_t cpu_mips_get_count (CPUMIPSState *env);
-void cpu_mips_store_count (CPUMIPSState *env, uint32_t value);
-void cpu_mips_store_compare (CPUMIPSState *env, uint32_t value);
-void cpu_mips_start_count(CPUMIPSState *env);
-void cpu_mips_stop_count(CPUMIPSState *env);
+uint32_t cpu_mips_get_random (CPUState *env);
+uint32_t cpu_mips_get_count (CPUState *env);
+void cpu_mips_store_count (CPUState *env, uint32_t value);
+void cpu_mips_store_compare (CPUState *env, uint32_t value);
+void cpu_mips_start_count(CPUState *env);
+void cpu_mips_stop_count(CPUState *env);
 
 /* mips_int.c */
-void cpu_mips_soft_irq(CPUMIPSState *env, int irq, int level);
+void cpu_mips_soft_irq(CPUState *env, int irq, int level);
 
 /* helper.c */
-int cpu_mips_handle_mmu_fault (CPUMIPSState *env, target_ulong address, int rw,
-                               int mmu_idx);
+int cpu_mips_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
+                               int mmu_idx, int is_softmmu);
 #define cpu_handle_mmu_fault cpu_mips_handle_mmu_fault
-void do_interrupt (CPUMIPSState *env);
+void do_interrupt (CPUState *env);
 #if !defined(CONFIG_USER_ONLY)
-void r4k_invalidate_tlb (CPUMIPSState *env, int idx, int use_extra);
-hwaddr cpu_mips_translate_address (CPUMIPSState *env, target_ulong address,
+void r4k_invalidate_tlb (CPUState *env, int idx, int use_extra);
+target_phys_addr_t cpu_mips_translate_address (CPUState *env, target_ulong address,
 		                               int rw);
 #endif
 
-static inline void cpu_get_tb_cpu_state(CPUMIPSState *env, target_ulong *pc,
+static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
                                         target_ulong *cs_base, int *flags)
 {
     *pc = env->active_tc.PC;
@@ -674,141 +651,9 @@ static inline void cpu_get_tb_cpu_state(CPUMIPSState *env, target_ulong *pc,
     *flags = env->hflags & (MIPS_HFLAG_TMASK | MIPS_HFLAG_BMASK);
 }
 
-static inline void cpu_set_tls(CPUMIPSState *env, target_ulong newtls)
+static inline void cpu_set_tls(CPUState *env, target_ulong newtls)
 {
     env->tls_value = newtls;
-}
-
-static inline int mips_vpe_active(CPUMIPSState *env)
-{
-    int active = 1;
-
-    /* Check that the VPE is enabled.  */
-    if (!(env->mvp->CP0_MVPControl & (1 << CP0MVPCo_EVP))) {
-        active = 0;
-    }
-    /* Check that the VPE is activated.  */
-    if (!(env->CP0_VPEConf0 & (1 << CP0VPEC0_VPA))) {
-        active = 0;
-    }
-
-    /* Now verify that there are active thread contexts in the VPE.
-
-       This assumes the CPU model will internally reschedule threads
-       if the active one goes to sleep. If there are no threads available
-       the active one will be in a sleeping state, and we can turn off
-       the entire VPE.  */
-    if (!(env->active_tc.CP0_TCStatus & (1 << CP0TCSt_A))) {
-        /* TC is not activated.  */
-        active = 0;
-    }
-    if (env->active_tc.CP0_TCHalt & 1) {
-        /* TC is in halt state.  */
-        active = 0;
-    }
-
-    return active;
-}
-
-static inline bool cpu_has_work(CPUState *cpu)
-{
-    CPUMIPSState *env = &MIPS_CPU(cpu)->env;
-    bool has_work = false;
-
-    /* It is implementation dependent if non-enabled interrupts
-       wake-up the CPU, however most of the implementations only
-       check for interrupts that can be taken. */
-    if ((env->interrupt_request & CPU_INTERRUPT_HARD) &&
-        cpu_mips_hw_interrupts_pending(env)) {
-        has_work = true;
-    }
-
-    /* MIPS-MT has the ability to halt the CPU.  */
-    if (env->CP0_Config3 & (1 << CP0C3_MT)) {
-        /* The QEMU model will issue an _WAKE request whenever the CPUs
-           should be woken up.  */
-        if (env->interrupt_request & CPU_INTERRUPT_WAKE) {
-            has_work = true;
-        }
-
-        if (!mips_vpe_active(env)) {
-            has_work = false;
-        }
-    }
-    return has_work;
-}
-
-#include "exec-all.h"
-
-static inline void cpu_pc_from_tb(CPUMIPSState *env, TranslationBlock *tb)
-{
-    env->active_tc.PC = tb->pc;
-    env->hflags &= ~MIPS_HFLAG_BMASK;
-    env->hflags |= tb->flags & MIPS_HFLAG_BMASK;
-}
-
-static inline void compute_hflags(CPUMIPSState *env)
-{
-    env->hflags &= ~(MIPS_HFLAG_COP1X | MIPS_HFLAG_64 | MIPS_HFLAG_CP0 |
-                     MIPS_HFLAG_F64 | MIPS_HFLAG_FPU | MIPS_HFLAG_KSU |
-                     MIPS_HFLAG_UX);
-    if (!(env->CP0_Status & (1 << CP0St_EXL)) &&
-        !(env->CP0_Status & (1 << CP0St_ERL)) &&
-        !(env->hflags & MIPS_HFLAG_DM)) {
-        env->hflags |= (env->CP0_Status >> CP0St_KSU) & MIPS_HFLAG_KSU;
-    }
-#if defined(TARGET_MIPS64)
-    if (((env->hflags & MIPS_HFLAG_KSU) != MIPS_HFLAG_UM) ||
-        (env->CP0_Status & (1 << CP0St_PX)) ||
-        (env->CP0_Status & (1 << CP0St_UX))) {
-        env->hflags |= MIPS_HFLAG_64;
-    }
-    if (env->CP0_Status & (1 << CP0St_UX)) {
-        env->hflags |= MIPS_HFLAG_UX;
-    }
-#endif
-    if ((env->CP0_Status & (1 << CP0St_CU0)) ||
-        !(env->hflags & MIPS_HFLAG_KSU)) {
-        env->hflags |= MIPS_HFLAG_CP0;
-    }
-    if (env->CP0_Status & (1 << CP0St_CU1)) {
-        env->hflags |= MIPS_HFLAG_FPU;
-    }
-    if (env->CP0_Status & (1 << CP0St_FR)) {
-        env->hflags |= MIPS_HFLAG_F64;
-    }
-    if (env->insn_flags & ASE_DSPR2) {
-        /* Enables access MIPS DSP resources, now our cpu is DSP ASER2,
-           so enable to access DSPR2 resources. */
-        if (env->CP0_Status & (1 << CP0St_MX)) {
-            env->hflags |= MIPS_HFLAG_DSP | MIPS_HFLAG_DSPR2;
-        }
-
-    } else if (env->insn_flags & ASE_DSP) {
-        /* Enables access MIPS DSP resources, now our cpu is DSP ASE,
-           so enable to access DSP resources. */
-        if (env->CP0_Status & (1 << CP0St_MX)) {
-            env->hflags |= MIPS_HFLAG_DSP;
-        }
-
-    }
-    if (env->insn_flags & ISA_MIPS32R2) {
-        if (env->active_fpu.fcr0 & (1 << FCR0_F64)) {
-            env->hflags |= MIPS_HFLAG_COP1X;
-        }
-    } else if (env->insn_flags & ISA_MIPS32) {
-        if (env->hflags & MIPS_HFLAG_64) {
-            env->hflags |= MIPS_HFLAG_COP1X;
-        }
-    } else if (env->insn_flags & ISA_MIPS4) {
-        /* All supported MIPS IV CPUs use the XX (CU3) to enable
-           and disable the MIPS IV extensions to the MIPS III ISA.
-           Some other MIPS IV CPUs ignore the bit, so the check here
-           would be too restrictive for them.  */
-        if (env->CP0_Status & (1 << CP0St_CU3)) {
-            env->hflags |= MIPS_HFLAG_COP1X;
-        }
-    }
 }
 
 #endif /* !defined (__MIPS_CPU_H__) */

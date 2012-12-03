@@ -96,7 +96,7 @@ static uint8_t eeprom_read_data(SMBusDevice *dev, uint8_t cmd, int n)
     return eeprom_receive_byte(dev);
 }
 
-static int smbus_eeprom_initfn(SMBusDevice *dev)
+static int smbus_eeprom_init(SMBusDevice *dev)
 {
     SMBusEEPROMDevice *eeprom = (SMBusEEPROMDevice *)dev;
 
@@ -104,53 +104,24 @@ static int smbus_eeprom_initfn(SMBusDevice *dev)
     return 0;
 }
 
-static Property smbus_eeprom_properties[] = {
-    DEFINE_PROP_PTR("data", SMBusEEPROMDevice, data),
-    DEFINE_PROP_END_OF_LIST(),
+static SMBusDeviceInfo smbus_eeprom_info = {
+    .i2c.qdev.name = "smbus-eeprom",
+    .i2c.qdev.size = sizeof(SMBusEEPROMDevice),
+    .i2c.qdev.props = (Property[]) {
+        DEFINE_PROP_PTR("data", SMBusEEPROMDevice, data),
+        DEFINE_PROP_END_OF_LIST(),
+    },
+    .init = smbus_eeprom_init,
+    .quick_cmd = eeprom_quick_cmd,
+    .send_byte = eeprom_send_byte,
+    .receive_byte = eeprom_receive_byte,
+    .write_data = eeprom_write_data,
+    .read_data = eeprom_read_data
 };
 
-static void smbus_eeprom_class_initfn(ObjectClass *klass, void *data)
+static void smbus_eeprom_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SMBusDeviceClass *sc = SMBUS_DEVICE_CLASS(klass);
-
-    sc->init = smbus_eeprom_initfn;
-    sc->quick_cmd = eeprom_quick_cmd;
-    sc->send_byte = eeprom_send_byte;
-    sc->receive_byte = eeprom_receive_byte;
-    sc->write_data = eeprom_write_data;
-    sc->read_data = eeprom_read_data;
-    dc->props = smbus_eeprom_properties;
+    smbus_register_device(&smbus_eeprom_info);
 }
 
-static TypeInfo smbus_eeprom_info = {
-    .name          = "smbus-eeprom",
-    .parent        = TYPE_SMBUS_DEVICE,
-    .instance_size = sizeof(SMBusEEPROMDevice),
-    .class_init    = smbus_eeprom_class_initfn,
-};
-
-static void smbus_eeprom_register_types(void)
-{
-    type_register_static(&smbus_eeprom_info);
-}
-
-type_init(smbus_eeprom_register_types)
-
-void smbus_eeprom_init(i2c_bus *smbus, int nb_eeprom,
-                       const uint8_t *eeprom_spd, int eeprom_spd_size)
-{
-    int i;
-    uint8_t *eeprom_buf = g_malloc0(8 * 256); /* XXX: make this persistent */
-    if (eeprom_spd_size > 0) {
-        memcpy(eeprom_buf, eeprom_spd, eeprom_spd_size);
-    }
-
-    for (i = 0; i < nb_eeprom; i++) {
-        DeviceState *eeprom;
-        eeprom = qdev_create((BusState *)smbus, "smbus-eeprom");
-        qdev_prop_set_uint8(eeprom, "address", 0x50 + i);
-        qdev_prop_set_ptr(eeprom, "data", eeprom_buf + (i * 256));
-        qdev_init_nofail(eeprom);
-    }
-}
+device_init(smbus_eeprom_register_devices)

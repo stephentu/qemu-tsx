@@ -15,7 +15,7 @@
 
 void *gencb_alloc(size_t len, BlockDriverCompletionFunc *cb, void *opaque)
 {
-    GenericCB *gencb = g_malloc(len);
+    GenericCB *gencb = qemu_malloc(len);
     gencb->cb = cb;
     gencb->opaque = opaque;
     return gencb;
@@ -27,6 +27,6 @@ void gencb_complete(void *opaque, int ret)
     BlockDriverCompletionFunc *cb = gencb->cb;
     void *user_opaque = gencb->opaque;
 
-    g_free(gencb);
+    qemu_free(gencb);
     cb(user_opaque, ret);
 }

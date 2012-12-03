@@ -37,7 +37,7 @@
 #define SH_CPU_SH7750_ALL (SH_CPU_SH7750 | SH_CPU_SH7750S | SH_CPU_SH7750R)
 #define SH_CPU_SH7751_ALL (SH_CPU_SH7751 | SH_CPU_SH7751R)
 
-#define CPUArchState struct CPUSH4State
+#define CPUState struct CPUSH4State
 
 #include "cpu-defs.h"
 
@@ -184,19 +184,17 @@ typedef struct CPUSH4State {
     uint32_t cvr;		/* Cache Version Register */
 
     void *intc_handle;
-    int in_sleep;		/* SR_BL ignored during sleep */
+    int intr_at_halt;		/* SR_BL ignored during sleep */
     memory_content *movcal_backup;
     memory_content **movcal_backup_tail;
 } CPUSH4State;
 
-#include "cpu-qom.h"
-
-SuperHCPU *cpu_sh4_init(const char *cpu_model);
+CPUSH4State *cpu_sh4_init(const char *cpu_model);
 int cpu_sh4_exec(CPUSH4State * s);
 int cpu_sh4_signal_handler(int host_signum, void *pinfo,
                            void *puc);
 int cpu_sh4_handle_mmu_fault(CPUSH4State * env, target_ulong address, int rw,
-                             int mmu_idx);
+			     int mmu_idx, int is_softmmu);
 #define cpu_handle_mmu_fault cpu_sh4_handle_mmu_fault
 void do_interrupt(CPUSH4State * env);
 
@@ -204,20 +202,20 @@ void sh4_cpu_list(FILE *f, fprintf_function cpu_fprintf);
 #if !defined(CONFIG_USER_ONLY)
 void cpu_sh4_invalidate_tlb(CPUSH4State *s);
 uint32_t cpu_sh4_read_mmaped_itlb_addr(CPUSH4State *s,
-                                       hwaddr addr);
-void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, hwaddr addr,
+                                       target_phys_addr_t addr);
+void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, target_phys_addr_t addr,
                                     uint32_t mem_value);
 uint32_t cpu_sh4_read_mmaped_itlb_data(CPUSH4State *s,
-                                       hwaddr addr);
-void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, hwaddr addr,
+                                       target_phys_addr_t addr);
+void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, target_phys_addr_t addr,
                                     uint32_t mem_value);
 uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
-                                       hwaddr addr);
-void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
+                                       target_phys_addr_t addr);
+void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, target_phys_addr_t addr,
                                     uint32_t mem_value);
 uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,
-                                       hwaddr addr);
-void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
+                                       target_phys_addr_t addr);
+void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, target_phys_addr_t addr,
                                     uint32_t mem_value);
 #endif
 
@@ -232,15 +230,7 @@ void cpu_load_tlb(CPUSH4State * env);
 
 #include "softfloat.h"
 
-static inline CPUSH4State *cpu_init(const char *cpu_model)
-{
-    SuperHCPU *cpu = cpu_sh4_init(cpu_model);
-    if (cpu == NULL) {
-        return NULL;
-    }
-    return &cpu->env;
-}
-
+#define cpu_init cpu_sh4_init
 #define cpu_exec cpu_sh4_exec
 #define cpu_gen_code cpu_sh4_gen_code
 #define cpu_signal_handler cpu_sh4_signal_handler
@@ -250,13 +240,13 @@ static inline CPUSH4State *cpu_init(const char *cpu_model)
 #define MMU_MODE0_SUFFIX _kernel
 #define MMU_MODE1_SUFFIX _user
 #define MMU_USER_IDX 1
-static inline int cpu_mmu_index (CPUSH4State *env)
+static inline int cpu_mmu_index (CPUState *env)
 {
     return (env->sr & SR_MD) == 0 ? 1 : 0;
 }
 
 #if defined(CONFIG_USER_ONLY)
-static inline void cpu_clone_regs(CPUSH4State *env, target_ulong newsp)
+static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
 {
     if (newsp)
         env->gregs[15] = newsp;
@@ -358,7 +348,7 @@ static inline int cpu_ptel_pr (uint32_t ptel)
 
 #define TB_FLAG_PENDING_MOVCA  (1 << 4)
 
-static inline void cpu_get_tb_cpu_state(CPUSH4State *env, target_ulong *pc,
+static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
                                         target_ulong *cs_base, int *flags)
 {
     *pc = env->pc;
@@ -369,21 +359,6 @@ static inline void cpu_get_tb_cpu_state(CPUSH4State *env, target_ulong *pc,
             | (env->sr & (SR_MD | SR_RB))                      /* Bits 29-30 */
             | (env->sr & SR_FD)                                /* Bit 15 */
             | (env->movcal_backup ? TB_FLAG_PENDING_MOVCA : 0); /* Bit 4 */
-}
-
-static inline bool cpu_has_work(CPUState *cpu)
-{
-    CPUSH4State *env = &SUPERH_CPU(cpu)->env;
-
-    return env->interrupt_request & CPU_INTERRUPT_HARD;
-}
-
-#include "exec-all.h"
-
-static inline void cpu_pc_from_tb(CPUSH4State *env, TranslationBlock *tb)
-{
-    env->pc = tb->pc;
-    env->flags = tb->flags;
 }
 
 #endif				/* _CPU_SH4_H */

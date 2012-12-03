@@ -47,7 +47,6 @@ static const u_char  tcp_outflags[TCP_NSTATES] = {
 };
 
 
-#undef MAX_TCPOPTLEN
 #define MAX_TCPOPTLEN	32	/* max # bytes that go in options */
 
 /*

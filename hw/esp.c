@@ -2,7 +2,6 @@
  * QEMU ESP/NCR53C9x emulation
  *
  * Copyright (c) 2005-2006 Fabrice Bellard
- * Copyright (c) 2012 Herve Poussineau
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,9 +23,11 @@
  */
 
 #include "sysbus.h"
+#include "scsi.h"
 #include "esp.h"
-#include "trace.h"
-#include "qemu-log.h"
+
+/* debug ESP card */
+//#define DEBUG_ESP
 
 /*
  * On Sparc32, this is the ESP (NCR53C90) part of chip STP2000 (Master I/O),
@@ -36,12 +37,126 @@
  * http://www.ibiblio.org/pub/historic-linux/early-ports/Sparc/NCR/NCR53C9X.txt
  */
 
+#ifdef DEBUG_ESP
+#define DPRINTF(fmt, ...)                                       \
+    do { printf("ESP: " fmt , ## __VA_ARGS__); } while (0)
+#else
+#define DPRINTF(fmt, ...) do {} while (0)
+#endif
+
+#define ESP_ERROR(fmt, ...)                                             \
+    do { printf("ESP ERROR: %s: " fmt, __func__ , ## __VA_ARGS__); } while (0)
+
+#define ESP_REGS 16
+#define TI_BUFSZ 16
+
+typedef struct ESPState ESPState;
+
+struct ESPState {
+    SysBusDevice busdev;
+    uint32_t it_shift;
+    qemu_irq irq;
+    uint8_t rregs[ESP_REGS];
+    uint8_t wregs[ESP_REGS];
+    int32_t ti_size;
+    uint32_t ti_rptr, ti_wptr;
+    uint8_t ti_buf[TI_BUFSZ];
+    uint32_t sense;
+    uint32_t dma;
+    SCSIBus bus;
+    SCSIDevice *current_dev;
+    uint8_t cmdbuf[TI_BUFSZ];
+    uint32_t cmdlen;
+    uint32_t do_cmd;
+
+    /* The amount of data left in the current DMA transfer.  */
+    uint32_t dma_left;
+    /* The size of the current DMA transfer.  Zero if no transfer is in
+       progress.  */
+    uint32_t dma_counter;
+    uint8_t *async_buf;
+    uint32_t async_len;
+
+    ESPDMAMemoryReadWriteFunc dma_memory_read;
+    ESPDMAMemoryReadWriteFunc dma_memory_write;
+    void *dma_opaque;
+    int dma_enabled;
+    void (*dma_cb)(ESPState *s);
+};
+
+#define ESP_TCLO   0x0
+#define ESP_TCMID  0x1
+#define ESP_FIFO   0x2
+#define ESP_CMD    0x3
+#define ESP_RSTAT  0x4
+#define ESP_WBUSID 0x4
+#define ESP_RINTR  0x5
+#define ESP_WSEL   0x5
+#define ESP_RSEQ   0x6
+#define ESP_WSYNTP 0x6
+#define ESP_RFLAGS 0x7
+#define ESP_WSYNO  0x7
+#define ESP_CFG1   0x8
+#define ESP_RRES1  0x9
+#define ESP_WCCF   0x9
+#define ESP_RRES2  0xa
+#define ESP_WTEST  0xa
+#define ESP_CFG2   0xb
+#define ESP_CFG3   0xc
+#define ESP_RES3   0xd
+#define ESP_TCHI   0xe
+#define ESP_RES4   0xf
+
+#define CMD_DMA 0x80
+#define CMD_CMD 0x7f
+
+#define CMD_NOP      0x00
+#define CMD_FLUSH    0x01
+#define CMD_RESET    0x02
+#define CMD_BUSRESET 0x03
+#define CMD_TI       0x10
+#define CMD_ICCS     0x11
+#define CMD_MSGACC   0x12
+#define CMD_PAD      0x18
+#define CMD_SATN     0x1a
+#define CMD_SEL      0x41
+#define CMD_SELATN   0x42
+#define CMD_SELATNS  0x43
+#define CMD_ENSEL    0x44
+
+#define STAT_DO 0x00
+#define STAT_DI 0x01
+#define STAT_CD 0x02
+#define STAT_ST 0x03
+#define STAT_MO 0x06
+#define STAT_MI 0x07
+#define STAT_PIO_MASK 0x06
+
+#define STAT_TC 0x10
+#define STAT_PE 0x20
+#define STAT_GE 0x40
+#define STAT_INT 0x80
+
+#define BUSID_DID 0x07
+
+#define INTR_FC 0x08
+#define INTR_BS 0x10
+#define INTR_DC 0x20
+#define INTR_RST 0x80
+
+#define SEQ_0 0x0
+#define SEQ_CD 0x4
+
+#define CFG1_RESREPT 0x40
+
+#define TCHI_FAS100A 0x4
+
 static void esp_raise_irq(ESPState *s)
 {
     if (!(s->rregs[ESP_RSTAT] & STAT_INT)) {
         s->rregs[ESP_RSTAT] |= STAT_INT;
         qemu_irq_raise(s->irq);
-        trace_esp_raise_irq();
+        DPRINTF("Raise IRQ\n");
     }
 }
 
@@ -50,33 +165,25 @@ static void esp_lower_irq(ESPState *s)
     if (s->rregs[ESP_RSTAT] & STAT_INT) {
         s->rregs[ESP_RSTAT] &= ~STAT_INT;
         qemu_irq_lower(s->irq);
-        trace_esp_lower_irq();
+        DPRINTF("Lower IRQ\n");
     }
 }
 
-void esp_dma_enable(ESPState *s, int irq, int level)
+static void esp_dma_enable(void *opaque, int irq, int level)
 {
+    DeviceState *d = opaque;
+    ESPState *s = container_of(d, ESPState, busdev.qdev);
+
     if (level) {
         s->dma_enabled = 1;
-        trace_esp_dma_enable();
+        DPRINTF("Raise enable\n");
         if (s->dma_cb) {
             s->dma_cb(s);
             s->dma_cb = NULL;
         }
     } else {
-        trace_esp_dma_disable();
+        DPRINTF("Lower enable\n");
         s->dma_enabled = 0;
-    }
-}
-
-void esp_request_cancelled(SCSIRequest *req)
-{
-    ESPState *s = req->hba_private;
-
-    if (req == s->current_req) {
-        scsi_req_unref(s->current_req);
-        s->current_req = NULL;
-        s->current_dev = NULL;
     }
 }
 
@@ -87,29 +194,26 @@ static uint32_t get_cmd(ESPState *s, uint8_t *buf)
 
     target = s->wregs[ESP_WBUSID] & BUSID_DID;
     if (s->dma) {
-        dmalen = s->rregs[ESP_TCLO];
-        dmalen |= s->rregs[ESP_TCMID] << 8;
-        dmalen |= s->rregs[ESP_TCHI] << 16;
+        dmalen = s->rregs[ESP_TCLO] | (s->rregs[ESP_TCMID] << 8);
         s->dma_memory_read(s->dma_opaque, buf, dmalen);
     } else {
         dmalen = s->ti_size;
         memcpy(buf, s->ti_buf, dmalen);
-        buf[0] = buf[2] >> 5;
+        buf[0] = 0;
     }
-    trace_esp_get_cmd(dmalen, target);
+    DPRINTF("get_cmd: len %d target %d\n", dmalen, target);
 
     s->ti_size = 0;
     s->ti_rptr = 0;
     s->ti_wptr = 0;
 
-    if (s->current_req) {
+    if (s->current_dev) {
         /* Started a new command before the old one finished.  Cancel it.  */
-        scsi_req_cancel(s->current_req);
+        s->current_dev->info->cancel_io(s->current_dev, 0);
         s->async_len = 0;
     }
 
-    s->current_dev = scsi_device_find(&s->bus, 0, target, 0);
-    if (!s->current_dev) {
+    if (target >= ESP_MAX_DEVS || !s->bus.devs[target]) {
         // No such drive
         s->rregs[ESP_RSTAT] = 0;
         s->rregs[ESP_RINTR] = INTR_DC;
@@ -117,6 +221,7 @@ static uint32_t get_cmd(ESPState *s, uint8_t *buf)
         esp_raise_irq(s);
         return 0;
     }
+    s->current_dev = s->bus.devs[target];
     return dmalen;
 }
 
@@ -124,13 +229,10 @@ static void do_busid_cmd(ESPState *s, uint8_t *buf, uint8_t busid)
 {
     int32_t datalen;
     int lun;
-    SCSIDevice *current_lun;
 
-    trace_esp_do_busid_cmd(busid);
+    DPRINTF("do_busid_cmd: busid 0x%x\n", busid);
     lun = busid & 7;
-    current_lun = scsi_device_find(&s->bus, 0, s->current_dev->id, lun);
-    s->current_req = scsi_req_new(current_lun, 0, lun, buf, s);
-    datalen = scsi_req_enqueue(s->current_req);
+    datalen = s->current_dev->info->send_command(s->current_dev, 0, buf, lun);
     s->ti_size = datalen;
     if (datalen != 0) {
         s->rregs[ESP_RSTAT] = STAT_TC;
@@ -138,10 +240,11 @@ static void do_busid_cmd(ESPState *s, uint8_t *buf, uint8_t busid)
         s->dma_counter = 0;
         if (datalen > 0) {
             s->rregs[ESP_RSTAT] |= STAT_DI;
+            s->current_dev->info->read_data(s->current_dev, 0);
         } else {
             s->rregs[ESP_RSTAT] |= STAT_DO;
+            s->current_dev->info->write_data(s->current_dev, 0);
         }
-        scsi_req_continue(s->current_req);
     }
     s->rregs[ESP_RINTR] = INTR_BS | INTR_FC;
     s->rregs[ESP_RSEQ] = SEQ_CD;
@@ -160,7 +263,7 @@ static void handle_satn(ESPState *s)
     uint8_t buf[32];
     int len;
 
-    if (s->dma && !s->dma_enabled) {
+    if (!s->dma_enabled) {
         s->dma_cb = handle_satn;
         return;
     }
@@ -174,7 +277,7 @@ static void handle_s_without_atn(ESPState *s)
     uint8_t buf[32];
     int len;
 
-    if (s->dma && !s->dma_enabled) {
+    if (!s->dma_enabled) {
         s->dma_cb = handle_s_without_atn;
         return;
     }
@@ -186,13 +289,13 @@ static void handle_s_without_atn(ESPState *s)
 
 static void handle_satn_stop(ESPState *s)
 {
-    if (s->dma && !s->dma_enabled) {
+    if (!s->dma_enabled) {
         s->dma_cb = handle_satn_stop;
         return;
     }
     s->cmdlen = get_cmd(s, s->cmdbuf);
     if (s->cmdlen) {
-        trace_esp_handle_satn_stop(s->cmdlen);
+        DPRINTF("Set ATN & Stop: cmdlen %d\n", s->cmdlen);
         s->do_cmd = 1;
         s->rregs[ESP_RSTAT] = STAT_TC | STAT_CD;
         s->rregs[ESP_RINTR] = INTR_BS | INTR_FC;
@@ -203,8 +306,8 @@ static void handle_satn_stop(ESPState *s)
 
 static void write_response(ESPState *s)
 {
-    trace_esp_write_response(s->status);
-    s->ti_buf[0] = s->status;
+    DPRINTF("Transfer status (sense=%d)\n", s->sense);
+    s->ti_buf[0] = s->sense;
     s->ti_buf[1] = 0;
     if (s->dma) {
         s->dma_memory_write(s->dma_opaque, s->ti_buf, 2);
@@ -228,7 +331,6 @@ static void esp_dma_done(ESPState *s)
     s->rregs[ESP_RFLAGS] = 0;
     s->rregs[ESP_TCLO] = 0;
     s->rregs[ESP_TCMID] = 0;
-    s->rregs[ESP_TCHI] = 0;
     esp_raise_irq(s);
 }
 
@@ -240,7 +342,7 @@ static void esp_do_dma(ESPState *s)
     to_device = (s->ti_size < 0);
     len = s->dma_left;
     if (s->do_cmd) {
-        trace_esp_do_dma(s->cmdlen, len);
+        DPRINTF("command len %d + %d\n", s->cmdlen, len);
         s->dma_memory_read(s->dma_opaque, &s->cmdbuf[s->cmdlen], len);
         s->ti_size = 0;
         s->cmdlen = 0;
@@ -268,57 +370,53 @@ static void esp_do_dma(ESPState *s)
     else
         s->ti_size -= len;
     if (s->async_len == 0) {
-        scsi_req_continue(s->current_req);
-        /* If there is still data to be read from the device then
-           complete the DMA operation immediately.  Otherwise defer
-           until the scsi layer has completed.  */
-        if (to_device || s->dma_left != 0 || s->ti_size == 0) {
-            return;
+        if (to_device) {
+            // ti_size is negative
+            s->current_dev->info->write_data(s->current_dev, 0);
+        } else {
+            s->current_dev->info->read_data(s->current_dev, 0);
+            /* If there is still data to be read from the device then
+               complete the DMA operation immediately.  Otherwise defer
+               until the scsi layer has completed.  */
+            if (s->dma_left == 0 && s->ti_size > 0) {
+                esp_dma_done(s);
+            }
         }
-    }
-
-    /* Partially filled a scsi buffer. Complete immediately.  */
-    esp_dma_done(s);
-}
-
-void esp_command_complete(SCSIRequest *req, uint32_t status,
-                                 size_t resid)
-{
-    ESPState *s = req->hba_private;
-
-    trace_esp_command_complete();
-    if (s->ti_size != 0) {
-        trace_esp_command_complete_unexpected();
-    }
-    s->ti_size = 0;
-    s->dma_left = 0;
-    s->async_len = 0;
-    if (status) {
-        trace_esp_command_complete_fail();
-    }
-    s->status = status;
-    s->rregs[ESP_RSTAT] = STAT_ST;
-    esp_dma_done(s);
-    if (s->current_req) {
-        scsi_req_unref(s->current_req);
-        s->current_req = NULL;
-        s->current_dev = NULL;
-    }
-}
-
-void esp_transfer_data(SCSIRequest *req, uint32_t len)
-{
-    ESPState *s = req->hba_private;
-
-    trace_esp_transfer_data(s->dma_left, s->ti_size);
-    s->async_len = len;
-    s->async_buf = scsi_req_get_buf(req);
-    if (s->dma_left) {
-        esp_do_dma(s);
-    } else if (s->dma_counter != 0 && s->ti_size <= 0) {
-        /* If this was the last part of a DMA transfer then the
-           completion interrupt is deferred to here.  */
+    } else {
+        /* Partially filled a scsi buffer. Complete immediately.  */
         esp_dma_done(s);
+    }
+}
+
+static void esp_command_complete(SCSIBus *bus, int reason, uint32_t tag,
+                                 uint32_t arg)
+{
+    ESPState *s = DO_UPCAST(ESPState, busdev.qdev, bus->qbus.parent);
+
+    if (reason == SCSI_REASON_DONE) {
+        DPRINTF("SCSI Command complete\n");
+        if (s->ti_size != 0)
+            DPRINTF("SCSI command completed unexpectedly\n");
+        s->ti_size = 0;
+        s->dma_left = 0;
+        s->async_len = 0;
+        if (arg)
+            DPRINTF("Command failed\n");
+        s->sense = arg;
+        s->rregs[ESP_RSTAT] = STAT_ST;
+        esp_dma_done(s);
+        s->current_dev = NULL;
+    } else {
+        DPRINTF("transfer %d/%d\n", s->dma_left, s->ti_size);
+        s->async_len = arg;
+        s->async_buf = s->current_dev->info->get_buf(s->current_dev, 0);
+        if (s->dma_left) {
+            esp_do_dma(s);
+        } else if (s->dma_counter != 0 && s->ti_size <= 0) {
+            /* If this was the last part of a DMA transfer then the
+               completion interrupt is deferred to here.  */
+            esp_dma_done(s);
+        }
     }
 }
 
@@ -326,14 +424,7 @@ static void handle_ti(ESPState *s)
 {
     uint32_t dmalen, minlen;
 
-    if (s->dma && !s->dma_enabled) {
-        s->dma_cb = handle_ti;
-        return;
-    }
-
-    dmalen = s->rregs[ESP_TCLO];
-    dmalen |= s->rregs[ESP_TCMID] << 8;
-    dmalen |= s->rregs[ESP_TCHI] << 16;
+    dmalen = s->rregs[ESP_TCLO] | (s->rregs[ESP_TCMID] << 8);
     if (dmalen==0) {
       dmalen=0x10000;
     }
@@ -345,13 +436,13 @@ static void handle_ti(ESPState *s)
         minlen = (dmalen < -s->ti_size) ? dmalen : -s->ti_size;
     else
         minlen = (dmalen < s->ti_size) ? dmalen : s->ti_size;
-    trace_esp_handle_ti(minlen);
+    DPRINTF("Transfer Information len %d\n", minlen);
     if (s->dma) {
         s->dma_left = minlen;
         s->rregs[ESP_RSTAT] &= ~STAT_TC;
         esp_do_dma(s);
     } else if (s->do_cmd) {
-        trace_esp_handle_ti_cmd(s->cmdlen);
+        DPRINTF("command len %d\n", s->cmdlen);
         s->ti_size = 0;
         s->cmdlen = 0;
         s->do_cmd = 0;
@@ -360,11 +451,13 @@ static void handle_ti(ESPState *s)
     }
 }
 
-void esp_hard_reset(ESPState *s)
+static void esp_hard_reset(DeviceState *d)
 {
+    ESPState *s = container_of(d, ESPState, busdev.qdev);
+
     memset(s->rregs, 0, ESP_REGS);
     memset(s->wregs, 0, ESP_REGS);
-    s->rregs[ESP_TCHI] = s->chip_id;
+    s->rregs[ESP_TCHI] = TCHI_FAS100A; // Indicate fas100a
     s->ti_size = 0;
     s->ti_rptr = 0;
     s->ti_wptr = 0;
@@ -375,32 +468,47 @@ void esp_hard_reset(ESPState *s)
     s->rregs[ESP_CFG1] = 7;
 }
 
-static void esp_soft_reset(ESPState *s)
+static void esp_soft_reset(DeviceState *d)
 {
+    ESPState *s = container_of(d, ESPState, busdev.qdev);
+
     qemu_irq_lower(s->irq);
-    esp_hard_reset(s);
+    esp_hard_reset(d);
 }
 
-static void parent_esp_reset(ESPState *s, int irq, int level)
+static void parent_esp_reset(void *opaque, int irq, int level)
 {
     if (level) {
-        esp_soft_reset(s);
+        esp_soft_reset(opaque);
     }
 }
 
-uint64_t esp_reg_read(ESPState *s, uint32_t saddr)
+static void esp_gpio_demux(void *opaque, int irq, int level)
 {
-    uint32_t old_val;
+    switch (irq) {
+    case 0:
+        parent_esp_reset(opaque, irq, level);
+        break;
+    case 1:
+        esp_dma_enable(opaque, irq, level);
+        break;
+    }
+}
 
-    trace_esp_mem_readb(saddr, s->rregs[saddr]);
+static uint32_t esp_mem_readb(void *opaque, target_phys_addr_t addr)
+{
+    ESPState *s = opaque;
+    uint32_t saddr, old_val;
+
+    saddr = addr >> s->it_shift;
+    DPRINTF("read reg[%d]: 0x%2.2x\n", saddr, s->rregs[saddr]);
     switch (saddr) {
     case ESP_FIFO:
         if (s->ti_size > 0) {
             s->ti_size--;
             if ((s->rregs[ESP_RSTAT] & STAT_PIO_MASK) == 0) {
                 /* Data out.  */
-                qemu_log_mask(LOG_UNIMP,
-                              "esp: PIO data read not implemented\n");
+                ESP_ERROR("PIO data read not implemented\n");
                 s->rregs[ESP_FIFO] = 0;
             } else {
                 s->rregs[ESP_FIFO] = s->ti_buf[s->ti_rptr++];
@@ -428,20 +536,24 @@ uint64_t esp_reg_read(ESPState *s, uint32_t saddr)
     return s->rregs[saddr];
 }
 
-void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val)
+static void esp_mem_writeb(void *opaque, target_phys_addr_t addr, uint32_t val)
 {
-    trace_esp_mem_writeb(saddr, s->wregs[saddr], val);
+    ESPState *s = opaque;
+    uint32_t saddr;
+
+    saddr = addr >> s->it_shift;
+    DPRINTF("write reg[%d]: 0x%2.2x -> 0x%2.2x\n", saddr, s->wregs[saddr],
+            val);
     switch (saddr) {
     case ESP_TCLO:
     case ESP_TCMID:
-    case ESP_TCHI:
         s->rregs[ESP_RSTAT] &= ~STAT_TC;
         break;
     case ESP_FIFO:
         if (s->do_cmd) {
             s->cmdbuf[s->cmdlen++] = val & 0xff;
         } else if (s->ti_size == TI_BUFSZ - 1) {
-            trace_esp_error_fifo_overrun();
+            ESP_ERROR("fifo overrun\n");
         } else {
             s->ti_size++;
             s->ti_buf[s->ti_wptr++] = val & 0xff;
@@ -454,27 +566,26 @@ void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val)
             /* Reload DMA counter.  */
             s->rregs[ESP_TCLO] = s->wregs[ESP_TCLO];
             s->rregs[ESP_TCMID] = s->wregs[ESP_TCMID];
-            s->rregs[ESP_TCHI] = s->wregs[ESP_TCHI];
         } else {
             s->dma = 0;
         }
         switch(val & CMD_CMD) {
         case CMD_NOP:
-            trace_esp_mem_writeb_cmd_nop(val);
+            DPRINTF("NOP (%2.2x)\n", val);
             break;
         case CMD_FLUSH:
-            trace_esp_mem_writeb_cmd_flush(val);
+            DPRINTF("Flush FIFO (%2.2x)\n", val);
             //s->ti_size = 0;
             s->rregs[ESP_RINTR] = INTR_FC;
             s->rregs[ESP_RSEQ] = 0;
             s->rregs[ESP_RFLAGS] = 0;
             break;
         case CMD_RESET:
-            trace_esp_mem_writeb_cmd_reset(val);
-            esp_soft_reset(s);
+            DPRINTF("Chip reset (%2.2x)\n", val);
+            esp_soft_reset(&s->busdev.qdev);
             break;
         case CMD_BUSRESET:
-            trace_esp_mem_writeb_cmd_bus_reset(val);
+            DPRINTF("Bus reset (%2.2x)\n", val);
             s->rregs[ESP_RINTR] = INTR_RST;
             if (!(s->wregs[ESP_CFG1] & CFG1_RESREPT)) {
                 esp_raise_irq(s);
@@ -484,79 +595,78 @@ void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val)
             handle_ti(s);
             break;
         case CMD_ICCS:
-            trace_esp_mem_writeb_cmd_iccs(val);
+            DPRINTF("Initiator Command Complete Sequence (%2.2x)\n", val);
             write_response(s);
             s->rregs[ESP_RINTR] = INTR_FC;
             s->rregs[ESP_RSTAT] |= STAT_MI;
             break;
         case CMD_MSGACC:
-            trace_esp_mem_writeb_cmd_msgacc(val);
+            DPRINTF("Message Accepted (%2.2x)\n", val);
             s->rregs[ESP_RINTR] = INTR_DC;
             s->rregs[ESP_RSEQ] = 0;
             s->rregs[ESP_RFLAGS] = 0;
             esp_raise_irq(s);
             break;
         case CMD_PAD:
-            trace_esp_mem_writeb_cmd_pad(val);
+            DPRINTF("Transfer padding (%2.2x)\n", val);
             s->rregs[ESP_RSTAT] = STAT_TC;
             s->rregs[ESP_RINTR] = INTR_FC;
             s->rregs[ESP_RSEQ] = 0;
             break;
         case CMD_SATN:
-            trace_esp_mem_writeb_cmd_satn(val);
-            break;
-        case CMD_RSTATN:
-            trace_esp_mem_writeb_cmd_rstatn(val);
+            DPRINTF("Set ATN (%2.2x)\n", val);
             break;
         case CMD_SEL:
-            trace_esp_mem_writeb_cmd_sel(val);
+            DPRINTF("Select without ATN (%2.2x)\n", val);
             handle_s_without_atn(s);
             break;
         case CMD_SELATN:
-            trace_esp_mem_writeb_cmd_selatn(val);
+            DPRINTF("Select with ATN (%2.2x)\n", val);
             handle_satn(s);
             break;
         case CMD_SELATNS:
-            trace_esp_mem_writeb_cmd_selatns(val);
+            DPRINTF("Select with ATN & stop (%2.2x)\n", val);
             handle_satn_stop(s);
             break;
         case CMD_ENSEL:
-            trace_esp_mem_writeb_cmd_ensel(val);
+            DPRINTF("Enable selection (%2.2x)\n", val);
             s->rregs[ESP_RINTR] = 0;
-            break;
-        case CMD_DISSEL:
-            trace_esp_mem_writeb_cmd_dissel(val);
-            s->rregs[ESP_RINTR] = 0;
-            esp_raise_irq(s);
             break;
         default:
-            trace_esp_error_unhandled_command(val);
+            ESP_ERROR("Unhandled ESP command (%2.2x)\n", val);
             break;
         }
         break;
     case ESP_WBUSID ... ESP_WSYNO:
         break;
     case ESP_CFG1:
-    case ESP_CFG2: case ESP_CFG3:
-    case ESP_RES3: case ESP_RES4:
         s->rregs[saddr] = val;
         break;
     case ESP_WCCF ... ESP_WTEST:
         break;
+    case ESP_CFG2 ... ESP_RES4:
+        s->rregs[saddr] = val;
+        break;
     default:
-        trace_esp_error_invalid_write(val, saddr);
+        ESP_ERROR("invalid write of 0x%02x at [0x%x]\n", val, saddr);
         return;
     }
     s->wregs[saddr] = val;
 }
 
-static bool esp_mem_accepts(void *opaque, hwaddr addr,
-                            unsigned size, bool is_write)
-{
-    return (size == 1) || (is_write && size == 4);
-}
+static CPUReadMemoryFunc * const esp_mem_read[3] = {
+    esp_mem_readb,
+    NULL,
+    NULL,
+};
 
-const VMStateDescription vmstate_esp = {
+static CPUWriteMemoryFunc * const esp_mem_write[3] = {
+    esp_mem_writeb,
+    NULL,
+    esp_mem_writeb,
+};
+
+static const VMStateDescription vmstate_esp = {
     .name ="esp",
     .version_id = 3,
     .minimum_version_id = 3,
@@ -568,7 +678,7 @@ const VMStateDescription vmstate_esp = {
         VMSTATE_UINT32(ti_rptr, ESPState),
         VMSTATE_UINT32(ti_wptr, ESPState),
         VMSTATE_BUFFER(ti_buf, ESPState),
-        VMSTATE_UINT32(status, ESPState),
+        VMSTATE_UINT32(sense, ESPState),
         VMSTATE_UINT32(dma, ESPState),
         VMSTATE_BUFFER(cmdbuf, ESPState),
         VMSTATE_UINT32(cmdlen, ESPState),
@@ -578,41 +688,7 @@ const VMStateDescription vmstate_esp = {
     }
 };
 
-typedef struct {
-    SysBusDevice busdev;
-    MemoryRegion iomem;
-    uint32_t it_shift;
-    ESPState esp;
-} SysBusESPState;
-
-static void sysbus_esp_mem_write(void *opaque, hwaddr addr,
-                                 uint64_t val, unsigned int size)
-{
-    SysBusESPState *sysbus = opaque;
-    uint32_t saddr;
-
-    saddr = addr >> sysbus->it_shift;
-    esp_reg_write(&sysbus->esp, saddr, val);
-}
-
-static uint64_t sysbus_esp_mem_read(void *opaque, hwaddr addr,
-                                    unsigned int size)
-{
-    SysBusESPState *sysbus = opaque;
-    uint32_t saddr;
-
-    saddr = addr >> sysbus->it_shift;
-    return esp_reg_read(&sysbus->esp, saddr);
-}
-
-static const MemoryRegionOps sysbus_esp_mem_ops = {
-    .read = sysbus_esp_mem_read,
-    .write = sysbus_esp_mem_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid.accepts = esp_mem_accepts,
-};
-
-void esp_init(hwaddr espaddr, int it_shift,
+void esp_init(target_phys_addr_t espaddr, int it_shift,
               ESPDMAMemoryReadWriteFunc dma_memory_read,
               ESPDMAMemoryReadWriteFunc dma_memory_write,
               void *dma_opaque, qemu_irq irq, qemu_irq *reset,
@@ -620,16 +696,14 @@ void esp_init(hwaddr espaddr, int it_shift,
 {
     DeviceState *dev;
     SysBusDevice *s;
-    SysBusESPState *sysbus;
     ESPState *esp;
 
     dev = qdev_create(NULL, "esp");
-    sysbus = DO_UPCAST(SysBusESPState, busdev.qdev, dev);
-    esp = &sysbus->esp;
+    esp = DO_UPCAST(ESPState, busdev.qdev, dev);
     esp->dma_memory_read = dma_memory_read;
     esp->dma_memory_write = dma_memory_write;
     esp->dma_opaque = dma_opaque;
-    sysbus->it_shift = it_shift;
+    esp->it_shift = it_shift;
     /* XXX for now until rc4030 has been changed to use DMA enable signal */
     esp->dma_enabled = 1;
     qdev_init_nofail(dev);
@@ -640,88 +714,38 @@ void esp_init(hwaddr espaddr, int it_shift,
     *dma_enable = qdev_get_gpio_in(dev, 1);
 }
 
-static const struct SCSIBusInfo esp_scsi_info = {
-    .tcq = false,
-    .max_target = ESP_MAX_DEVS,
-    .max_lun = 7,
-
-    .transfer_data = esp_transfer_data,
-    .complete = esp_command_complete,
-    .cancel = esp_request_cancelled
-};
-
-static void sysbus_esp_gpio_demux(void *opaque, int irq, int level)
+static int esp_init1(SysBusDevice *dev)
 {
-    DeviceState *d = opaque;
-    SysBusESPState *sysbus = container_of(d, SysBusESPState, busdev.qdev);
-    ESPState *s = &sysbus->esp;
-
-    switch (irq) {
-    case 0:
-        parent_esp_reset(s, irq, level);
-        break;
-    case 1:
-        esp_dma_enable(opaque, irq, level);
-        break;
-    }
-}
-
-static int sysbus_esp_init(SysBusDevice *dev)
-{
-    SysBusESPState *sysbus = FROM_SYSBUS(SysBusESPState, dev);
-    ESPState *s = &sysbus->esp;
+    ESPState *s = FROM_SYSBUS(ESPState, dev);
+    int esp_io_memory;
 
     sysbus_init_irq(dev, &s->irq);
-    assert(sysbus->it_shift != -1);
+    assert(s->it_shift != -1);
 
-    s->chip_id = TCHI_FAS100A;
-    memory_region_init_io(&sysbus->iomem, &sysbus_esp_mem_ops, sysbus,
-                          "esp", ESP_REGS << sysbus->it_shift);
-    sysbus_init_mmio(dev, &sysbus->iomem);
+    esp_io_memory = cpu_register_io_memory(esp_mem_read, esp_mem_write, s,
+                                           DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, ESP_REGS << s->it_shift, esp_io_memory);
 
-    qdev_init_gpio_in(&dev->qdev, sysbus_esp_gpio_demux, 2);
+    qdev_init_gpio_in(&dev->qdev, esp_gpio_demux, 2);
 
-    scsi_bus_new(&s->bus, &dev->qdev, &esp_scsi_info);
+    scsi_bus_new(&s->bus, &dev->qdev, 0, ESP_MAX_DEVS, esp_command_complete);
     return scsi_bus_legacy_handle_cmdline(&s->bus);
 }
 
-static void sysbus_esp_hard_reset(DeviceState *dev)
-{
-    SysBusESPState *sysbus = DO_UPCAST(SysBusESPState, busdev.qdev, dev);
-    esp_hard_reset(&sysbus->esp);
-}
-
-static const VMStateDescription vmstate_sysbus_esp_scsi = {
-    .name = "sysbusespscsi",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields = (VMStateField[]) {
-        VMSTATE_STRUCT(esp, SysBusESPState, 0, vmstate_esp, ESPState),
-        VMSTATE_END_OF_LIST()
+static SysBusDeviceInfo esp_info = {
+    .init = esp_init1,
+    .qdev.name  = "esp",
+    .qdev.size  = sizeof(ESPState),
+    .qdev.vmsd  = &vmstate_esp,
+    .qdev.reset = esp_hard_reset,
+    .qdev.props = (Property[]) {
+        {.name = NULL}
     }
 };
 
-static void sysbus_esp_class_init(ObjectClass *klass, void *data)
+static void esp_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = sysbus_esp_init;
-    dc->reset = sysbus_esp_hard_reset;
-    dc->vmsd = &vmstate_sysbus_esp_scsi;
+    sysbus_register_withprop(&esp_info);
 }
 
-static const TypeInfo sysbus_esp_info = {
-    .name          = "esp",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(SysBusESPState),
-    .class_init    = sysbus_esp_class_init,
-};
-
-static void esp_register_types(void)
-{
-    type_register_static(&sysbus_esp_info);
-}
-
-type_init(esp_register_types)
+device_init(esp_register_devices)

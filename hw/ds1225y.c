@@ -1,7 +1,7 @@
 /*
  * QEMU NVRAM emulation for DS1225Y chip
  *
- * Copyright (c) 2007-2008 HervÃ© Poussineau
+ * Copyright (c) 2007-2008 Hervé Poussineau
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,144 +22,161 @@
  * THE SOFTWARE.
  */
 
-#include "sysbus.h"
-#include "trace.h"
+#include "hw.h"
+#include "mips.h"
+#include "nvram.h"
 
-typedef struct {
-    DeviceState qdev;
-    MemoryRegion iomem;
-    uint32_t chip_size;
-    char *filename;
-    FILE *file;
-    uint8_t *contents;
-} NvRamState;
+//#define DEBUG_NVRAM
 
-static uint64_t nvram_read(void *opaque, hwaddr addr, unsigned size)
+typedef struct ds1225y_t
 {
-    NvRamState *s = opaque;
+    uint32_t chip_size;
+    QEMUFile *file;
+    uint8_t *contents;
+    uint8_t protection;
+} ds1225y_t;
+
+
+static uint32_t nvram_readb (void *opaque, target_phys_addr_t addr)
+{
+    ds1225y_t *s = opaque;
     uint32_t val;
 
     val = s->contents[addr];
-    trace_nvram_read(addr, val);
+
+#ifdef DEBUG_NVRAM
+    printf("nvram: read 0x%x at " TARGET_FMT_lx "\n", val, addr);
+#endif
     return val;
 }
 
-static void nvram_write(void *opaque, hwaddr addr, uint64_t val,
-                        unsigned size)
+static uint32_t nvram_readw (void *opaque, target_phys_addr_t addr)
 {
-    NvRamState *s = opaque;
+    uint32_t v;
+    v = nvram_readb(opaque, addr);
+    v |= nvram_readb(opaque, addr + 1) << 8;
+    return v;
+}
 
-    val &= 0xff;
-    trace_nvram_write(addr, s->contents[addr], val);
+static uint32_t nvram_readl (void *opaque, target_phys_addr_t addr)
+{
+    uint32_t v;
+    v = nvram_readb(opaque, addr);
+    v |= nvram_readb(opaque, addr + 1) << 8;
+    v |= nvram_readb(opaque, addr + 2) << 16;
+    v |= nvram_readb(opaque, addr + 3) << 24;
+    return v;
+}
 
-    s->contents[addr] = val;
+static void nvram_writeb (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    ds1225y_t *s = opaque;
+
+#ifdef DEBUG_NVRAM
+    printf("nvram: write 0x%x at " TARGET_FMT_lx "\n", val, addr);
+#endif
+
+    s->contents[addr] = val & 0xff;
     if (s->file) {
-        fseek(s->file, addr, SEEK_SET);
-        fputc(val, s->file);
-        fflush(s->file);
+        qemu_fseek(s->file, addr, SEEK_SET);
+        qemu_put_byte(s->file, (int)val);
+        qemu_fflush(s->file);
     }
 }
 
-static const MemoryRegionOps nvram_ops = {
-    .read = nvram_read,
-    .write = nvram_write,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 1,
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-static int nvram_post_load(void *opaque, int version_id)
+static void nvram_writew (void *opaque, target_phys_addr_t addr, uint32_t val)
 {
-    NvRamState *s = opaque;
-
-    /* Close file, as filename may has changed in load/store process */
-    if (s->file) {
-        fclose(s->file);
-    }
-
-    /* Write back nvram contents */
-    s->file = fopen(s->filename, "wb");
-    if (s->file) {
-        /* Write back contents, as 'wb' mode cleaned the file */
-        if (fwrite(s->contents, s->chip_size, 1, s->file) != 1) {
-            printf("nvram_post_load: short write\n");
-        }
-        fflush(s->file);
-    }
-
-    return 0;
+    nvram_writeb(opaque, addr, val & 0xff);
+    nvram_writeb(opaque, addr + 1, (val >> 8) & 0xff);
 }
 
-static const VMStateDescription vmstate_nvram = {
-    .name = "nvram",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .post_load = nvram_post_load,
-    .fields = (VMStateField[]) {
-        VMSTATE_VARRAY_UINT32(contents, NvRamState, chip_size, 0,
-                              vmstate_info_uint8, uint8_t),
-        VMSTATE_END_OF_LIST()
+static void nvram_writel (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    nvram_writeb(opaque, addr, val & 0xff);
+    nvram_writeb(opaque, addr + 1, (val >> 8) & 0xff);
+    nvram_writeb(opaque, addr + 2, (val >> 16) & 0xff);
+    nvram_writeb(opaque, addr + 3, (val >> 24) & 0xff);
+}
+
+static void nvram_writeb_protected (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    ds1225y_t *s = opaque;
+
+    if (s->protection != 7) {
+#ifdef DEBUG_NVRAM
+    printf("nvram: prevent write of 0x%x at " TARGET_FMT_lx "\n", val, addr);
+#endif
+        return;
     }
+
+    nvram_writeb(opaque, addr, val);
+}
+
+static void nvram_writew_protected (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    nvram_writeb_protected(opaque, addr, val & 0xff);
+    nvram_writeb_protected(opaque, addr + 1, (val >> 8) & 0xff);
+}
+
+static void nvram_writel_protected (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    nvram_writeb_protected(opaque, addr, val & 0xff);
+    nvram_writeb_protected(opaque, addr + 1, (val >> 8) & 0xff);
+    nvram_writeb_protected(opaque, addr + 2, (val >> 16) & 0xff);
+    nvram_writeb_protected(opaque, addr + 3, (val >> 24) & 0xff);
+}
+
+static CPUReadMemoryFunc * const nvram_read[] = {
+    &nvram_readb,
+    &nvram_readw,
+    &nvram_readl,
 };
 
-typedef struct {
-    SysBusDevice busdev;
-    NvRamState nvram;
-} SysBusNvRamState;
+static CPUWriteMemoryFunc * const nvram_write[] = {
+    &nvram_writeb,
+    &nvram_writew,
+    &nvram_writel,
+};
 
-static int nvram_sysbus_initfn(SysBusDevice *dev)
+static CPUWriteMemoryFunc * const nvram_write_protected[] = {
+    &nvram_writeb_protected,
+    &nvram_writew_protected,
+    &nvram_writel_protected,
+};
+
+/* Initialisation routine */
+void *ds1225y_init(target_phys_addr_t mem_base, const char *filename)
 {
-    NvRamState *s = &FROM_SYSBUS(SysBusNvRamState, dev)->nvram;
-    FILE *file;
+    ds1225y_t *s;
+    int mem_indexRW, mem_indexRP;
+    QEMUFile *file;
 
-    s->contents = g_malloc0(s->chip_size);
-
-    memory_region_init_io(&s->iomem, &nvram_ops, s, "nvram", s->chip_size);
-    sysbus_init_mmio(dev, &s->iomem);
+    s = qemu_mallocz(sizeof(ds1225y_t));
+    s->chip_size = 0x2000; /* Fixed for ds1225y chip: 8 KiB */
+    s->contents = qemu_mallocz(s->chip_size);
+    s->protection = 7;
 
     /* Read current file */
-    file = fopen(s->filename, "rb");
+    file = qemu_fopen(filename, "rb");
     if (file) {
         /* Read nvram contents */
-        if (fread(s->contents, s->chip_size, 1, file) != 1) {
-            printf("nvram_sysbus_initfn: short read\n");
-        }
-        fclose(file);
+        qemu_get_buffer(file, s->contents, s->chip_size);
+        qemu_fclose(file);
     }
-    nvram_post_load(s, 0);
+    s->file = qemu_fopen(filename, "wb");
+    if (s->file) {
+        /* Write back contents, as 'wb' mode cleaned the file */
+        qemu_put_buffer(s->file, s->contents, s->chip_size);
+        qemu_fflush(s->file);
+    }
 
-    return 0;
+    /* Read/write memory */
+    mem_indexRW = cpu_register_io_memory(nvram_read, nvram_write, s,
+                                         DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(mem_base, s->chip_size, mem_indexRW);
+    /* Read/write protected memory */
+    mem_indexRP = cpu_register_io_memory(nvram_read, nvram_write_protected, s,
+                                         DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(mem_base + s->chip_size, s->chip_size, mem_indexRP);
+    return s;
 }
-
-static Property nvram_sysbus_properties[] = {
-    DEFINE_PROP_UINT32("size", SysBusNvRamState, nvram.chip_size, 0x2000),
-    DEFINE_PROP_STRING("filename", SysBusNvRamState, nvram.filename),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void nvram_sysbus_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = nvram_sysbus_initfn;
-    dc->vmsd = &vmstate_nvram;
-    dc->props = nvram_sysbus_properties;
-}
-
-static TypeInfo nvram_sysbus_info = {
-    .name          = "ds1225y",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(SysBusNvRamState),
-    .class_init    = nvram_sysbus_class_init,
-};
-
-static void nvram_register_types(void)
-{
-    type_register_static(&nvram_sysbus_info);
-}
-
-type_init(nvram_register_types)

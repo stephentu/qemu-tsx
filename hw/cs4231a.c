@@ -59,7 +59,6 @@ static struct {
 typedef struct CSState {
     ISADevice dev;
     QEMUSoundCard card;
-    MemoryRegion ioports;
     qemu_irq pic;
     uint32_t regs[CS_REGS];
     uint8_t dregs[CS_DREGS];
@@ -74,6 +73,14 @@ typedef struct CSState {
     SWVoiceOut *voice;
     int16_t *tab;
 } CSState;
+
+#define IO_READ_PROTO(name)                             \
+    static uint32_t name (void *opaque, uint32_t addr)
+
+#define IO_WRITE_PROTO(name)                                            \
+    static void name (void *opaque, uint32_t addr, uint32_t val)
+
+#define GET_SADDR(addr) (addr & 3)
 
 #define MODE2 (1 << 6)
 #define MCE (1 << 6)
@@ -346,12 +353,12 @@ static void cs_reset_voices (CSState *s, uint32_t val)
     }
 }
 
-static uint64_t cs_read (void *opaque, hwaddr addr, unsigned size)
+IO_READ_PROTO (cs_read)
 {
     CSState *s = opaque;
     uint32_t saddr, iaddr, ret;
 
-    saddr = addr;
+    saddr = GET_SADDR (addr);
     iaddr = ~0U;
 
     switch (saddr) {
@@ -383,14 +390,12 @@ static uint64_t cs_read (void *opaque, hwaddr addr, unsigned size)
     return ret;
 }
 
-static void cs_write (void *opaque, hwaddr addr,
-                      uint64_t val64, unsigned size)
+IO_WRITE_PROTO (cs_write)
 {
     CSState *s = opaque;
-    uint32_t saddr, iaddr, val;
+    uint32_t saddr, iaddr;
 
-    saddr = addr;
-    val = val64;
+    saddr = GET_SADDR (addr);
 
     switch (saddr) {
     case Index_Address:
@@ -622,33 +627,28 @@ static const VMStateDescription vmstate_cs4231a = {
     .pre_load = cs4231a_pre_load,
     .post_load = cs4231a_post_load,
     .fields      = (VMStateField []) {
-        VMSTATE_UINT32_ARRAY (regs, CSState, CS_REGS),
-        VMSTATE_BUFFER (dregs, CSState),
-        VMSTATE_INT32 (dma_running, CSState),
-        VMSTATE_INT32 (audio_free, CSState),
-        VMSTATE_INT32 (transferred, CSState),
-        VMSTATE_INT32 (aci_counter, CSState),
-        VMSTATE_END_OF_LIST ()
-    }
-};
-
-static const MemoryRegionOps cs_ioport_ops = {
-    .read = cs_read,
-    .write = cs_write,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 1,
+        VMSTATE_UINT32_ARRAY(regs, CSState, CS_REGS),
+        VMSTATE_BUFFER(dregs, CSState),
+        VMSTATE_INT32(dma_running, CSState),
+        VMSTATE_INT32(audio_free, CSState),
+        VMSTATE_INT32(transferred, CSState),
+        VMSTATE_INT32(aci_counter, CSState),
+        VMSTATE_END_OF_LIST()
     }
 };
 
 static int cs4231a_initfn (ISADevice *dev)
 {
     CSState *s = DO_UPCAST (CSState, dev, dev);
+    int i;
 
     isa_init_irq (dev, &s->pic, s->irq);
 
-    memory_region_init_io (&s->ioports, &cs_ioport_ops, s, "cs4231a", 4);
-    isa_register_ioport (dev, &s->ioports, s->port);
+    for (i = 0; i < 4; i++) {
+        isa_init_ioport(dev, i);
+        register_ioport_write (s->port + i, 1, 1, cs_write, s);
+        register_ioport_read (s->port + i, 1, 1, cs_read, s);
+    }
 
     DMA_register_channel (s->dma, cs_dma_read, s);
 
@@ -659,39 +659,28 @@ static int cs4231a_initfn (ISADevice *dev)
     return 0;
 }
 
-int cs4231a_init (ISABus *bus)
+int cs4231a_init (qemu_irq *pic)
 {
-    isa_create_simple (bus, "cs4231a");
+    isa_create_simple ("cs4231a");
     return 0;
 }
 
-static Property cs4231a_properties[] = {
-    DEFINE_PROP_HEX32  ("iobase",  CSState, port, 0x534),
-    DEFINE_PROP_UINT32 ("irq",     CSState, irq,  9),
-    DEFINE_PROP_UINT32 ("dma",     CSState, dma,  3),
-    DEFINE_PROP_END_OF_LIST (),
+static ISADeviceInfo cs4231a_info = {
+    .qdev.name     = "cs4231a",
+    .qdev.desc     = "Crystal Semiconductor CS4231A",
+    .qdev.size     = sizeof (CSState),
+    .qdev.vmsd     = &vmstate_cs4231a,
+    .init          = cs4231a_initfn,
+    .qdev.props    = (Property[]) {
+        DEFINE_PROP_HEX32  ("iobase",  CSState, port, 0x534),
+        DEFINE_PROP_UINT32 ("irq",     CSState, irq,  9),
+        DEFINE_PROP_UINT32 ("dma",     CSState, dma,  3),
+        DEFINE_PROP_END_OF_LIST (),
+    },
 };
 
-static void cs4231a_class_initfn (ObjectClass *klass, void *data)
+static void cs4231a_register (void)
 {
-    DeviceClass *dc = DEVICE_CLASS (klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS (klass);
-    ic->init = cs4231a_initfn;
-    dc->desc = "Crystal Semiconductor CS4231A";
-    dc->vmsd = &vmstate_cs4231a;
-    dc->props = cs4231a_properties;
+    isa_qdev_register (&cs4231a_info);
 }
-
-static TypeInfo cs4231a_info = {
-    .name          = "cs4231a",
-    .parent        = TYPE_ISA_DEVICE,
-    .instance_size = sizeof (CSState),
-    .class_init    = cs4231a_class_initfn,
-};
-
-static void cs4231a_register_types (void)
-{
-    type_register_static (&cs4231a_info);
-}
-
-type_init (cs4231a_register_types)
+device_init (cs4231a_register)

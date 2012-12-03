@@ -42,16 +42,16 @@ SECTIONS
   .rel.plt      :
   {
     *(.rel.plt)
-    PROVIDE (__rel_iplt_start = .);
+    PROVIDE_HIDDEN (__rel_iplt_start = .);
     *(.rel.iplt)
-    PROVIDE (__rel_iplt_end = .);
+    PROVIDE_HIDDEN (__rel_iplt_end = .);
   }
   .rela.plt       :
   {
     *(.rela.plt)
-    PROVIDE (__rela_iplt_start = .);
+    PROVIDE_HIDDEN (__rela_iplt_start = .);
     *(.rela.iplt)
-    PROVIDE (__rela_iplt_end = .);
+    PROVIDE_HIDDEN (__rela_iplt_end = .);
   }
   .init          : { *(.init)	} =0x47ff041f
   .text      :

@@ -50,7 +50,6 @@
 #define READY_FOR_DATA		(1 << 8)
 #define APP_CMD			(1 << 5)
 #define AKE_SEQ_ERROR		(1 << 3)
-#define OCR_CCS_BITN        30
 
 typedef enum {
     sd_none = -1,
@@ -68,13 +67,13 @@ typedef struct {
 
 typedef struct SDState SDState;
 
-SDState *sd_init(BlockDriverState *bs, bool is_spi);
+SDState *sd_init(BlockDriverState *bs, int is_spi);
 int sd_do_command(SDState *sd, SDRequest *req,
                   uint8_t *response);
 void sd_write_data(SDState *sd, uint8_t value);
 uint8_t sd_read_data(SDState *sd);
 void sd_set_cb(SDState *sd, qemu_irq readonly, qemu_irq insert);
-bool sd_data_ready(SDState *sd);
-void sd_enable(SDState *sd, bool enable);
+int sd_data_ready(SDState *sd);
+void sd_enable(SDState *sd, int enable);
 
 #endif	/* __hw_sd_h */

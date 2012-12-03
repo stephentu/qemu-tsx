@@ -29,17 +29,16 @@
 
 #include "qemu-common.h"
 #include "qemu-queue.h"
+#ifdef CONFIG_VNC_THREAD
 #include "qemu-thread.h"
+#endif
 #include "console.h"
 #include "monitor.h"
 #include "audio/audio.h"
-#include "bitmap.h"
 #include <zlib.h>
 #include <stdbool.h>
 
 #include "keymaps.h"
-#include "vnc-palette.h"
-#include "vnc-enc-zrle.h"
 
 // #define _VNC_DEBUG 1
 
@@ -69,7 +68,7 @@ typedef struct VncRectEntry VncRectEntry;
 
 typedef int VncReadEvent(VncState *vs, uint8_t *data, size_t len);
 
-typedef void VncWritePixels(VncState *vs, void *data, int size);
+typedef void VncWritePixels(VncState *vs, struct PixelFormat *pf, void *data, int size);
 
 typedef void VncSendHextileTile(VncState *vs,
                                 int x, int y, int w, int h,
@@ -77,16 +76,9 @@ typedef void VncSendHextileTile(VncState *vs,
                                 void *last_fg,
                                 int *has_bg, int *has_fg);
 
-/* VNC_MAX_WIDTH must be a multiple of 16. */
 #define VNC_MAX_WIDTH 2560
 #define VNC_MAX_HEIGHT 2048
-
-/* VNC_DIRTY_BITS is the number of bits in the dirty bitmap. */
-#define VNC_DIRTY_BITS (VNC_MAX_WIDTH / 16)
-
-#define VNC_STAT_RECT  64
-#define VNC_STAT_COLS (VNC_MAX_WIDTH / VNC_STAT_RECT)
-#define VNC_STAT_ROWS (VNC_MAX_HEIGHT / VNC_STAT_RECT)
+#define VNC_DIRTY_WORDS (VNC_MAX_WIDTH / (16 * 32))
 
 #define VNC_AUTH_CHALLENGE_SIZE 16
 
@@ -100,66 +92,37 @@ typedef struct VncDisplay VncDisplay;
 #include "vnc-auth-sasl.h"
 #endif
 
-struct VncRectStat
-{
-    /* time of last 10 updates, to find update frequency */
-    struct timeval times[10];
-    int idx;
-
-    double freq;        /* Update frequency (in Hz) */
-    bool updated;       /* Already updated during this refresh */
-};
-
-typedef struct VncRectStat VncRectStat;
-
 struct VncSurface
 {
-    struct timeval last_freq_check;
-    DECLARE_BITMAP(dirty[VNC_MAX_HEIGHT], VNC_MAX_WIDTH / 16);
-    VncRectStat stats[VNC_STAT_ROWS][VNC_STAT_COLS];
-    pixman_image_t *fb;
-    pixman_format_code_t format;
+    uint32_t dirty[VNC_MAX_HEIGHT][VNC_DIRTY_WORDS];
+    DisplaySurface *ds;
 };
-
-typedef enum VncShareMode {
-    VNC_SHARE_MODE_CONNECTING = 1,
-    VNC_SHARE_MODE_SHARED,
-    VNC_SHARE_MODE_EXCLUSIVE,
-    VNC_SHARE_MODE_DISCONNECTED,
-} VncShareMode;
-
-typedef enum VncSharePolicy {
-    VNC_SHARE_POLICY_IGNORE = 1,
-    VNC_SHARE_POLICY_ALLOW_EXCLUSIVE,
-    VNC_SHARE_POLICY_FORCE_SHARED,
-} VncSharePolicy;
 
 struct VncDisplay
 {
     QTAILQ_HEAD(, VncState) clients;
-    int num_exclusive;
-    VncSharePolicy share_policy;
     QEMUTimer *timer;
     int timer_interval;
     int lsock;
     DisplayState *ds;
     kbd_layout_t *kbd_layout;
     int lock_key_sync;
+#ifdef CONFIG_VNC_THREAD
     QemuMutex mutex;
+#endif
 
     QEMUCursor *cursor;
     int cursor_msize;
     uint8_t *cursor_mask;
 
     struct VncSurface guest;   /* guest visible surface (aka ds->surface) */
-    pixman_image_t *server;    /* vnc server surface */
+    DisplaySurface *server;  /* vnc server surface */
 
     char *display;
     char *password;
     time_t expires;
     int auth;
     bool lossy;
-    bool non_adaptive;
 #ifdef CONFIG_VNC_TLS
     int subauth; /* Used by VeNCrypt */
     VncDisplayTLS tls;
@@ -199,20 +162,7 @@ typedef struct VncZlib {
     int level;
 } VncZlib;
 
-typedef struct VncZrle {
-    int type;
-    Buffer fb;
-    Buffer zrle;
-    Buffer tmp;
-    Buffer zlib;
-    z_stream stream;
-    VncPalette palette;
-} VncZrle;
-
-typedef struct VncZywrle {
-    int buf[VNC_ZRLE_TILE_WIDTH * VNC_ZRLE_TILE_HEIGHT];
-} VncZywrle;
-
+#ifdef CONFIG_VNC_THREAD
 struct VncRect
 {
     int x;
@@ -234,15 +184,21 @@ struct VncJob
     QLIST_HEAD(, VncRectEntry) rectangles;
     QTAILQ_ENTRY(VncJob) next;
 };
+#else
+struct VncJob
+{
+    VncState *vs;
+    int rectangles;
+    size_t saved_offset;
+};
+#endif
 
 struct VncState
 {
     int csock;
 
     DisplayState *ds;
-    DECLARE_BITMAP(dirty[VNC_MAX_HEIGHT], VNC_DIRTY_BITS);
-    uint8_t **lossy_rect; /* Not an Array to avoid costly memcpy in
-                           * vnc-jobs-async.c */
+    uint32_t dirty[VNC_MAX_HEIGHT][VNC_DIRTY_WORDS];
 
     VncDisplay *vd;
     int need_update;
@@ -253,17 +209,14 @@ struct VncState
     int last_y;
     int client_width;
     int client_height;
-    VncShareMode share_mode;
 
     uint32_t vnc_encoding;
 
     int major;
     int minor;
 
-    int auth;
     char challenge[VNC_AUTH_CHALLENGE_SIZE];
 #ifdef CONFIG_VNC_TLS
-    int subauth; /* Used by VeNCrypt */
     VncStateTLS tls;
 #endif
 #ifdef CONFIG_VNC_SASL
@@ -276,9 +229,7 @@ struct VncState
     Buffer input;
     /* current output mode information */
     VncWritePixels *write_pixels;
-    PixelFormat client_pf;
-    pixman_format_code_t client_format;
-    bool client_be;
+    DisplaySurface clientds;
 
     CaptureVoiceOut *audio_cap;
     struct audsettings as;
@@ -290,9 +241,11 @@ struct VncState
     QEMUPutLEDEntry *led;
 
     bool abort;
+#ifndef CONFIG_VNC_THREAD
+    VncJob job;
+#else
     QemuMutex output_mutex;
-    QEMUBH *bh;
-    Buffer jobs_buffer;
+#endif
 
     /* Encoding specific, if you add something here, don't forget to
      *  update vnc_async_encoding_start()
@@ -300,8 +253,7 @@ struct VncState
     VncTight tight;
     VncZlib zlib;
     VncHextile hextile;
-    VncZrle zrle;
-    VncZywrle zywrle;
+
 
     Notifier mouse_mode_notifier;
 
@@ -405,8 +357,6 @@ enum {
 #define VNC_FEATURE_COPYRECT                 6
 #define VNC_FEATURE_RICH_CURSOR              7
 #define VNC_FEATURE_TIGHT_PNG                8
-#define VNC_FEATURE_ZRLE                     9
-#define VNC_FEATURE_ZYWRLE                  10
 
 #define VNC_FEATURE_RESIZE_MASK              (1 << VNC_FEATURE_RESIZE)
 #define VNC_FEATURE_HEXTILE_MASK             (1 << VNC_FEATURE_HEXTILE)
@@ -417,8 +367,6 @@ enum {
 #define VNC_FEATURE_COPYRECT_MASK            (1 << VNC_FEATURE_COPYRECT)
 #define VNC_FEATURE_RICH_CURSOR_MASK         (1 << VNC_FEATURE_RICH_CURSOR)
 #define VNC_FEATURE_TIGHT_PNG_MASK           (1 << VNC_FEATURE_TIGHT_PNG)
-#define VNC_FEATURE_ZRLE_MASK                (1 << VNC_FEATURE_ZRLE)
-#define VNC_FEATURE_ZYWRLE_MASK              (1 << VNC_FEATURE_ZYWRLE)
 
 
 /* Client -> Server message IDs */
@@ -496,6 +444,9 @@ void vnc_read_when(VncState *vs, VncReadEvent *func, size_t expecting);
 
 
 /* Buffer I/O functions */
+uint8_t read_u8(uint8_t *data, size_t offset);
+uint16_t read_u16(uint8_t *data, size_t offset);
+int32_t read_s32(uint8_t *data, size_t offset);
 uint32_t read_u32(uint8_t *data, size_t offset);
 
 /* Protocol stage functions */
@@ -507,6 +458,8 @@ void start_auth_vnc(VncState *vs);
 
 /* Buffer management */
 void buffer_reserve(Buffer *buffer, size_t len);
+int buffer_empty(Buffer *buffer);
+uint8_t *buffer_end(Buffer *buffer);
 void buffer_reset(Buffer *buffer);
 void buffer_free(Buffer *buffer);
 void buffer_append(Buffer *buffer, const void *data, size_t len);
@@ -525,17 +478,7 @@ static inline uint32_t vnc_has_feature(VncState *vs, int feature) {
 void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
                             int32_t encoding);
 
-/* server fb is in PIXMAN_x8r8g8b8 */
-#define VNC_SERVER_FB_FORMAT PIXMAN_FORMAT(32, PIXMAN_TYPE_ARGB, 0, 8, 8, 8)
-#define VNC_SERVER_FB_BITS   (PIXMAN_FORMAT_BPP(VNC_SERVER_FB_FORMAT))
-#define VNC_SERVER_FB_BYTES  ((VNC_SERVER_FB_BITS+7)/8)
-
-void *vnc_server_fb_ptr(VncDisplay *vd, int x, int y);
-int vnc_server_fb_stride(VncDisplay *vd);
-
 void vnc_convert_pixel(VncState *vs, uint8_t *buf, uint32_t v);
-double vnc_update_freq(VncState *vs, int x, int y, int w, int h);
-void vnc_sent_lossy_rect(VncState *vs, int x, int y, int w, int h);
 
 /* Encodings */
 int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
@@ -555,9 +498,5 @@ int vnc_tight_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
 int vnc_tight_png_send_framebuffer_update(VncState *vs, int x, int y,
                                           int w, int h);
 void vnc_tight_clear(VncState *vs);
-
-int vnc_zrle_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-int vnc_zywrle_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-void vnc_zrle_clear(VncState *vs);
 
 #endif /* __QEMU_VNC_H */

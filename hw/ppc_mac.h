@@ -25,8 +25,6 @@
 #if !defined(__PPC_MAC_H__)
 #define __PPC_MAC_H__
 
-#include "memory.h"
-
 /* SMP is not enabled, for now */
 #define MAX_CPUS 1
 
@@ -37,45 +35,79 @@
 #define PROM_ADDR         0xfff00000
 
 #define KERNEL_LOAD_ADDR 0x01000000
-#define KERNEL_GAP       0x00100000
+#define CMDLINE_ADDR     0x027ff000
+#define INITRD_LOAD_ADDR 0x02800000
 
 #define ESCC_CLOCK 3686400
 
 /* Cuda */
-void cuda_init (MemoryRegion **cuda_mem, qemu_irq irq);
+void cuda_init (int *cuda_mem_index, qemu_irq irq);
 
 /* MacIO */
-void macio_init (PCIBus *bus, int device_id, int is_oldworld,
-                 MemoryRegion *pic_mem, MemoryRegion *dbdma_mem,
-                 MemoryRegion *cuda_mem, void *nvram,
-                 int nb_ide, MemoryRegion **ide_mem, MemoryRegion *escc_mem);
+void macio_init (PCIBus *bus, int device_id, int is_oldworld, int pic_mem_index,
+                 int dbdma_mem_index, int cuda_mem_index, void *nvram,
+                 int nb_ide, int *ide_mem_index, int escc_mem_index);
 
 /* Heathrow PIC */
-qemu_irq *heathrow_pic_init(MemoryRegion **pmem,
+qemu_irq *heathrow_pic_init(int *pmem_index,
                             int nb_cpus, qemu_irq **irqs);
 
 /* Grackle PCI */
-#define TYPE_GRACKLE_PCI_HOST_BRIDGE "grackle-pcihost"
-PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic,
-                         MemoryRegion *address_space_mem,
-                         MemoryRegion *address_space_io);
+PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic);
 
 /* UniNorth PCI */
-PCIBus *pci_pmac_init(qemu_irq *pic,
-                      MemoryRegion *address_space_mem,
-                      MemoryRegion *address_space_io);
-PCIBus *pci_pmac_u3_init(qemu_irq *pic,
-                         MemoryRegion *address_space_mem,
-                         MemoryRegion *address_space_io);
+PCIBus *pci_pmac_init(qemu_irq *pic);
+PCIBus *pci_pmac_u3_init(qemu_irq *pic);
 
 /* Mac NVRAM */
 typedef struct MacIONVRAMState MacIONVRAMState;
 
-MacIONVRAMState *macio_nvram_init (hwaddr size,
+MacIONVRAMState *macio_nvram_init (int *mem_index, target_phys_addr_t size,
                                    unsigned int it_shift);
-void macio_nvram_setup_bar(MacIONVRAMState *s, MemoryRegion *bar,
-                           hwaddr mem_base);
+void macio_nvram_map (void *opaque, target_phys_addr_t mem_base);
 void pmac_format_nvram_partition (MacIONVRAMState *nvr, int len);
 uint32_t macio_nvram_read (void *opaque, uint32_t addr);
 void macio_nvram_write (void *opaque, uint32_t addr, uint32_t val);
+
+/* adb.c */
+
+#define MAX_ADB_DEVICES 16
+
+#define ADB_MAX_OUT_LEN 16
+
+typedef struct ADBDevice ADBDevice;
+
+/* buf = NULL means polling */
+typedef int ADBDeviceRequest(ADBDevice *d, uint8_t *buf_out,
+                              const uint8_t *buf, int len);
+typedef int ADBDeviceReset(ADBDevice *d);
+
+struct ADBDevice {
+    struct ADBBusState *bus;
+    int devaddr;
+    int handler;
+    ADBDeviceRequest *devreq;
+    ADBDeviceReset *devreset;
+    void *opaque;
+};
+
+typedef struct ADBBusState {
+    ADBDevice devices[MAX_ADB_DEVICES];
+    int nb_devices;
+    int poll_index;
+} ADBBusState;
+
+int adb_request(ADBBusState *s, uint8_t *buf_out,
+                const uint8_t *buf, int len);
+int adb_poll(ADBBusState *s, uint8_t *buf_out);
+
+ADBDevice *adb_register_device(ADBBusState *s, int devaddr,
+                               ADBDeviceRequest *devreq,
+                               ADBDeviceReset *devreset,
+                               void *opaque);
+void adb_kbd_init(ADBBusState *bus);
+void adb_mouse_init(ADBBusState *bus);
+
+extern ADBBusState adb_bus;
+
 #endif /* !defined(__PPC_MAC_H__) */

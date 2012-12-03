@@ -25,70 +25,77 @@
 #include "hw.h"
 #include "pci.h"
 #include "pci_host.h"
-#include "pc.h"
-#include "exec-memory.h"
+#include "prep_pci.h"
 
-#define TYPE_RAVEN_PCI_HOST_BRIDGE "raven-pcihost"
+typedef PCIHostState PREPPCIState;
 
-#define RAVEN_PCI_HOST_BRIDGE(obj) \
-    OBJECT_CHECK(PREPPCIState, (obj), TYPE_RAVEN_PCI_HOST_BRIDGE)
-
-typedef struct PRePPCIState {
-    PCIHostState parent_obj;
-
-    MemoryRegion intack;
-    qemu_irq irq[4];
-} PREPPCIState;
-
-typedef struct RavenPCIState {
-    PCIDevice dev;
-} RavenPCIState;
-
-static inline uint32_t PPC_PCIIO_config(hwaddr addr)
+static inline uint32_t PPC_PCIIO_config(target_phys_addr_t addr)
 {
     int i;
 
-    for (i = 0; i < 11; i++) {
-        if ((addr & (1 << (11 + i))) != 0) {
+    for(i = 0; i < 11; i++) {
+        if ((addr & (1 << (11 + i))) != 0)
             break;
-        }
     }
     return (addr & 0x7ff) |  (i << 11);
 }
 
-static void ppc_pci_io_write(void *opaque, hwaddr addr,
-                             uint64_t val, unsigned int size)
+static void PPC_PCIIO_writeb (void *opaque, target_phys_addr_t addr, uint32_t val)
 {
     PREPPCIState *s = opaque;
-    PCIHostState *phb = PCI_HOST_BRIDGE(s);
-    pci_data_write(phb->bus, PPC_PCIIO_config(addr), val, size);
+    pci_data_write(s->bus, PPC_PCIIO_config(addr), val, 1);
 }
 
-static uint64_t ppc_pci_io_read(void *opaque, hwaddr addr,
-                                unsigned int size)
+static void PPC_PCIIO_writew (void *opaque, target_phys_addr_t addr, uint32_t val)
 {
     PREPPCIState *s = opaque;
-    PCIHostState *phb = PCI_HOST_BRIDGE(s);
-    return pci_data_read(phb->bus, PPC_PCIIO_config(addr), size);
+    val = bswap16(val);
+    pci_data_write(s->bus, PPC_PCIIO_config(addr), val, 2);
 }
 
-static const MemoryRegionOps PPC_PCIIO_ops = {
-    .read = ppc_pci_io_read,
-    .write = ppc_pci_io_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
+static void PPC_PCIIO_writel (void *opaque, target_phys_addr_t addr, uint32_t val)
+{
+    PREPPCIState *s = opaque;
+    val = bswap32(val);
+    pci_data_write(s->bus, PPC_PCIIO_config(addr), val, 4);
+}
+
+static uint32_t PPC_PCIIO_readb (void *opaque, target_phys_addr_t addr)
+{
+    PREPPCIState *s = opaque;
+    uint32_t val;
+    val = pci_data_read(s->bus, PPC_PCIIO_config(addr), 1);
+    return val;
+}
+
+static uint32_t PPC_PCIIO_readw (void *opaque, target_phys_addr_t addr)
+{
+    PREPPCIState *s = opaque;
+    uint32_t val;
+    val = pci_data_read(s->bus, PPC_PCIIO_config(addr), 2);
+    val = bswap16(val);
+    return val;
+}
+
+static uint32_t PPC_PCIIO_readl (void *opaque, target_phys_addr_t addr)
+{
+    PREPPCIState *s = opaque;
+    uint32_t val;
+    val = pci_data_read(s->bus, PPC_PCIIO_config(addr), 4);
+    val = bswap32(val);
+    return val;
+}
+
+static CPUWriteMemoryFunc * const PPC_PCIIO_write[] = {
+    &PPC_PCIIO_writeb,
+    &PPC_PCIIO_writew,
+    &PPC_PCIIO_writel,
 };
 
-static uint64_t ppc_intack_read(void *opaque, hwaddr addr,
-                                unsigned int size)
-{
-    return pic_read_irq(isa_pic);
-}
-
-static const MemoryRegionOps PPC_intack_ops = {
-    .read = ppc_intack_read,
-    .valid = {
-        .max_access_size = 1,
-    },
+static CPUReadMemoryFunc * const PPC_PCIIO_read[] = {
+    &PPC_PCIIO_readb,
+    &PPC_PCIIO_readw,
+    &PPC_PCIIO_readl,
 };
 
 static int prep_map_irq(PCIDevice *pci_dev, int irq_num)
@@ -100,109 +107,38 @@ static void prep_set_irq(void *opaque, int irq_num, int level)
 {
     qemu_irq *pic = opaque;
 
-    qemu_set_irq(pic[irq_num] , level);
+    qemu_set_irq(pic[(irq_num & 1) ? 11 : 9] , level);
 }
 
-static int raven_pcihost_init(SysBusDevice *dev)
+PCIBus *pci_prep_init(qemu_irq *pic)
 {
-    PCIHostState *h = PCI_HOST_BRIDGE(dev);
-    PREPPCIState *s = RAVEN_PCI_HOST_BRIDGE(dev);
-    MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *address_space_io = get_system_io();
-    PCIBus *bus;
-    int i;
+    PREPPCIState *s;
+    PCIDevice *d;
+    int PPC_io_memory;
 
-    for (i = 0; i < 4; i++) {
-        sysbus_init_irq(dev, &s->irq[i]);
-    }
+    s = qemu_mallocz(sizeof(PREPPCIState));
+    s->bus = pci_register_bus(NULL, "pci",
+                              prep_set_irq, prep_map_irq, pic, 0, 4);
 
-    bus = pci_register_bus(DEVICE(dev), NULL,
-                           prep_set_irq, prep_map_irq, s->irq,
-                           address_space_mem, address_space_io, 0, 4);
-    h->bus = bus;
+    pci_host_conf_register_ioport(0xcf8, s);
 
-    memory_region_init_io(&h->conf_mem, &pci_host_conf_be_ops, s,
-                          "pci-conf-idx", 1);
-    sysbus_add_io(dev, 0xcf8, &h->conf_mem);
-    sysbus_init_ioports(&h->busdev, 0xcf8, 1);
+    pci_host_data_register_ioport(0xcfc, s);
 
-    memory_region_init_io(&h->data_mem, &pci_host_data_be_ops, s,
-                          "pci-conf-data", 1);
-    sysbus_add_io(dev, 0xcfc, &h->data_mem);
-    sysbus_init_ioports(&h->busdev, 0xcfc, 1);
+    PPC_io_memory = cpu_register_io_memory(PPC_PCIIO_read,
+                                           PPC_PCIIO_write, s,
+                                           DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(0x80800000, 0x00400000, PPC_io_memory);
 
-    memory_region_init_io(&h->mmcfg, &PPC_PCIIO_ops, s, "pciio", 0x00400000);
-    memory_region_add_subregion(address_space_mem, 0x80800000, &h->mmcfg);
-
-    memory_region_init_io(&s->intack, &PPC_intack_ops, s, "pci-intack", 1);
-    memory_region_add_subregion(address_space_mem, 0xbffffff0, &s->intack);
-    pci_create_simple(bus, 0, "raven");
-
-    return 0;
-}
-
-static int raven_init(PCIDevice *d)
-{
+    /* PCI host bridge */
+    d = pci_register_device(s->bus, "PREP Host Bridge - Motorola Raven",
+                            sizeof(PCIDevice), 0, NULL, NULL);
+    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_MOTOROLA);
+    pci_config_set_device_id(d->config, PCI_DEVICE_ID_MOTOROLA_RAVEN);
+    d->config[0x08] = 0x00; // revision
+    pci_config_set_class(d->config, PCI_CLASS_BRIDGE_HOST);
     d->config[0x0C] = 0x08; // cache_line_size
     d->config[0x0D] = 0x10; // latency_timer
     d->config[0x34] = 0x00; // capabilities_pointer
 
-    return 0;
+    return s->bus;
 }
-
-static const VMStateDescription vmstate_raven = {
-    .name = "raven",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
-        VMSTATE_PCI_DEVICE(dev, RavenPCIState),
-        VMSTATE_END_OF_LIST()
-    },
-};
-
-static void raven_class_init(ObjectClass *klass, void *data)
-{
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    k->init = raven_init;
-    k->vendor_id = PCI_VENDOR_ID_MOTOROLA;
-    k->device_id = PCI_DEVICE_ID_MOTOROLA_RAVEN;
-    k->revision = 0x00;
-    k->class_id = PCI_CLASS_BRIDGE_HOST;
-    dc->desc = "PReP Host Bridge - Motorola Raven";
-    dc->vmsd = &vmstate_raven;
-    dc->no_user = 1;
-}
-
-static const TypeInfo raven_info = {
-    .name = "raven",
-    .parent = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(RavenPCIState),
-    .class_init = raven_class_init,
-};
-
-static void raven_pcihost_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    k->init = raven_pcihost_init;
-    dc->fw_name = "pci";
-    dc->no_user = 1;
-}
-
-static const TypeInfo raven_pcihost_info = {
-    .name = TYPE_RAVEN_PCI_HOST_BRIDGE,
-    .parent = TYPE_PCI_HOST_BRIDGE,
-    .instance_size = sizeof(PREPPCIState),
-    .class_init = raven_pcihost_class_init,
-};
-
-static void raven_register_types(void)
-{
-    type_register_static(&raven_pcihost_info);
-    type_register_static(&raven_info);
-}
-
-type_init(raven_register_types)

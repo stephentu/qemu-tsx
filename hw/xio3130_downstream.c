@@ -41,13 +41,14 @@ static void xio3130_downstream_write_config(PCIDevice *d, uint32_t address,
     pci_bridge_write_config(d, address, val, len);
     pcie_cap_flr_write_config(d, address, val, len);
     pcie_cap_slot_write_config(d, address, val, len);
+    msi_write_config(d, address, val, len);
     pcie_aer_write_config(d, address, val, len);
 }
 
 static void xio3130_downstream_reset(DeviceState *qdev)
 {
-    PCIDevice *d = PCI_DEVICE(qdev);
-
+    PCIDevice *d = DO_UPCAST(PCIDevice, qdev, qdev);
+    msi_reset(d);
     pcie_cap_deverr_reset(d);
     pcie_cap_slot_reset(d);
     pcie_cap_ari_reset(d);
@@ -60,6 +61,7 @@ static int xio3130_downstream_initfn(PCIDevice *d)
     PCIEPort *p = DO_UPCAST(PCIEPort, br, br);
     PCIESlot *s = DO_UPCAST(PCIESlot, port, p);
     int rc;
+    int tmp;
 
     rc = pci_bridge_initfn(d);
     if (rc < 0) {
@@ -67,6 +69,9 @@ static int xio3130_downstream_initfn(PCIDevice *d)
     }
 
     pcie_port_init_reg(d);
+    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_TI);
+    pci_config_set_device_id(d->config, PCI_DEVICE_ID_TI_XIO3130D);
+    d->config[PCI_REVISION_ID] = XIO3130_REVISION;
 
     rc = msi_init(d, XIO3130_MSI_OFFSET, XIO3130_MSI_NR_VECTOR,
                   XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_64BIT,
@@ -107,11 +112,12 @@ err_pcie_cap:
 err_msi:
     msi_uninit(d);
 err_bridge:
-    pci_bridge_exitfn(d);
+    tmp = pci_bridge_exitfn(d);
+    assert(!tmp);
     return rc;
 }
 
-static void xio3130_downstream_exitfn(PCIDevice *d)
+static int xio3130_downstream_exitfn(PCIDevice *d)
 {
     PCIBridge* br = DO_UPCAST(PCIBridge, dev, d);
     PCIEPort *p = DO_UPCAST(PCIEPort, br, br);
@@ -121,7 +127,7 @@ static void xio3130_downstream_exitfn(PCIDevice *d)
     pcie_chassis_del_slot(s);
     pcie_cap_exit(d);
     msi_uninit(d);
-    pci_bridge_exitfn(d);
+    return pci_bridge_exitfn(d);
 }
 
 PCIESlot *xio3130_downstream_init(PCIBus *bus, int devfn, bool multifunction,
@@ -164,48 +170,36 @@ static const VMStateDescription vmstate_xio3130_downstream = {
     }
 };
 
-static Property xio3130_downstream_properties[] = {
-    DEFINE_PROP_UINT8("port", PCIESlot, port.port, 0),
-    DEFINE_PROP_UINT8("chassis", PCIESlot, chassis, 0),
-    DEFINE_PROP_UINT16("slot", PCIESlot, slot, 0),
-    DEFINE_PROP_UINT16("aer_log_max", PCIESlot,
-    port.br.dev.exp.aer_log.log_max,
-    PCIE_AER_LOG_MAX_DEFAULT),
-    DEFINE_PROP_END_OF_LIST(),
+static PCIDeviceInfo xio3130_downstream_info = {
+    .qdev.name = "xio3130-downstream",
+    .qdev.desc = "TI X3130 Downstream Port of PCI Express Switch",
+    .qdev.size = sizeof(PCIESlot),
+    .qdev.reset = xio3130_downstream_reset,
+    .qdev.vmsd = &vmstate_xio3130_downstream,
+
+    .is_express = 1,
+    .is_bridge = 1,
+    .config_write = xio3130_downstream_write_config,
+    .init = xio3130_downstream_initfn,
+    .exit = xio3130_downstream_exitfn,
+
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_UINT8("port", PCIESlot, port.port, 0),
+        DEFINE_PROP_UINT8("chassis", PCIESlot, chassis, 0),
+        DEFINE_PROP_UINT16("slot", PCIESlot, slot, 0),
+        DEFINE_PROP_UINT16("aer_log_max", PCIESlot,
+                           port.br.dev.exp.aer_log.log_max,
+                           PCIE_AER_LOG_MAX_DEFAULT),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void xio3130_downstream_class_init(ObjectClass *klass, void *data)
+static void xio3130_downstream_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->is_express = 1;
-    k->is_bridge = 1;
-    k->config_write = xio3130_downstream_write_config;
-    k->init = xio3130_downstream_initfn;
-    k->exit = xio3130_downstream_exitfn;
-    k->vendor_id = PCI_VENDOR_ID_TI;
-    k->device_id = PCI_DEVICE_ID_TI_XIO3130D;
-    k->revision = XIO3130_REVISION;
-    dc->desc = "TI X3130 Downstream Port of PCI Express Switch";
-    dc->reset = xio3130_downstream_reset;
-    dc->vmsd = &vmstate_xio3130_downstream;
-    dc->props = xio3130_downstream_properties;
+    pci_qdev_register(&xio3130_downstream_info);
 }
 
-static TypeInfo xio3130_downstream_info = {
-    .name          = "xio3130-downstream",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PCIESlot),
-    .class_init    = xio3130_downstream_class_init,
-};
-
-static void xio3130_downstream_register_types(void)
-{
-    type_register_static(&xio3130_downstream_info);
-}
-
-type_init(xio3130_downstream_register_types)
+device_init(xio3130_downstream_register);
 
 /*
  * Local variables:

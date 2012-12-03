@@ -28,15 +28,13 @@
 #include "pixel_ops.h"
 #include "qemu-timer.h"
 
-#define VGA_RAM_SIZE (8192 * 1024)
-
 typedef struct ISAVGAMMState {
     VGACommonState vga;
     int it_shift;
 } ISAVGAMMState;
 
 /* Memory mapped interface */
-static uint32_t vga_mm_readb (void *opaque, hwaddr addr)
+static uint32_t vga_mm_readb (void *opaque, target_phys_addr_t addr)
 {
     ISAVGAMMState *s = opaque;
 
@@ -44,14 +42,14 @@ static uint32_t vga_mm_readb (void *opaque, hwaddr addr)
 }
 
 static void vga_mm_writeb (void *opaque,
-                           hwaddr addr, uint32_t value)
+                           target_phys_addr_t addr, uint32_t value)
 {
     ISAVGAMMState *s = opaque;
 
     vga_ioport_write(&s->vga, addr >> s->it_shift, value & 0xff);
 }
 
-static uint32_t vga_mm_readw (void *opaque, hwaddr addr)
+static uint32_t vga_mm_readw (void *opaque, target_phys_addr_t addr)
 {
     ISAVGAMMState *s = opaque;
 
@@ -59,14 +57,14 @@ static uint32_t vga_mm_readw (void *opaque, hwaddr addr)
 }
 
 static void vga_mm_writew (void *opaque,
-                           hwaddr addr, uint32_t value)
+                           target_phys_addr_t addr, uint32_t value)
 {
     ISAVGAMMState *s = opaque;
 
     vga_ioport_write(&s->vga, addr >> s->it_shift, value & 0xffff);
 }
 
-static uint32_t vga_mm_readl (void *opaque, hwaddr addr)
+static uint32_t vga_mm_readl (void *opaque, target_phys_addr_t addr)
 {
     ISAVGAMMState *s = opaque;
 
@@ -74,70 +72,57 @@ static uint32_t vga_mm_readl (void *opaque, hwaddr addr)
 }
 
 static void vga_mm_writel (void *opaque,
-                           hwaddr addr, uint32_t value)
+                           target_phys_addr_t addr, uint32_t value)
 {
     ISAVGAMMState *s = opaque;
 
     vga_ioport_write(&s->vga, addr >> s->it_shift, value);
 }
 
-static const MemoryRegionOps vga_mm_ctrl_ops = {
-    .old_mmio = {
-        .read = {
-            vga_mm_readb,
-            vga_mm_readw,
-            vga_mm_readl,
-        },
-        .write = {
-            vga_mm_writeb,
-            vga_mm_writew,
-            vga_mm_writel,
-        },
-    },
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const vga_mm_read_ctrl[] = {
+    &vga_mm_readb,
+    &vga_mm_readw,
+    &vga_mm_readl,
 };
 
-static void vga_mm_init(ISAVGAMMState *s, hwaddr vram_base,
-                        hwaddr ctrl_base, int it_shift,
-                        MemoryRegion *address_space)
+static CPUWriteMemoryFunc * const vga_mm_write_ctrl[] = {
+    &vga_mm_writeb,
+    &vga_mm_writew,
+    &vga_mm_writel,
+};
+
+static void vga_mm_init(ISAVGAMMState *s, target_phys_addr_t vram_base,
+                        target_phys_addr_t ctrl_base, int it_shift)
 {
-    MemoryRegion *s_ioport_ctrl, *vga_io_memory;
+    int s_ioport_ctrl, vga_io_memory;
 
     s->it_shift = it_shift;
-    s_ioport_ctrl = g_malloc(sizeof(*s_ioport_ctrl));
-    memory_region_init_io(s_ioport_ctrl, &vga_mm_ctrl_ops, s,
-                          "vga-mm-ctrl", 0x100000);
-    memory_region_set_flush_coalesced(s_ioport_ctrl);
-
-    vga_io_memory = g_malloc(sizeof(*vga_io_memory));
-    /* XXX: endianness? */
-    memory_region_init_io(vga_io_memory, &vga_mem_ops, &s->vga,
-                          "vga-mem", 0x20000);
+    s_ioport_ctrl = cpu_register_io_memory(vga_mm_read_ctrl, vga_mm_write_ctrl, s,
+                                           DEVICE_NATIVE_ENDIAN);
+    vga_io_memory = cpu_register_io_memory(vga_mem_read, vga_mem_write, s,
+                                           DEVICE_NATIVE_ENDIAN);
 
     vmstate_register(NULL, 0, &vmstate_vga_common, s);
 
-    memory_region_add_subregion(address_space, ctrl_base, s_ioport_ctrl);
+    cpu_register_physical_memory(ctrl_base, 0x100000, s_ioport_ctrl);
     s->vga.bank_offset = 0;
-    memory_region_add_subregion(address_space,
-                                vram_base + 0x000a0000, vga_io_memory);
-    memory_region_set_coalescing(vga_io_memory);
+    cpu_register_physical_memory(vram_base + 0x000a0000, 0x20000, vga_io_memory);
+    qemu_register_coalesced_mmio(vram_base + 0x000a0000, 0x20000);
 }
 
-int isa_vga_mm_init(hwaddr vram_base,
-                    hwaddr ctrl_base, int it_shift,
-                    MemoryRegion *address_space)
+int isa_vga_mm_init(target_phys_addr_t vram_base,
+                    target_phys_addr_t ctrl_base, int it_shift)
 {
     ISAVGAMMState *s;
 
-    s = g_malloc0(sizeof(*s));
+    s = qemu_mallocz(sizeof(*s));
 
-    s->vga.vram_size_mb = VGA_RAM_SIZE >> 20;
-    vga_common_init(&s->vga);
-    vga_mm_init(s, vram_base, ctrl_base, it_shift, address_space);
+    vga_common_init(&s->vga, VGA_RAM_SIZE);
+    vga_mm_init(s, vram_base, ctrl_base, it_shift);
 
     s->vga.ds = graphic_console_init(s->vga.update, s->vga.invalidate,
                                      s->vga.screen_dump, s->vga.text_update, s);
 
-    vga_init_vbe(&s->vga, address_space);
+    vga_init_vbe(&s->vga);
     return 0;
 }

@@ -4,7 +4,6 @@
 #include "xen_common.h"
 #include "sysemu.h"
 #include "net.h"
-#include "net/hub.h"
 
 /* ------------------------------------------------------------- */
 
@@ -22,8 +21,7 @@ struct XenDevOps {
     uint32_t  flags;
     void      (*alloc)(struct XenDevice *xendev);
     int       (*init)(struct XenDevice *xendev);
-    int       (*initialise)(struct XenDevice *xendev);
-    void      (*connected)(struct XenDevice *xendev);
+    int       (*connect)(struct XenDevice *xendev);
     void      (*event)(struct XenDevice *xendev);
     void      (*disconnect)(struct XenDevice *xendev);
     int       (*free)(struct XenDevice *xendev);
@@ -47,8 +45,8 @@ struct XenDevice {
     int                remote_port;
     int                local_port;
 
-    XenEvtchn          evtchndev;
-    XenGnttab          gnttabdev;
+    int                evtchndev;
+    int                gnttabdev;
 
     struct XenDevOps   *ops;
     QTAILQ_ENTRY(XenDevice) next;
@@ -57,7 +55,7 @@ struct XenDevice {
 /* ------------------------------------------------------------- */
 
 /* variables */
-extern XenXC xen_xc;
+extern int xen_xc;
 extern struct xs_handle *xenstore;
 extern const char *xen_protocol;
 

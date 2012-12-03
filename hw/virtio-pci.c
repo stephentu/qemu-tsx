@@ -11,8 +11,6 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include <inttypes.h>
@@ -20,18 +18,13 @@
 #include "virtio.h"
 #include "virtio-blk.h"
 #include "virtio-net.h"
-#include "virtio-serial.h"
-#include "virtio-scsi.h"
 #include "pci.h"
 #include "qemu-error.h"
-#include "msi.h"
 #include "msix.h"
 #include "net.h"
 #include "loader.h"
 #include "kvm.h"
 #include "blockdev.h"
-#include "virtio-pci.h"
-#include "range.h"
 
 /* from Linux's linux/virtio_pci.h */
 
@@ -80,6 +73,9 @@
                                          VIRTIO_PCI_CONFIG_MSI : \
                                          VIRTIO_PCI_CONFIG_NOMSI)
 
+/* Virtio ABI version, if we increment this, we break the guest driver. */
+#define VIRTIO_PCI_ABI_VERSION          0
+
 /* How many bits to shift physical queue address written to QUEUE_PFN.
  * 12 is historical, and due to x86 page size. */
 #define VIRTIO_PCI_QUEUE_ADDR_SHIFT    12
@@ -87,14 +83,38 @@
 /* Flags track per-device state like workarounds for quirks in older guests. */
 #define VIRTIO_PCI_FLAG_BUS_MASTER_BUG  (1 << 0)
 
+/* Performance improves when virtqueue kick processing is decoupled from the
+ * vcpu thread using ioeventfd for some devices. */
+#define VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT 1
+#define VIRTIO_PCI_FLAG_USE_IOEVENTFD   (1 << VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT)
+
 /* QEMU doesn't strictly need write barriers since everything runs in
  * lock-step.  We'll leave the calls to wmb() in though to make it obvious for
  * KVM or if kqemu gets SMP support.
  */
 #define wmb() do { } while (0)
 
-/* HACK for virtio to determine if it's running a big endian guest */
-bool virtio_is_big_endian(void);
+/* PCI bindings.  */
+
+typedef struct {
+    PCIDevice pci_dev;
+    VirtIODevice *vdev;
+    uint32_t flags;
+    uint32_t addr;
+    uint32_t class_code;
+    uint32_t nvectors;
+    BlockConf block;
+    NICConf nic;
+    uint32_t host_features;
+#ifdef CONFIG_LINUX
+    V9fsConf fsconf;
+#endif
+    /* Max. number of ports we can have for a the virtio-serial device */
+    uint32_t max_virtserial_ports;
+    virtio_net_conf net;
+    bool ioeventfd_disabled;
+    bool ioeventfd_started;
+} VirtIOPCIProxy;
 
 /* virtio device */
 
@@ -131,7 +151,6 @@ static int virtio_pci_load_config(void * opaque, QEMUFile *f)
     if (ret) {
         return ret;
     }
-    msix_unuse_all_vectors(&proxy->pci_dev);
     msix_load(&proxy->pci_dev, f);
     if (msix_present(&proxy->pci_dev)) {
         qemu_get_be16s(f, &proxy->vdev->config_vector);
@@ -161,12 +180,11 @@ static int virtio_pci_load_queue(void * opaque, int n, QEMUFile *f)
 }
 
 static int virtio_pci_set_host_notifier_internal(VirtIOPCIProxy *proxy,
-                                                 int n, bool assign, bool set_handler)
+                                                 int n, bool assign)
 {
     VirtQueue *vq = virtio_get_queue(proxy->vdev, n);
     EventNotifier *notifier = virtio_queue_get_host_notifier(vq);
-    int r = 0;
-
+    int r;
     if (assign) {
         r = event_notifier_init(notifier, 1);
         if (r < 0) {
@@ -174,16 +192,57 @@ static int virtio_pci_set_host_notifier_internal(VirtIOPCIProxy *proxy,
                          __func__, r);
             return r;
         }
-        virtio_queue_set_host_notifier_fd_handler(vq, true, set_handler);
-        memory_region_add_eventfd(&proxy->bar, VIRTIO_PCI_QUEUE_NOTIFY, 2,
-                                  true, n, notifier);
+        r = kvm_set_ioeventfd_pio_word(event_notifier_get_fd(notifier),
+                                       proxy->addr + VIRTIO_PCI_QUEUE_NOTIFY,
+                                       n, assign);
+        if (r < 0) {
+            error_report("%s: unable to map ioeventfd: %d",
+                         __func__, r);
+            event_notifier_cleanup(notifier);
+        }
     } else {
-        memory_region_del_eventfd(&proxy->bar, VIRTIO_PCI_QUEUE_NOTIFY, 2,
-                                  true, n, notifier);
-        virtio_queue_set_host_notifier_fd_handler(vq, false, false);
+        r = kvm_set_ioeventfd_pio_word(event_notifier_get_fd(notifier),
+                                       proxy->addr + VIRTIO_PCI_QUEUE_NOTIFY,
+                                       n, assign);
+        if (r < 0) {
+            error_report("%s: unable to unmap ioeventfd: %d",
+                         __func__, r);
+            return r;
+        }
+
+        /* Handle the race condition where the guest kicked and we deassigned
+         * before we got around to handling the kick.
+         */
+        if (event_notifier_test_and_clear(notifier)) {
+            virtio_queue_notify_vq(vq);
+        }
+
         event_notifier_cleanup(notifier);
     }
     return r;
+}
+
+static void virtio_pci_host_notifier_read(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    EventNotifier *n = virtio_queue_get_host_notifier(vq);
+    if (event_notifier_test_and_clear(n)) {
+        virtio_queue_notify_vq(vq);
+    }
+}
+
+static void virtio_pci_set_host_notifier_fd_handler(VirtIOPCIProxy *proxy,
+                                                    int n, bool assign)
+{
+    VirtQueue *vq = virtio_get_queue(proxy->vdev, n);
+    EventNotifier *notifier = virtio_queue_get_host_notifier(vq);
+    if (assign) {
+        qemu_set_fd_handler(event_notifier_get_fd(notifier),
+                            virtio_pci_host_notifier_read, NULL, vq);
+    } else {
+        qemu_set_fd_handler(event_notifier_get_fd(notifier),
+                            NULL, NULL, NULL);
+    }
 }
 
 static void virtio_pci_start_ioeventfd(VirtIOPCIProxy *proxy)
@@ -201,10 +260,12 @@ static void virtio_pci_start_ioeventfd(VirtIOPCIProxy *proxy)
             continue;
         }
 
-        r = virtio_pci_set_host_notifier_internal(proxy, n, true, true);
+        r = virtio_pci_set_host_notifier_internal(proxy, n, true);
         if (r < 0) {
             goto assign_error;
         }
+
+        virtio_pci_set_host_notifier_fd_handler(proxy, n, true);
     }
     proxy->ioeventfd_started = true;
     return;
@@ -215,7 +276,8 @@ assign_error:
             continue;
         }
 
-        r = virtio_pci_set_host_notifier_internal(proxy, n, false, false);
+        virtio_pci_set_host_notifier_fd_handler(proxy, n, false);
+        r = virtio_pci_set_host_notifier_internal(proxy, n, false);
         assert(r >= 0);
     }
     proxy->ioeventfd_started = false;
@@ -236,18 +298,19 @@ static void virtio_pci_stop_ioeventfd(VirtIOPCIProxy *proxy)
             continue;
         }
 
-        r = virtio_pci_set_host_notifier_internal(proxy, n, false, false);
+        virtio_pci_set_host_notifier_fd_handler(proxy, n, false);
+        r = virtio_pci_set_host_notifier_internal(proxy, n, false);
         assert(r >= 0);
     }
     proxy->ioeventfd_started = false;
 }
 
-void virtio_pci_reset(DeviceState *d)
+static void virtio_pci_reset(DeviceState *d)
 {
     VirtIOPCIProxy *proxy = container_of(d, VirtIOPCIProxy, pci_dev.qdev);
     virtio_pci_stop_ioeventfd(proxy);
     virtio_reset(proxy->vdev);
-    msix_unuse_all_vectors(&proxy->pci_dev);
+    msix_reset(&proxy->pci_dev);
     proxy->flags &= ~VIRTIO_PCI_FLAG_BUS_MASTER_BUG;
 }
 
@@ -255,18 +318,23 @@ static void virtio_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     VirtIOPCIProxy *proxy = opaque;
     VirtIODevice *vdev = proxy->vdev;
-    hwaddr pa;
+    target_phys_addr_t pa;
 
     switch (addr) {
     case VIRTIO_PCI_GUEST_FEATURES:
 	/* Guest does not negotiate properly?  We have to assume nothing. */
 	if (val & (1 << VIRTIO_F_BAD_FEATURE)) {
-            val = vdev->bad_features ? vdev->bad_features(vdev) : 0;
+	    if (vdev->bad_features)
+		val = proxy->host_features & vdev->bad_features(vdev);
+	    else
+		val = 0;
 	}
-        virtio_set_features(vdev, val);
+        if (vdev->set_features)
+            vdev->set_features(vdev, val);
+        vdev->guest_features = val;
         break;
     case VIRTIO_PCI_QUEUE_PFN:
-        pa = (hwaddr)val << VIRTIO_PCI_QUEUE_ADDR_SHIFT;
+        pa = (target_phys_addr_t)val << VIRTIO_PCI_QUEUE_ADDR_SHIFT;
         if (pa == 0) {
             virtio_pci_stop_ioeventfd(proxy);
             virtio_reset(proxy->vdev);
@@ -280,9 +348,7 @@ static void virtio_ioport_write(void *opaque, uint32_t addr, uint32_t val)
             vdev->queue_sel = val;
         break;
     case VIRTIO_PCI_QUEUE_NOTIFY:
-        if (val < VIRTIO_PCI_QUEUE_MAX) {
-            virtio_queue_notify(vdev, val);
-        }
+        virtio_queue_notify(vdev, val);
         break;
     case VIRTIO_PCI_STATUS:
         if (!(val & VIRTIO_CONFIG_S_DRIVER_OK)) {
@@ -374,94 +440,115 @@ static uint32_t virtio_ioport_read(VirtIOPCIProxy *proxy, uint32_t addr)
     return ret;
 }
 
-static uint64_t virtio_pci_config_read(void *opaque, hwaddr addr,
-                                       unsigned size)
+static uint32_t virtio_pci_config_readb(void *opaque, uint32_t addr)
 {
     VirtIOPCIProxy *proxy = opaque;
     uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
-    uint64_t val = 0;
-    if (addr < config) {
+    addr -= proxy->addr;
+    if (addr < config)
         return virtio_ioport_read(proxy, addr);
-    }
     addr -= config;
-
-    switch (size) {
-    case 1:
-        val = virtio_config_readb(proxy->vdev, addr);
-        break;
-    case 2:
-        val = virtio_config_readw(proxy->vdev, addr);
-        if (virtio_is_big_endian()) {
-            val = bswap16(val);
-        }
-        break;
-    case 4:
-        val = virtio_config_readl(proxy->vdev, addr);
-        if (virtio_is_big_endian()) {
-            val = bswap32(val);
-        }
-        break;
-    }
-    return val;
+    return virtio_config_readb(proxy->vdev, addr);
 }
 
-static void virtio_pci_config_write(void *opaque, hwaddr addr,
-                                    uint64_t val, unsigned size)
+static uint32_t virtio_pci_config_readw(void *opaque, uint32_t addr)
 {
     VirtIOPCIProxy *proxy = opaque;
     uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
+    addr -= proxy->addr;
+    if (addr < config)
+        return virtio_ioport_read(proxy, addr);
+    addr -= config;
+    return virtio_config_readw(proxy->vdev, addr);
+}
+
+static uint32_t virtio_pci_config_readl(void *opaque, uint32_t addr)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
+    addr -= proxy->addr;
+    if (addr < config)
+        return virtio_ioport_read(proxy, addr);
+    addr -= config;
+    return virtio_config_readl(proxy->vdev, addr);
+}
+
+static void virtio_pci_config_writeb(void *opaque, uint32_t addr, uint32_t val)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
+    addr -= proxy->addr;
     if (addr < config) {
         virtio_ioport_write(proxy, addr, val);
         return;
     }
     addr -= config;
-    /*
-     * Virtio-PCI is odd. Ioports are LE but config space is target native
-     * endian.
-     */
-    switch (size) {
-    case 1:
-        virtio_config_writeb(proxy->vdev, addr, val);
-        break;
-    case 2:
-        if (virtio_is_big_endian()) {
-            val = bswap16(val);
-        }
-        virtio_config_writew(proxy->vdev, addr, val);
-        break;
-    case 4:
-        if (virtio_is_big_endian()) {
-            val = bswap32(val);
-        }
-        virtio_config_writel(proxy->vdev, addr, val);
-        break;
-    }
+    virtio_config_writeb(proxy->vdev, addr, val);
 }
 
-static const MemoryRegionOps virtio_pci_config_ops = {
-    .read = virtio_pci_config_read,
-    .write = virtio_pci_config_write,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
+static void virtio_pci_config_writew(void *opaque, uint32_t addr, uint32_t val)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
+    addr -= proxy->addr;
+    if (addr < config) {
+        virtio_ioport_write(proxy, addr, val);
+        return;
+    }
+    addr -= config;
+    virtio_config_writew(proxy->vdev, addr, val);
+}
+
+static void virtio_pci_config_writel(void *opaque, uint32_t addr, uint32_t val)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    uint32_t config = VIRTIO_PCI_CONFIG(&proxy->pci_dev);
+    addr -= proxy->addr;
+    if (addr < config) {
+        virtio_ioport_write(proxy, addr, val);
+        return;
+    }
+    addr -= config;
+    virtio_config_writel(proxy->vdev, addr, val);
+}
+
+static void virtio_map(PCIDevice *pci_dev, int region_num,
+                       pcibus_t addr, pcibus_t size, int type)
+{
+    VirtIOPCIProxy *proxy = container_of(pci_dev, VirtIOPCIProxy, pci_dev);
+    VirtIODevice *vdev = proxy->vdev;
+    unsigned config_len = VIRTIO_PCI_REGION_SIZE(pci_dev) + vdev->config_len;
+
+    proxy->addr = addr;
+
+    register_ioport_write(addr, config_len, 1, virtio_pci_config_writeb, proxy);
+    register_ioport_write(addr, config_len, 2, virtio_pci_config_writew, proxy);
+    register_ioport_write(addr, config_len, 4, virtio_pci_config_writel, proxy);
+    register_ioport_read(addr, config_len, 1, virtio_pci_config_readb, proxy);
+    register_ioport_read(addr, config_len, 2, virtio_pci_config_readw, proxy);
+    register_ioport_read(addr, config_len, 4, virtio_pci_config_readl, proxy);
+
+    if (vdev->config_len)
+        vdev->get_config(vdev, vdev->config);
+}
 
 static void virtio_write_config(PCIDevice *pci_dev, uint32_t address,
                                 uint32_t val, int len)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
 
-    pci_default_write_config(pci_dev, address, val, len);
-
-    if (range_covers_byte(address, len, PCI_COMMAND) &&
-        !(pci_dev->config[PCI_COMMAND] & PCI_COMMAND_MASTER) &&
-        !(proxy->flags & VIRTIO_PCI_FLAG_BUS_MASTER_BUG)) {
-        virtio_pci_stop_ioeventfd(proxy);
-        virtio_set_status(proxy->vdev,
-                          proxy->vdev->status & ~VIRTIO_CONFIG_S_DRIVER_OK);
+    if (PCI_COMMAND == address) {
+        if (!(val & PCI_COMMAND_MASTER)) {
+            if (!(proxy->flags & VIRTIO_PCI_FLAG_BUS_MASTER_BUG)) {
+                virtio_pci_stop_ioeventfd(proxy);
+                virtio_set_status(proxy->vdev,
+                                  proxy->vdev->status & ~VIRTIO_CONFIG_S_DRIVER_OK);
+            }
+        }
     }
+
+    pci_default_write_config(pci_dev, address, val, len);
+    msix_write_config(pci_dev, address, val, len);
 }
 
 static unsigned virtio_pci_get_features(void *opaque)
@@ -470,101 +557,12 @@ static unsigned virtio_pci_get_features(void *opaque)
     return proxy->host_features;
 }
 
-static int kvm_virtio_pci_vq_vector_use(VirtIOPCIProxy *proxy,
-                                        unsigned int queue_no,
-                                        unsigned int vector,
-                                        MSIMessage msg)
+static void virtio_pci_guest_notifier_read(void *opaque)
 {
-    VirtQueue *vq = virtio_get_queue(proxy->vdev, queue_no);
+    VirtQueue *vq = opaque;
     EventNotifier *n = virtio_queue_get_guest_notifier(vq);
-    VirtIOIRQFD *irqfd = &proxy->vector_irqfd[vector];
-    int ret;
-
-    if (irqfd->users == 0) {
-        ret = kvm_irqchip_add_msi_route(kvm_state, msg);
-        if (ret < 0) {
-            return ret;
-        }
-        irqfd->virq = ret;
-    }
-    irqfd->users++;
-
-    ret = kvm_irqchip_add_irqfd_notifier(kvm_state, n, irqfd->virq);
-    if (ret < 0) {
-        if (--irqfd->users == 0) {
-            kvm_irqchip_release_virq(kvm_state, irqfd->virq);
-        }
-        return ret;
-    }
-
-    virtio_queue_set_guest_notifier_fd_handler(vq, true, true);
-    return 0;
-}
-
-static void kvm_virtio_pci_vq_vector_release(VirtIOPCIProxy *proxy,
-                                             unsigned int queue_no,
-                                             unsigned int vector)
-{
-    VirtQueue *vq = virtio_get_queue(proxy->vdev, queue_no);
-    EventNotifier *n = virtio_queue_get_guest_notifier(vq);
-    VirtIOIRQFD *irqfd = &proxy->vector_irqfd[vector];
-    int ret;
-
-    ret = kvm_irqchip_remove_irqfd_notifier(kvm_state, n, irqfd->virq);
-    assert(ret == 0);
-
-    if (--irqfd->users == 0) {
-        kvm_irqchip_release_virq(kvm_state, irqfd->virq);
-    }
-
-    virtio_queue_set_guest_notifier_fd_handler(vq, true, false);
-}
-
-static int kvm_virtio_pci_vector_use(PCIDevice *dev, unsigned vector,
-                                     MSIMessage msg)
-{
-    VirtIOPCIProxy *proxy = container_of(dev, VirtIOPCIProxy, pci_dev);
-    VirtIODevice *vdev = proxy->vdev;
-    int ret, queue_no;
-
-    for (queue_no = 0; queue_no < VIRTIO_PCI_QUEUE_MAX; queue_no++) {
-        if (!virtio_queue_get_num(vdev, queue_no)) {
-            break;
-        }
-        if (virtio_queue_vector(vdev, queue_no) != vector) {
-            continue;
-        }
-        ret = kvm_virtio_pci_vq_vector_use(proxy, queue_no, vector, msg);
-        if (ret < 0) {
-            goto undo;
-        }
-    }
-    return 0;
-
-undo:
-    while (--queue_no >= 0) {
-        if (virtio_queue_vector(vdev, queue_no) != vector) {
-            continue;
-        }
-        kvm_virtio_pci_vq_vector_release(proxy, queue_no, vector);
-    }
-    return ret;
-}
-
-static void kvm_virtio_pci_vector_release(PCIDevice *dev, unsigned vector)
-{
-    VirtIOPCIProxy *proxy = container_of(dev, VirtIOPCIProxy, pci_dev);
-    VirtIODevice *vdev = proxy->vdev;
-    int queue_no;
-
-    for (queue_no = 0; queue_no < VIRTIO_PCI_QUEUE_MAX; queue_no++) {
-        if (!virtio_queue_get_num(vdev, queue_no)) {
-            break;
-        }
-        if (virtio_queue_vector(vdev, queue_no) != vector) {
-            continue;
-        }
-        kvm_virtio_pci_vq_vector_release(proxy, queue_no, vector);
+    if (event_notifier_test_and_clear(n)) {
+        virtio_irq(vq);
     }
 }
 
@@ -579,9 +577,11 @@ static int virtio_pci_set_guest_notifier(void *opaque, int n, bool assign)
         if (r < 0) {
             return r;
         }
-        virtio_queue_set_guest_notifier_fd_handler(vq, true, false);
+        qemu_set_fd_handler(event_notifier_get_fd(notifier),
+                            virtio_pci_guest_notifier_read, NULL, vq);
     } else {
-        virtio_queue_set_guest_notifier_fd_handler(vq, false, false);
+        qemu_set_fd_handler(event_notifier_get_fd(notifier),
+                            NULL, NULL, NULL);
         event_notifier_cleanup(notifier);
     }
 
@@ -600,13 +600,6 @@ static int virtio_pci_set_guest_notifiers(void *opaque, bool assign)
     VirtIODevice *vdev = proxy->vdev;
     int r, n;
 
-    /* Must unset vector notifier while guest notifier is still assigned */
-    if (kvm_msi_via_irqfd_enabled() && !assign) {
-        msix_unset_vector_notifiers(&proxy->pci_dev);
-        g_free(proxy->vector_irqfd);
-        proxy->vector_irqfd = NULL;
-    }
-
     for (n = 0; n < VIRTIO_PCI_QUEUE_MAX; n++) {
         if (!virtio_queue_get_num(vdev, n)) {
             break;
@@ -618,24 +611,10 @@ static int virtio_pci_set_guest_notifiers(void *opaque, bool assign)
         }
     }
 
-    /* Must set vector notifier after guest notifier has been assigned */
-    if (kvm_msi_via_irqfd_enabled() && assign) {
-        proxy->vector_irqfd =
-            g_malloc0(sizeof(*proxy->vector_irqfd) *
-                      msix_nr_vectors_allocated(&proxy->pci_dev));
-        r = msix_set_vector_notifiers(&proxy->pci_dev,
-                                      kvm_virtio_pci_vector_use,
-                                      kvm_virtio_pci_vector_release);
-        if (r < 0) {
-            goto assign_error;
-        }
-    }
-
     return 0;
 
 assign_error:
     /* We get here on assignment failure. Recover by undoing for VQs 0 .. n. */
-    assert(assign);
     while (--n >= 0) {
         virtio_pci_set_guest_notifier(opaque, n, !assign);
     }
@@ -657,7 +636,7 @@ static int virtio_pci_set_host_notifier(void *opaque, int n, bool assign)
      * currently only stops on status change away from ok,
      * reset, vmstop and such. If we do add code to start here,
      * need to check vmstate, device state etc. */
-    return virtio_pci_set_host_notifier_internal(proxy, n, assign, false);
+    return virtio_pci_set_host_notifier_internal(proxy, n, assign);
 }
 
 static void virtio_pci_vmstate_change(void *opaque, bool running)
@@ -690,7 +669,9 @@ static const VirtIOBindings virtio_pci_bindings = {
     .vmstate_change = virtio_pci_vmstate_change,
 };
 
-void virtio_init_pci(VirtIOPCIProxy *proxy, VirtIODevice *vdev)
+static void virtio_init_pci(VirtIOPCIProxy *proxy, VirtIODevice *vdev,
+                            uint16_t vendor, uint16_t device,
+                            uint16_t class_code, uint8_t pif)
 {
     uint8_t *config;
     uint32_t size;
@@ -698,19 +679,28 @@ void virtio_init_pci(VirtIOPCIProxy *proxy, VirtIODevice *vdev)
     proxy->vdev = vdev;
 
     config = proxy->pci_dev.config;
+    pci_config_set_vendor_id(config, vendor);
+    pci_config_set_device_id(config, device);
 
-    if (proxy->class_code) {
-        pci_config_set_class(config, proxy->class_code);
-    }
-    pci_set_word(config + PCI_SUBSYSTEM_VENDOR_ID,
-                 pci_get_word(config + PCI_VENDOR_ID));
-    pci_set_word(config + PCI_SUBSYSTEM_ID, vdev->device_id);
-    config[PCI_INTERRUPT_PIN] = 1;
+    config[0x08] = VIRTIO_PCI_ABI_VERSION;
 
-    if (vdev->nvectors &&
-        msix_init_exclusive_bar(&proxy->pci_dev, vdev->nvectors, 1)) {
+    config[0x09] = pif;
+    pci_config_set_class(config, class_code);
+
+    config[0x2c] = vendor & 0xFF;
+    config[0x2d] = (vendor >> 8) & 0xFF;
+    config[0x2e] = vdev->device_id & 0xFF;
+    config[0x2f] = (vdev->device_id >> 8) & 0xFF;
+
+    config[0x3d] = 1;
+
+    if (vdev->nvectors && !msix_init(&proxy->pci_dev, vdev->nvectors, 1, 0)) {
+        pci_register_bar(&proxy->pci_dev, 1,
+                         msix_bar_size(&proxy->pci_dev),
+                         PCI_BASE_ADDRESS_SPACE_MEMORY,
+                         msix_mmio_map);
+    } else
         vdev->nvectors = 0;
-    }
 
     proxy->pci_dev.config_write = virtio_write_config;
 
@@ -718,10 +708,8 @@ void virtio_init_pci(VirtIOPCIProxy *proxy, VirtIODevice *vdev)
     if (size & (size-1))
         size = 1 << qemu_fls(size);
 
-    memory_region_init_io(&proxy->bar, &virtio_pci_config_ops, proxy,
-                          "virtio-pci", size);
-    pci_register_bar(&proxy->pci_dev, 0, PCI_BASE_ADDRESS_SPACE_IO,
-                     &proxy->bar);
+    pci_register_bar(&proxy->pci_dev, 0, size, PCI_BASE_ADDRESS_SPACE_IO,
+                           virtio_map);
 
     if (!kvm_has_many_ioeventfds()) {
         proxy->flags &= ~VIRTIO_PCI_FLAG_USE_IOEVENTFD;
@@ -742,32 +730,33 @@ static int virtio_blk_init_pci(PCIDevice *pci_dev)
         proxy->class_code != PCI_CLASS_STORAGE_OTHER)
         proxy->class_code = PCI_CLASS_STORAGE_SCSI;
 
-    vdev = virtio_blk_init(&pci_dev->qdev, &proxy->blk);
+    vdev = virtio_blk_init(&pci_dev->qdev, &proxy->block);
     if (!vdev) {
         return -1;
     }
     vdev->nvectors = proxy->nvectors;
-    virtio_init_pci(proxy, vdev);
+    virtio_init_pci(proxy, vdev,
+                    PCI_VENDOR_ID_REDHAT_QUMRANET,
+                    PCI_DEVICE_ID_VIRTIO_BLOCK,
+                    proxy->class_code, 0x00);
     /* make the actual value visible */
     proxy->nvectors = vdev->nvectors;
     return 0;
 }
 
-static void virtio_exit_pci(PCIDevice *pci_dev)
+static int virtio_exit_pci(PCIDevice *pci_dev)
 {
-    VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
-
-    memory_region_destroy(&proxy->bar);
-    msix_uninit_exclusive_bar(pci_dev);
+    return msix_uninit(pci_dev);
 }
 
-static void virtio_blk_exit_pci(PCIDevice *pci_dev)
+static int virtio_blk_exit_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
 
     virtio_pci_stop_ioeventfd(proxy);
     virtio_blk_exit(proxy->vdev);
-    virtio_exit_pci(pci_dev);
+    blockdev_mark_auto_del(proxy->block.bs);
+    return virtio_exit_pci(pci_dev);
 }
 
 static int virtio_serial_init_pci(PCIDevice *pci_dev)
@@ -780,25 +769,27 @@ static int virtio_serial_init_pci(PCIDevice *pci_dev)
         proxy->class_code != PCI_CLASS_OTHERS)          /* qemu-kvm  */
         proxy->class_code = PCI_CLASS_COMMUNICATION_OTHER;
 
-    vdev = virtio_serial_init(&pci_dev->qdev, &proxy->serial);
+    vdev = virtio_serial_init(&pci_dev->qdev, proxy->max_virtserial_ports);
     if (!vdev) {
         return -1;
     }
     vdev->nvectors = proxy->nvectors == DEV_NVECTORS_UNSPECIFIED
-                                        ? proxy->serial.max_virtserial_ports + 1
+                                        ? proxy->max_virtserial_ports + 1
                                         : proxy->nvectors;
-    virtio_init_pci(proxy, vdev);
+    virtio_init_pci(proxy, vdev,
+                    PCI_VENDOR_ID_REDHAT_QUMRANET,
+                    PCI_DEVICE_ID_VIRTIO_CONSOLE,
+                    proxy->class_code, 0x00);
     proxy->nvectors = vdev->nvectors;
     return 0;
 }
 
-static void virtio_serial_exit_pci(PCIDevice *pci_dev)
+static int virtio_serial_exit_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
 
-    virtio_pci_stop_ioeventfd(proxy);
     virtio_serial_exit(proxy->vdev);
-    virtio_exit_pci(pci_dev);
+    return virtio_exit_pci(pci_dev);
 }
 
 static int virtio_net_init_pci(PCIDevice *pci_dev)
@@ -809,20 +800,24 @@ static int virtio_net_init_pci(PCIDevice *pci_dev)
     vdev = virtio_net_init(&pci_dev->qdev, &proxy->nic, &proxy->net);
 
     vdev->nvectors = proxy->nvectors;
-    virtio_init_pci(proxy, vdev);
+    virtio_init_pci(proxy, vdev,
+                    PCI_VENDOR_ID_REDHAT_QUMRANET,
+                    PCI_DEVICE_ID_VIRTIO_NET,
+                    PCI_CLASS_NETWORK_ETHERNET,
+                    0x00);
 
     /* make the actual value visible */
     proxy->nvectors = vdev->nvectors;
     return 0;
 }
 
-static void virtio_net_exit_pci(PCIDevice *pci_dev)
+static int virtio_net_exit_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
 
     virtio_pci_stop_ioeventfd(proxy);
     virtio_net_exit(proxy->vdev);
-    virtio_exit_pci(pci_dev);
+    return virtio_exit_pci(pci_dev);
 }
 
 static int virtio_balloon_init_pci(PCIDevice *pci_dev)
@@ -830,222 +825,118 @@ static int virtio_balloon_init_pci(PCIDevice *pci_dev)
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
     VirtIODevice *vdev;
 
-    if (proxy->class_code != PCI_CLASS_OTHERS &&
-        proxy->class_code != PCI_CLASS_MEMORY_RAM) { /* qemu < 1.1 */
-        proxy->class_code = PCI_CLASS_OTHERS;
-    }
-
     vdev = virtio_balloon_init(&pci_dev->qdev);
-    if (!vdev) {
-        return -1;
-    }
-    virtio_init_pci(proxy, vdev);
+    virtio_init_pci(proxy, vdev,
+                    PCI_VENDOR_ID_REDHAT_QUMRANET,
+                    PCI_DEVICE_ID_VIRTIO_BALLOON,
+                    PCI_CLASS_MEMORY_RAM,
+                    0x00);
     return 0;
 }
 
-static void virtio_balloon_exit_pci(PCIDevice *pci_dev)
-{
-    VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
-
-    virtio_pci_stop_ioeventfd(proxy);
-    virtio_balloon_exit(proxy->vdev);
-    virtio_exit_pci(pci_dev);
-}
-
-static Property virtio_blk_properties[] = {
-    DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
-    DEFINE_BLOCK_PROPERTIES(VirtIOPCIProxy, blk.conf),
-    DEFINE_BLOCK_CHS_PROPERTIES(VirtIOPCIProxy, blk.conf),
-    DEFINE_PROP_STRING("serial", VirtIOPCIProxy, blk.serial),
-#ifdef __linux__
-    DEFINE_PROP_BIT("scsi", VirtIOPCIProxy, blk.scsi, 0, true),
-#endif
-    DEFINE_PROP_BIT("config-wce", VirtIOPCIProxy, blk.config_wce, 0, true),
-    DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags, VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
-    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 2),
-    DEFINE_VIRTIO_BLK_FEATURES(VirtIOPCIProxy, host_features),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void virtio_blk_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = virtio_blk_init_pci;
-    k->exit = virtio_blk_exit_pci;
-    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = PCI_DEVICE_ID_VIRTIO_BLOCK;
-    k->revision = VIRTIO_PCI_ABI_VERSION;
-    k->class_id = PCI_CLASS_STORAGE_SCSI;
-    dc->reset = virtio_pci_reset;
-    dc->props = virtio_blk_properties;
-}
-
-static TypeInfo virtio_blk_info = {
-    .name          = "virtio-blk-pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VirtIOPCIProxy),
-    .class_init    = virtio_blk_class_init,
-};
-
-static Property virtio_net_properties[] = {
-    DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags, VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, false),
-    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 3),
-    DEFINE_VIRTIO_NET_FEATURES(VirtIOPCIProxy, host_features),
-    DEFINE_NIC_PROPERTIES(VirtIOPCIProxy, nic),
-    DEFINE_PROP_UINT32("x-txtimer", VirtIOPCIProxy, net.txtimer, TX_TIMER_INTERVAL),
-    DEFINE_PROP_INT32("x-txburst", VirtIOPCIProxy, net.txburst, TX_BURST),
-    DEFINE_PROP_STRING("tx", VirtIOPCIProxy, net.tx),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void virtio_net_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = virtio_net_init_pci;
-    k->exit = virtio_net_exit_pci;
-    k->romfile = "pxe-virtio.rom";
-    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = PCI_DEVICE_ID_VIRTIO_NET;
-    k->revision = VIRTIO_PCI_ABI_VERSION;
-    k->class_id = PCI_CLASS_NETWORK_ETHERNET;
-    dc->reset = virtio_pci_reset;
-    dc->props = virtio_net_properties;
-}
-
-static TypeInfo virtio_net_info = {
-    .name          = "virtio-net-pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VirtIOPCIProxy),
-    .class_init    = virtio_net_class_init,
-};
-
-static Property virtio_serial_properties[] = {
-    DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags, VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
-    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, DEV_NVECTORS_UNSPECIFIED),
-    DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
-    DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
-    DEFINE_PROP_UINT32("max_ports", VirtIOPCIProxy, serial.max_virtserial_ports, 31),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void virtio_serial_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = virtio_serial_init_pci;
-    k->exit = virtio_serial_exit_pci;
-    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = PCI_DEVICE_ID_VIRTIO_CONSOLE;
-    k->revision = VIRTIO_PCI_ABI_VERSION;
-    k->class_id = PCI_CLASS_COMMUNICATION_OTHER;
-    dc->reset = virtio_pci_reset;
-    dc->props = virtio_serial_properties;
-}
-
-static TypeInfo virtio_serial_info = {
-    .name          = "virtio-serial-pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VirtIOPCIProxy),
-    .class_init    = virtio_serial_class_init,
-};
-
-static Property virtio_balloon_properties[] = {
-    DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
-    DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void virtio_balloon_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = virtio_balloon_init_pci;
-    k->exit = virtio_balloon_exit_pci;
-    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = PCI_DEVICE_ID_VIRTIO_BALLOON;
-    k->revision = VIRTIO_PCI_ABI_VERSION;
-    k->class_id = PCI_CLASS_OTHERS;
-    dc->reset = virtio_pci_reset;
-    dc->props = virtio_balloon_properties;
-}
-
-static TypeInfo virtio_balloon_info = {
-    .name          = "virtio-balloon-pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VirtIOPCIProxy),
-    .class_init    = virtio_balloon_class_init,
-};
-
-static int virtio_scsi_init_pci(PCIDevice *pci_dev)
+#ifdef CONFIG_VIRTFS
+static int virtio_9p_init_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
     VirtIODevice *vdev;
 
-    vdev = virtio_scsi_init(&pci_dev->qdev, &proxy->scsi);
-    if (!vdev) {
-        return -EINVAL;
-    }
-
-    vdev->nvectors = proxy->nvectors == DEV_NVECTORS_UNSPECIFIED
-                                        ? proxy->scsi.num_queues + 3
-                                        : proxy->nvectors;
-    virtio_init_pci(proxy, vdev);
-
+    vdev = virtio_9p_init(&pci_dev->qdev, &proxy->fsconf);
+    vdev->nvectors = proxy->nvectors;
+    virtio_init_pci(proxy, vdev,
+                    PCI_VENDOR_ID_REDHAT_QUMRANET,
+                    0x1009,
+                    0x2,
+                    0x00);
     /* make the actual value visible */
     proxy->nvectors = vdev->nvectors;
     return 0;
 }
+#endif
 
-static void virtio_scsi_exit_pci(PCIDevice *pci_dev)
-{
-    VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
-
-    virtio_scsi_exit(proxy->vdev);
-    virtio_exit_pci(pci_dev);
-}
-
-static Property virtio_scsi_properties[] = {
-    DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags, VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
-    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, DEV_NVECTORS_UNSPECIFIED),
-    DEFINE_VIRTIO_SCSI_PROPERTIES(VirtIOPCIProxy, host_features, scsi),
-    DEFINE_PROP_END_OF_LIST(),
+static PCIDeviceInfo virtio_info[] = {
+    {
+        .qdev.name = "virtio-blk-pci",
+        .qdev.alias = "virtio-blk",
+        .qdev.size = sizeof(VirtIOPCIProxy),
+        .init      = virtio_blk_init_pci,
+        .exit      = virtio_blk_exit_pci,
+        .qdev.props = (Property[]) {
+            DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
+            DEFINE_BLOCK_PROPERTIES(VirtIOPCIProxy, block),
+            DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
+                            VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, true),
+            DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 2),
+            DEFINE_VIRTIO_BLK_FEATURES(VirtIOPCIProxy, host_features),
+            DEFINE_PROP_END_OF_LIST(),
+        },
+        .qdev.reset = virtio_pci_reset,
+    },{
+        .qdev.name  = "virtio-net-pci",
+        .qdev.size  = sizeof(VirtIOPCIProxy),
+        .init       = virtio_net_init_pci,
+        .exit       = virtio_net_exit_pci,
+        .romfile    = "pxe-virtio.bin",
+        .qdev.props = (Property[]) {
+            DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
+                            VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, false),
+            DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 3),
+            DEFINE_VIRTIO_NET_FEATURES(VirtIOPCIProxy, host_features),
+            DEFINE_NIC_PROPERTIES(VirtIOPCIProxy, nic),
+            DEFINE_PROP_UINT32("x-txtimer", VirtIOPCIProxy,
+                               net.txtimer, TX_TIMER_INTERVAL),
+            DEFINE_PROP_INT32("x-txburst", VirtIOPCIProxy,
+                              net.txburst, TX_BURST),
+            DEFINE_PROP_STRING("tx", VirtIOPCIProxy, net.tx),
+            DEFINE_PROP_END_OF_LIST(),
+        },
+        .qdev.reset = virtio_pci_reset,
+    },{
+        .qdev.name = "virtio-serial-pci",
+        .qdev.alias = "virtio-serial",
+        .qdev.size = sizeof(VirtIOPCIProxy),
+        .init      = virtio_serial_init_pci,
+        .exit      = virtio_serial_exit_pci,
+        .qdev.props = (Property[]) {
+            DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors,
+                               DEV_NVECTORS_UNSPECIFIED),
+            DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
+            DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
+            DEFINE_PROP_UINT32("max_ports", VirtIOPCIProxy, max_virtserial_ports,
+                               31),
+            DEFINE_PROP_END_OF_LIST(),
+        },
+        .qdev.reset = virtio_pci_reset,
+    },{
+        .qdev.name = "virtio-balloon-pci",
+        .qdev.size = sizeof(VirtIOPCIProxy),
+        .init      = virtio_balloon_init_pci,
+        .exit      = virtio_exit_pci,
+        .qdev.props = (Property[]) {
+            DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
+            DEFINE_PROP_END_OF_LIST(),
+        },
+        .qdev.reset = virtio_pci_reset,
+    },{
+#ifdef CONFIG_VIRTFS
+        .qdev.name = "virtio-9p-pci",
+        .qdev.size = sizeof(VirtIOPCIProxy),
+        .init      = virtio_9p_init_pci,
+        .qdev.props = (Property[]) {
+            DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 2),
+            DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
+            DEFINE_PROP_STRING("mount_tag", VirtIOPCIProxy, fsconf.tag),
+            DEFINE_PROP_STRING("fsdev", VirtIOPCIProxy, fsconf.fsdev_id),
+            DEFINE_PROP_END_OF_LIST(),
+        },
+    }, {
+#endif
+        /* end of list */
+    }
 };
 
-static void virtio_scsi_class_init(ObjectClass *klass, void *data)
+static void virtio_pci_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = virtio_scsi_init_pci;
-    k->exit = virtio_scsi_exit_pci;
-    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = PCI_DEVICE_ID_VIRTIO_SCSI;
-    k->revision = 0x00;
-    k->class_id = PCI_CLASS_STORAGE_SCSI;
-    dc->reset = virtio_pci_reset;
-    dc->props = virtio_scsi_properties;
+    pci_qdev_register_many(virtio_info);
 }
 
-static TypeInfo virtio_scsi_info = {
-    .name          = "virtio-scsi-pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VirtIOPCIProxy),
-    .class_init    = virtio_scsi_class_init,
-};
-
-static void virtio_pci_register_types(void)
-{
-    type_register_static(&virtio_blk_info);
-    type_register_static(&virtio_net_info);
-    type_register_static(&virtio_serial_info);
-    type_register_static(&virtio_balloon_info);
-    type_register_static(&virtio_scsi_info);
-}
-
-type_init(virtio_pci_register_types)
+device_init(virtio_pci_register_devices)

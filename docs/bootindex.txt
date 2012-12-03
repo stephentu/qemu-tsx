@@ -1,4 +1,4 @@
-= Bootindex property =
+= Bootindex propery =
 
 Block and net devices have bootindex property. This property is used to
 determine the order in which firmware will consider devices for booting

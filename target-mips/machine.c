@@ -1,7 +1,7 @@
 #include "hw/hw.h"
 #include "hw/boards.h"
 
-#include "cpu.h"
+#include "exec-all.h"
 
 static void save_tc(QEMUFile *f, TCState *tc)
 {
@@ -42,7 +42,7 @@ static void save_fpu(QEMUFile *f, CPUMIPSFPUContext *fpu)
 
 void cpu_save(QEMUFile *f, void *opaque)
 {
-    CPUMIPSState *env = opaque;
+    CPUState *env = opaque;
     int i;
 
     /* Save active TC */
@@ -190,7 +190,7 @@ static void load_fpu(QEMUFile *f, CPUMIPSFPUContext *fpu)
 
 int cpu_load(QEMUFile *f, void *opaque, int version_id)
 {
-    CPUMIPSState *env = opaque;
+    CPUState *env = opaque;
     int i;
 
     if (version_id != 3)
@@ -302,7 +302,7 @@ int cpu_load(QEMUFile *f, void *opaque, int version_id)
     for (i = 0; i < MIPS_FPU_MAX; i++)
         load_fpu(f, &env->fpus[i]);
 
-    /* XXX: ensure compatibility for halted bit ? */
+    /* XXX: ensure compatiblity for halted bit ? */
     tlb_flush(env, 1);
     return 0;
 }

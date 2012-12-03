@@ -5,9 +5,6 @@
  * Written by Andrzej Zaborowski <balrog@zabor.org>
  *
  * This code is licensed under the GPLv2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "hw.h"
@@ -18,23 +15,7 @@
 #include "sysemu.h"
 #include "framebuffer.h"
 
-struct DMAChannel {
-    uint32_t branch;
-    uint8_t up;
-    uint8_t palette[1024];
-    uint8_t pbuffer[1024];
-    void (*redraw)(PXA2xxLCDState *s, hwaddr addr,
-                   int *miny, int *maxy);
-
-    uint32_t descriptor;
-    uint32_t source;
-    uint32_t id;
-    uint32_t command;
-};
-
 struct PXA2xxLCDState {
-    MemoryRegion *sysmem;
-    MemoryRegion iomem;
     qemu_irq irq;
     int irqlevel;
 
@@ -69,13 +50,25 @@ struct PXA2xxLCDState {
     uint32_t liidr;
     uint8_t bscntr;
 
-    struct DMAChannel dma_ch[7];
+    struct {
+        target_phys_addr_t branch;
+        int up;
+        uint8_t palette[1024];
+        uint8_t pbuffer[1024];
+        void (*redraw)(PXA2xxLCDState *s, target_phys_addr_t addr,
+                        int *miny, int *maxy);
+
+        target_phys_addr_t descriptor;
+        target_phys_addr_t source;
+        uint32_t id;
+        uint32_t command;
+    } dma_ch[7];
 
     qemu_irq vsync_cb;
     int orientation;
 };
 
-typedef struct QEMU_PACKED {
+typedef struct __attribute__ ((__packed__)) {
     uint32_t fdaddr;
     uint32_t fsaddr;
     uint32_t fidr;
@@ -291,7 +284,7 @@ static inline void pxa2xx_dma_rdst_set(PXA2xxLCDState *s)
 static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
 {
     PXAFrameDescriptor desc;
-    hwaddr descptr;
+    target_phys_addr_t descptr;
     int i;
 
     for (i = 0; i < PXA_LCDDMA_CHANS; i ++) {
@@ -308,12 +301,9 @@ static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
         } else
             descptr = s->dma_ch[i].descriptor;
 
-        if (!((descptr >= PXA2XX_SDRAM_BASE && descptr +
-                 sizeof(desc) <= PXA2XX_SDRAM_BASE + ram_size) ||
-                (descptr >= PXA2XX_INTERNAL_BASE && descptr + sizeof(desc) <=
-                 PXA2XX_INTERNAL_BASE + PXA2XX_INTERNAL_SIZE))) {
+        if (!(descptr >= PXA2XX_SDRAM_BASE && descptr +
+                    sizeof(desc) <= PXA2XX_SDRAM_BASE + ram_size))
             continue;
-        }
 
         cpu_physical_memory_read(descptr, (void *)&desc, sizeof(desc));
         s->dma_ch[i].descriptor = tswap32(desc.fdaddr);
@@ -323,8 +313,7 @@ static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
     }
 }
 
-static uint64_t pxa2xx_lcdc_read(void *opaque, hwaddr offset,
-                                 unsigned size)
+static uint32_t pxa2xx_lcdc_read(void *opaque, target_phys_addr_t offset)
 {
     PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
     int ch;
@@ -417,8 +406,8 @@ static uint64_t pxa2xx_lcdc_read(void *opaque, hwaddr offset,
     return 0;
 }
 
-static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
-                              uint64_t value, unsigned size)
+static void pxa2xx_lcdc_write(void *opaque,
+                target_phys_addr_t offset, uint32_t value)
 {
     PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
     int ch;
@@ -570,18 +559,23 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps pxa2xx_lcdc_ops = {
-    .read = pxa2xx_lcdc_read,
-    .write = pxa2xx_lcdc_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pxa2xx_lcdc_readfn[] = {
+    pxa2xx_lcdc_read,
+    pxa2xx_lcdc_read,
+    pxa2xx_lcdc_read
+};
+
+static CPUWriteMemoryFunc * const pxa2xx_lcdc_writefn[] = {
+    pxa2xx_lcdc_write,
+    pxa2xx_lcdc_write,
+    pxa2xx_lcdc_write
 };
 
 /* Load new palette for a given DMA channel, convert to internal format */
 static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
 {
     int i, n, format, r, g, b, alpha;
-    uint32_t *dest;
-    uint8_t *src;
+    uint32_t *dest, *src;
     s->pal_for = LCCR4_PALFOR(s->control[4]);
     format = s->pal_for;
 
@@ -600,7 +594,7 @@ static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
         return;
     }
 
-    src = (uint8_t *) s->dma_ch[ch].pbuffer;
+    src = (uint32_t *) s->dma_ch[ch].pbuffer;
     dest = (uint32_t *) s->dma_ch[ch].palette;
     alpha = r = g = b = 0;
 
@@ -608,48 +602,43 @@ static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
         switch (format) {
         case 0: /* 16 bpp, no transparency */
             alpha = 0;
-            if (s->control[0] & LCCR0_CMS) {
-                r = g = b = *(uint16_t *) src & 0xff;
-            }
+            if (s->control[0] & LCCR0_CMS)
+                r = g = b = *src & 0xff;
             else {
-                r = (*(uint16_t *) src & 0xf800) >> 8;
-                g = (*(uint16_t *) src & 0x07e0) >> 3;
-                b = (*(uint16_t *) src & 0x001f) << 3;
+                r = (*src & 0xf800) >> 8;
+                g = (*src & 0x07e0) >> 3;
+                b = (*src & 0x001f) << 3;
             }
-            src += 2;
             break;
         case 1: /* 16 bpp plus transparency */
-            alpha = *(uint16_t *) src & (1 << 24);
+            alpha = *src & (1 << 24);
             if (s->control[0] & LCCR0_CMS)
-                r = g = b = *(uint16_t *) src & 0xff;
+                r = g = b = *src & 0xff;
             else {
-                r = (*(uint16_t *) src & 0xf800) >> 8;
-                g = (*(uint16_t *) src & 0x07e0) >> 3;
-                b = (*(uint16_t *) src & 0x001f) << 3;
+                r = (*src & 0xf800) >> 8;
+                g = (*src & 0x07e0) >> 3;
+                b = (*src & 0x001f) << 3;
             }
-            src += 2;
             break;
         case 2: /* 18 bpp plus transparency */
-            alpha = *(uint32_t *) src & (1 << 24);
+            alpha = *src & (1 << 24);
             if (s->control[0] & LCCR0_CMS)
-                r = g = b = *(uint32_t *) src & 0xff;
+                r = g = b = *src & 0xff;
             else {
-                r = (*(uint32_t *) src & 0xf80000) >> 16;
-                g = (*(uint32_t *) src & 0x00fc00) >> 8;
-                b = (*(uint32_t *) src & 0x0000f8);
+                r = (*src & 0xf80000) >> 16;
+                g = (*src & 0x00fc00) >> 8;
+                b = (*src & 0x0000f8);
             }
-            src += 4;
             break;
         case 3: /* 24 bpp plus transparency */
-            alpha = *(uint32_t *) src & (1 << 24);
+            alpha = *src & (1 << 24);
             if (s->control[0] & LCCR0_CMS)
-                r = g = b = *(uint32_t *) src & 0xff;
+                r = g = b = *src & 0xff;
             else {
-                r = (*(uint32_t *) src & 0xff0000) >> 16;
-                g = (*(uint32_t *) src & 0x00ff00) >> 8;
-                b = (*(uint32_t *) src & 0x0000ff);
+                r = (*src & 0xff0000) >> 16;
+                g = (*src & 0x00ff00) >> 8;
+                b = (*src & 0x0000ff);
             }
-            src += 4;
             break;
         }
         switch (ds_get_bits_per_pixel(s->ds)) {
@@ -669,12 +658,13 @@ static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
             *dest = rgb_to_pixel32(r, g, b) | alpha;
             break;
         }
+        src ++;
         dest ++;
     }
 }
 
-static void pxa2xx_lcdc_dma0_redraw_rot0(PXA2xxLCDState *s,
-                hwaddr addr, int *miny, int *maxy)
+static void pxa2xx_lcdc_dma0_redraw_horiz(PXA2xxLCDState *s,
+                target_phys_addr_t addr, int *miny, int *maxy)
 {
     int src_width, dest_width;
     drawfn fn = NULL;
@@ -693,15 +683,15 @@ static void pxa2xx_lcdc_dma0_redraw_rot0(PXA2xxLCDState *s,
 
     dest_width = s->xres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(s->ds, s->sysmem,
+    framebuffer_update_display(s->ds,
                                addr, s->xres, s->yres,
                                src_width, dest_width, s->dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette, miny, maxy);
 }
 
-static void pxa2xx_lcdc_dma0_redraw_rot90(PXA2xxLCDState *s,
-               hwaddr addr, int *miny, int *maxy)
+static void pxa2xx_lcdc_dma0_redraw_vert(PXA2xxLCDState *s,
+               target_phys_addr_t addr, int *miny, int *maxy)
 {
     int src_width, dest_width;
     drawfn fn = NULL;
@@ -720,70 +710,9 @@ static void pxa2xx_lcdc_dma0_redraw_rot90(PXA2xxLCDState *s,
 
     dest_width = s->yres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(s->ds, s->sysmem,
+    framebuffer_update_display(s->ds,
                                addr, s->xres, s->yres,
                                src_width, s->dest_width, -dest_width,
-                               s->invalidated,
-                               fn, s->dma_ch[0].palette,
-                               miny, maxy);
-}
-
-static void pxa2xx_lcdc_dma0_redraw_rot180(PXA2xxLCDState *s,
-                hwaddr addr, int *miny, int *maxy)
-{
-    int src_width, dest_width;
-    drawfn fn = NULL;
-    if (s->dest_width) {
-        fn = s->line_fn[s->transp][s->bpp];
-    }
-    if (!fn) {
-        return;
-    }
-
-    src_width = (s->xres + 3) & ~3;     /* Pad to a 4 pixels multiple */
-    if (s->bpp == pxa_lcdc_19pbpp || s->bpp == pxa_lcdc_18pbpp) {
-        src_width *= 3;
-    } else if (s->bpp > pxa_lcdc_16bpp) {
-        src_width *= 4;
-    } else if (s->bpp > pxa_lcdc_8bpp) {
-        src_width *= 2;
-    }
-
-    dest_width = s->xres * s->dest_width;
-    *miny = 0;
-    framebuffer_update_display(s->ds, s->sysmem,
-                               addr, s->xres, s->yres,
-                               src_width, -dest_width, -s->dest_width,
-                               s->invalidated,
-                               fn, s->dma_ch[0].palette, miny, maxy);
-}
-
-static void pxa2xx_lcdc_dma0_redraw_rot270(PXA2xxLCDState *s,
-               hwaddr addr, int *miny, int *maxy)
-{
-    int src_width, dest_width;
-    drawfn fn = NULL;
-    if (s->dest_width) {
-        fn = s->line_fn[s->transp][s->bpp];
-    }
-    if (!fn) {
-        return;
-    }
-
-    src_width = (s->xres + 3) & ~3;     /* Pad to a 4 pixels multiple */
-    if (s->bpp == pxa_lcdc_19pbpp || s->bpp == pxa_lcdc_18pbpp) {
-        src_width *= 3;
-    } else if (s->bpp > pxa_lcdc_16bpp) {
-        src_width *= 4;
-    } else if (s->bpp > pxa_lcdc_8bpp) {
-        src_width *= 2;
-    }
-
-    dest_width = s->yres * s->dest_width;
-    *miny = 0;
-    framebuffer_update_display(s->ds, s->sysmem,
-                               addr, s->xres, s->yres,
-                               src_width, -s->dest_width, dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette,
                                miny, maxy);
@@ -799,11 +728,10 @@ static void pxa2xx_lcdc_resize(PXA2xxLCDState *s)
     height = LCCR2_LPP(s->control[2]) + 1;
 
     if (width != s->xres || height != s->yres) {
-        if (s->orientation == 90 || s->orientation == 270) {
+        if (s->orientation)
             qemu_console_resize(s->ds, height, width);
-        } else {
+        else
             qemu_console_resize(s->ds, width, height);
-        }
         s->invalidated = 1;
         s->xres = width;
         s->yres = height;
@@ -813,7 +741,7 @@ static void pxa2xx_lcdc_resize(PXA2xxLCDState *s)
 static void pxa2xx_update_display(void *opaque)
 {
     PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
-    hwaddr fbptr;
+    target_phys_addr_t fbptr;
     int miny, maxy;
     int ch;
     if (!(s->control[0] & LCCR0_ENB))
@@ -833,10 +761,8 @@ static void pxa2xx_update_display(void *opaque)
                 continue;
             }
             fbptr = s->dma_ch[ch].source;
-            if (!((fbptr >= PXA2XX_SDRAM_BASE &&
-                     fbptr <= PXA2XX_SDRAM_BASE + ram_size) ||
-                    (fbptr >= PXA2XX_INTERNAL_BASE &&
-                     fbptr <= PXA2XX_INTERNAL_BASE + PXA2XX_INTERNAL_SIZE))) {
+            if (!(fbptr >= PXA2XX_SDRAM_BASE &&
+                    fbptr <= PXA2XX_SDRAM_BASE + ram_size)) {
                 pxa2xx_dma_ber_set(s, ch);
                 continue;
             }
@@ -869,24 +795,10 @@ static void pxa2xx_update_display(void *opaque)
     }
 
     if (miny >= 0) {
-        switch (s->orientation) {
-        case 0:
-            dpy_gfx_update(s->ds, 0, miny, s->xres, maxy - miny + 1);
-            break;
-        case 90:
-            dpy_gfx_update(s->ds, miny, 0, maxy - miny + 1, s->xres);
-            break;
-        case 180:
-            maxy = s->yres - maxy - 1;
-            miny = s->yres - miny - 1;
-            dpy_gfx_update(s->ds, 0, maxy, s->xres, miny - maxy + 1);
-            break;
-        case 270:
-            maxy = s->yres - maxy - 1;
-            miny = s->yres - miny - 1;
-            dpy_gfx_update(s->ds, maxy, 0, miny - maxy + 1, s->xres);
-            break;
-        }
+        if (s->orientation)
+            dpy_update(s->ds, miny, 0, maxy - miny, s->xres);
+        else
+            dpy_update(s->ds, 0, miny, s->xres, maxy - miny);
     }
     pxa2xx_lcdc_int_update(s);
 
@@ -899,23 +811,19 @@ static void pxa2xx_invalidate_display(void *opaque)
     s->invalidated = 1;
 }
 
+static void pxa2xx_screen_dump(void *opaque, const char *filename)
+{
+    /* TODO */
+}
+
 static void pxa2xx_lcdc_orientation(void *opaque, int angle)
 {
     PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
 
-    switch (angle) {
-    case 0:
-        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_rot0;
-        break;
-    case 90:
-        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_rot90;
-        break;
-    case 180:
-        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_rot180;
-        break;
-    case 270:
-        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_rot270;
-        break;
+    if (angle) {
+        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_vert;
+    } else {
+        s->dma_ch[0].redraw = pxa2xx_lcdc_dma0_redraw_horiz;
     }
 
     s->orientation = angle;
@@ -923,57 +831,80 @@ static void pxa2xx_lcdc_orientation(void *opaque, int angle)
     pxa2xx_lcdc_resize(s);
 }
 
-static const VMStateDescription vmstate_dma_channel = {
-    .name = "dma_channel",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(branch, struct DMAChannel),
-        VMSTATE_UINT8(up, struct DMAChannel),
-        VMSTATE_BUFFER(pbuffer, struct DMAChannel),
-        VMSTATE_UINT32(descriptor, struct DMAChannel),
-        VMSTATE_UINT32(source, struct DMAChannel),
-        VMSTATE_UINT32(id, struct DMAChannel),
-        VMSTATE_UINT32(command, struct DMAChannel),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-static int pxa2xx_lcdc_post_load(void *opaque, int version_id)
+static void pxa2xx_lcdc_save(QEMUFile *f, void *opaque)
 {
-    PXA2xxLCDState *s = opaque;
+    PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
+    int i;
+
+    qemu_put_be32(f, s->irqlevel);
+    qemu_put_be32(f, s->transp);
+
+    for (i = 0; i < 6; i ++)
+        qemu_put_be32s(f, &s->control[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_put_be32s(f, &s->status[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_put_be32s(f, &s->ovl1c[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_put_be32s(f, &s->ovl2c[i]);
+    qemu_put_be32s(f, &s->ccr);
+    qemu_put_be32s(f, &s->cmdcr);
+    qemu_put_be32s(f, &s->trgbr);
+    qemu_put_be32s(f, &s->tcr);
+    qemu_put_be32s(f, &s->liidr);
+    qemu_put_8s(f, &s->bscntr);
+
+    for (i = 0; i < 7; i ++) {
+        qemu_put_betl(f, s->dma_ch[i].branch);
+        qemu_put_byte(f, s->dma_ch[i].up);
+        qemu_put_buffer(f, s->dma_ch[i].pbuffer, sizeof(s->dma_ch[i].pbuffer));
+
+        qemu_put_betl(f, s->dma_ch[i].descriptor);
+        qemu_put_betl(f, s->dma_ch[i].source);
+        qemu_put_be32s(f, &s->dma_ch[i].id);
+        qemu_put_be32s(f, &s->dma_ch[i].command);
+    }
+}
+
+static int pxa2xx_lcdc_load(QEMUFile *f, void *opaque, int version_id)
+{
+    PXA2xxLCDState *s = (PXA2xxLCDState *) opaque;
+    int i;
+
+    s->irqlevel = qemu_get_be32(f);
+    s->transp = qemu_get_be32(f);
+
+    for (i = 0; i < 6; i ++)
+        qemu_get_be32s(f, &s->control[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_get_be32s(f, &s->status[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_get_be32s(f, &s->ovl1c[i]);
+    for (i = 0; i < 2; i ++)
+        qemu_get_be32s(f, &s->ovl2c[i]);
+    qemu_get_be32s(f, &s->ccr);
+    qemu_get_be32s(f, &s->cmdcr);
+    qemu_get_be32s(f, &s->trgbr);
+    qemu_get_be32s(f, &s->tcr);
+    qemu_get_be32s(f, &s->liidr);
+    qemu_get_8s(f, &s->bscntr);
+
+    for (i = 0; i < 7; i ++) {
+        s->dma_ch[i].branch = qemu_get_betl(f);
+        s->dma_ch[i].up = qemu_get_byte(f);
+        qemu_get_buffer(f, s->dma_ch[i].pbuffer, sizeof(s->dma_ch[i].pbuffer));
+
+        s->dma_ch[i].descriptor = qemu_get_betl(f);
+        s->dma_ch[i].source = qemu_get_betl(f);
+        qemu_get_be32s(f, &s->dma_ch[i].id);
+        qemu_get_be32s(f, &s->dma_ch[i].command);
+    }
 
     s->bpp = LCCR3_BPP(s->control[3]);
     s->xres = s->yres = s->pal_for = -1;
 
     return 0;
 }
-
-static const VMStateDescription vmstate_pxa2xx_lcdc = {
-    .name = "pxa2xx_lcdc",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .post_load = pxa2xx_lcdc_post_load,
-    .fields      = (VMStateField[]) {
-        VMSTATE_INT32(irqlevel, PXA2xxLCDState),
-        VMSTATE_INT32(transp, PXA2xxLCDState),
-        VMSTATE_UINT32_ARRAY(control, PXA2xxLCDState, 6),
-        VMSTATE_UINT32_ARRAY(status, PXA2xxLCDState, 2),
-        VMSTATE_UINT32_ARRAY(ovl1c, PXA2xxLCDState, 2),
-        VMSTATE_UINT32_ARRAY(ovl2c, PXA2xxLCDState, 2),
-        VMSTATE_UINT32(ccr, PXA2xxLCDState),
-        VMSTATE_UINT32(cmdcr, PXA2xxLCDState),
-        VMSTATE_UINT32(trgbr, PXA2xxLCDState),
-        VMSTATE_UINT32(tcr, PXA2xxLCDState),
-        VMSTATE_UINT32(liidr, PXA2xxLCDState),
-        VMSTATE_UINT8(bscntr, PXA2xxLCDState),
-        VMSTATE_STRUCT_ARRAY(dma_ch, PXA2xxLCDState, 7, 0,
-                             vmstate_dma_channel, struct DMAChannel),
-        VMSTATE_END_OF_LIST()
-    }
-};
 
 #define BITS 8
 #include "pxa2xx_template.h"
@@ -986,25 +917,24 @@ static const VMStateDescription vmstate_pxa2xx_lcdc = {
 #define BITS 32
 #include "pxa2xx_template.h"
 
-PXA2xxLCDState *pxa2xx_lcdc_init(MemoryRegion *sysmem,
-                                 hwaddr base, qemu_irq irq)
+PXA2xxLCDState *pxa2xx_lcdc_init(target_phys_addr_t base, qemu_irq irq)
 {
+    int iomemtype;
     PXA2xxLCDState *s;
 
-    s = (PXA2xxLCDState *) g_malloc0(sizeof(PXA2xxLCDState));
+    s = (PXA2xxLCDState *) qemu_mallocz(sizeof(PXA2xxLCDState));
     s->invalidated = 1;
     s->irq = irq;
-    s->sysmem = sysmem;
 
     pxa2xx_lcdc_orientation(s, graphic_rotate);
 
-    memory_region_init_io(&s->iomem, &pxa2xx_lcdc_ops, s,
-                          "pxa2xx-lcd-controller", 0x00100000);
-    memory_region_add_subregion(sysmem, base, &s->iomem);
+    iomemtype = cpu_register_io_memory(pxa2xx_lcdc_readfn,
+                    pxa2xx_lcdc_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x00100000, iomemtype);
 
     s->ds = graphic_console_init(pxa2xx_update_display,
                                  pxa2xx_invalidate_display,
-                                 NULL, NULL, s);
+                                 pxa2xx_screen_dump, NULL, s);
 
     switch (ds_get_bits_per_pixel(s->ds)) {
     case 0:
@@ -1040,7 +970,8 @@ PXA2xxLCDState *pxa2xx_lcdc_init(MemoryRegion *sysmem,
         exit(1);
     }
 
-    vmstate_register(NULL, 0, &vmstate_pxa2xx_lcdc, s);
+    register_savevm(NULL, "pxa2xx_lcdc", 0, 0,
+                    pxa2xx_lcdc_save, pxa2xx_lcdc_load, s);
 
     return s;
 }

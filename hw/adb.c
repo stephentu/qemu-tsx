@@ -22,7 +22,7 @@
  * THE SOFTWARE.
  */
 #include "hw.h"
-#include "adb.h"
+#include "ppc_mac.h"
 #include "console.h"
 
 /* debug ADB */
@@ -108,10 +108,10 @@ int adb_poll(ADBBusState *s, uint8_t *obuf)
     return olen;
 }
 
-static ADBDevice *adb_register_device(ADBBusState *s, int devaddr,
-                                      ADBDeviceRequest *devreq,
-                                      ADBDeviceReset *devreset,
-                                      void *opaque)
+ADBDevice *adb_register_device(ADBBusState *s, int devaddr,
+                               ADBDeviceRequest *devreq,
+                               ADBDeviceReset *devreset,
+                               void *opaque)
 {
     ADBDevice *d;
     if (s->nb_devices >= MAX_ADB_DEVICES)
@@ -261,19 +261,30 @@ static int adb_kbd_request(ADBDevice *d, uint8_t *obuf,
     return olen;
 }
 
-static const VMStateDescription vmstate_adb_kbd = {
-    .name = "adb_kbd",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_BUFFER(data, KBDState),
-        VMSTATE_INT32(rptr, KBDState),
-        VMSTATE_INT32(wptr, KBDState),
-        VMSTATE_INT32(count, KBDState),
-        VMSTATE_END_OF_LIST()
-    }
-};
+static void adb_kbd_save(QEMUFile *f, void *opaque)
+{
+    KBDState *s = (KBDState *)opaque;
+
+    qemu_put_buffer(f, s->data, sizeof(s->data));
+    qemu_put_sbe32s(f, &s->rptr);
+    qemu_put_sbe32s(f, &s->wptr);
+    qemu_put_sbe32s(f, &s->count);
+}
+
+static int adb_kbd_load(QEMUFile *f, void *opaque, int version_id)
+{
+    KBDState *s = (KBDState *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    qemu_get_buffer(f, s->data, sizeof(s->data));
+    qemu_get_sbe32s(f, &s->rptr);
+    qemu_get_sbe32s(f, &s->wptr);
+    qemu_get_sbe32s(f, &s->count);
+
+    return 0;
+}
 
 static int adb_kbd_reset(ADBDevice *d)
 {
@@ -290,11 +301,12 @@ void adb_kbd_init(ADBBusState *bus)
 {
     ADBDevice *d;
     KBDState *s;
-    s = g_malloc0(sizeof(KBDState));
+    s = qemu_mallocz(sizeof(KBDState));
     d = adb_register_device(bus, ADB_KEYBOARD, adb_kbd_request,
                             adb_kbd_reset, s);
     qemu_add_kbd_event_handler(adb_kbd_put_keycode, d);
-    vmstate_register(NULL, -1, &vmstate_adb_kbd, s);
+    register_savevm(NULL, "adb_kbd", -1, 1, adb_kbd_save,
+                    adb_kbd_load, s);
 }
 
 /***************************************************************/
@@ -427,29 +439,42 @@ static int adb_mouse_reset(ADBDevice *d)
     return 0;
 }
 
-static const VMStateDescription vmstate_adb_mouse = {
-    .name = "adb_mouse",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_INT32(buttons_state, MouseState),
-        VMSTATE_INT32(last_buttons_state, MouseState),
-        VMSTATE_INT32(dx, MouseState),
-        VMSTATE_INT32(dy, MouseState),
-        VMSTATE_INT32(dz, MouseState),
-        VMSTATE_END_OF_LIST()
-    }
-};
+static void adb_mouse_save(QEMUFile *f, void *opaque)
+{
+    MouseState *s = (MouseState *)opaque;
+
+    qemu_put_sbe32s(f, &s->buttons_state);
+    qemu_put_sbe32s(f, &s->last_buttons_state);
+    qemu_put_sbe32s(f, &s->dx);
+    qemu_put_sbe32s(f, &s->dy);
+    qemu_put_sbe32s(f, &s->dz);
+}
+
+static int adb_mouse_load(QEMUFile *f, void *opaque, int version_id)
+{
+    MouseState *s = (MouseState *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    qemu_get_sbe32s(f, &s->buttons_state);
+    qemu_get_sbe32s(f, &s->last_buttons_state);
+    qemu_get_sbe32s(f, &s->dx);
+    qemu_get_sbe32s(f, &s->dy);
+    qemu_get_sbe32s(f, &s->dz);
+
+    return 0;
+}
 
 void adb_mouse_init(ADBBusState *bus)
 {
     ADBDevice *d;
     MouseState *s;
 
-    s = g_malloc0(sizeof(MouseState));
+    s = qemu_mallocz(sizeof(MouseState));
     d = adb_register_device(bus, ADB_MOUSE, adb_mouse_request,
                             adb_mouse_reset, s);
     qemu_add_mouse_event_handler(adb_mouse_event, d, 0, "QEMU ADB Mouse");
-    vmstate_register(NULL, -1, &vmstate_adb_mouse, s);
+    register_savevm(NULL, "adb_mouse", -1, 1, adb_mouse_save,
+                    adb_mouse_load, s);
 }

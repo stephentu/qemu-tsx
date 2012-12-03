@@ -36,9 +36,6 @@
 
 #define PCI_MSI_VECTORS_MAX     32
 
-/* Flag for interrupt controller to declare MSI/MSI-X support */
-bool msi_supported;
-
 /* If we get rid of cap allocator, we won't need this. */
 static inline uint8_t msi_cap_sizeof(uint16_t flags)
 {
@@ -105,48 +102,6 @@ static inline uint8_t msi_pending_off(const PCIDevice* dev, bool msi64bit)
     return dev->msi_cap + (msi64bit ? PCI_MSI_PENDING_64 : PCI_MSI_PENDING_32);
 }
 
-/*
- * Special API for POWER to configure the vectors through
- * a side channel. Should never be used by devices.
- */
-void msi_set_message(PCIDevice *dev, MSIMessage msg)
-{
-    uint16_t flags = pci_get_word(dev->config + msi_flags_off(dev));
-    bool msi64bit = flags & PCI_MSI_FLAGS_64BIT;
-
-    if (msi64bit) {
-        pci_set_quad(dev->config + msi_address_lo_off(dev), msg.address);
-    } else {
-        pci_set_long(dev->config + msi_address_lo_off(dev), msg.address);
-    }
-    pci_set_word(dev->config + msi_data_off(dev, msi64bit), msg.data);
-}
-
-MSIMessage msi_get_message(PCIDevice *dev, unsigned int vector)
-{
-    uint16_t flags = pci_get_word(dev->config + msi_flags_off(dev));
-    bool msi64bit = flags & PCI_MSI_FLAGS_64BIT;
-    unsigned int nr_vectors = msi_nr_vectors(flags);
-    MSIMessage msg;
-
-    assert(vector < nr_vectors);
-
-    if (msi64bit) {
-        msg.address = pci_get_quad(dev->config + msi_address_lo_off(dev));
-    } else {
-        msg.address = pci_get_long(dev->config + msi_address_lo_off(dev));
-    }
-
-    /* upper bit 31:16 is zero */
-    msg.data = pci_get_word(dev->config + msi_data_off(dev, msi64bit));
-    if (nr_vectors > 1) {
-        msg.data &= ~(nr_vectors - 1);
-        msg.data |= vector;
-    }
-
-    return msg;
-}
-
 bool msi_enabled(const PCIDevice *dev)
 {
     return msi_present(dev) &&
@@ -161,11 +116,6 @@ int msi_init(struct PCIDevice *dev, uint8_t offset,
     uint16_t flags;
     uint8_t cap_size;
     int config_offset;
-
-    if (!msi_supported) {
-        return -ENOTSUP;
-    }
-
     MSI_DEV_PRINTF(dev,
                    "init offset: 0x%"PRIx8" vector: %"PRId8
                    " 64bit %d mask %d\n",
@@ -205,7 +155,7 @@ int msi_init(struct PCIDevice *dev, uint8_t offset,
     pci_set_word(dev->wmask + msi_data_off(dev, msi64bit), 0xffff);
 
     if (msi_per_vector_mask) {
-        /* Make mask bits 0 to nr_vectors - 1 writable. */
+        /* Make mask bits 0 to nr_vectors - 1 writeable. */
         pci_set_long(dev->wmask + msi_mask_off(dev, msi64bit),
                      0xffffffff >> (PCI_MSI_VECTORS_MAX - nr_vectors));
     }
@@ -214,17 +164,9 @@ int msi_init(struct PCIDevice *dev, uint8_t offset,
 
 void msi_uninit(struct PCIDevice *dev)
 {
-    uint16_t flags;
-    uint8_t cap_size;
-
-    if (!msi_present(dev)) {
-        return;
-    }
-    flags = pci_get_word(dev->config + msi_flags_off(dev));
-    cap_size = msi_cap_sizeof(flags);
-    pci_del_capability(dev, PCI_CAP_ID_MSI, cap_size);
-    dev->cap_present &= ~QEMU_PCI_CAP_MSI;
-
+    uint16_t flags = pci_get_word(dev->config + msi_flags_off(dev));
+    uint8_t cap_size = msi_cap_sizeof(flags);
+    pci_del_capability(dev, PCI_CAP_ID_MSIX, cap_size);
     MSI_DEV_PRINTF(dev, "uninit\n");
 }
 
@@ -232,10 +174,6 @@ void msi_reset(PCIDevice *dev)
 {
     uint16_t flags;
     bool msi64bit;
-
-    if (!msi_present(dev)) {
-        return;
-    }
 
     flags = pci_get_word(dev->config + msi_flags_off(dev));
     flags &= ~(PCI_MSI_FLAGS_QSIZE | PCI_MSI_FLAGS_ENABLE);
@@ -274,7 +212,8 @@ void msi_notify(PCIDevice *dev, unsigned int vector)
     uint16_t flags = pci_get_word(dev->config + msi_flags_off(dev));
     bool msi64bit = flags & PCI_MSI_FLAGS_64BIT;
     unsigned int nr_vectors = msi_nr_vectors(flags);
-    MSIMessage msg;
+    uint64_t address;
+    uint32_t data;
 
     assert(vector < nr_vectors);
     if (msi_is_masked(dev, vector)) {
@@ -285,16 +224,27 @@ void msi_notify(PCIDevice *dev, unsigned int vector)
         return;
     }
 
-    msg = msi_get_message(dev, vector);
+    if (msi64bit) {
+        address = pci_get_quad(dev->config + msi_address_lo_off(dev));
+    } else {
+        address = pci_get_long(dev->config + msi_address_lo_off(dev));
+    }
+
+    /* upper bit 31:16 is zero */
+    data = pci_get_word(dev->config + msi_data_off(dev, msi64bit));
+    if (nr_vectors > 1) {
+        data &= ~(nr_vectors - 1);
+        data |= vector;
+    }
 
     MSI_DEV_PRINTF(dev,
                    "notify vector 0x%x"
                    " address: 0x%"PRIx64" data: 0x%"PRIx32"\n",
-                   vector, msg.address, msg.data);
-    stl_le_phys(msg.address, msg.data);
+                   vector, address, data);
+    stl_phys(address, data);
 }
 
-/* Normally called by pci_default_write_config(). */
+/* call this function after updating configs by pci_default_write_config(). */
 void msi_write_config(PCIDevice *dev, uint32_t addr, uint32_t val, int len)
 {
     uint16_t flags = pci_get_word(dev->config + msi_flags_off(dev));
@@ -306,8 +256,7 @@ void msi_write_config(PCIDevice *dev, uint32_t addr, uint32_t val, int len)
     unsigned int vector;
     uint32_t pending;
 
-    if (!msi_present(dev) ||
-        !ranges_overlap(addr, len, dev->msi_cap, msi_cap_sizeof(flags))) {
+    if (!ranges_overlap(addr, len, dev->msi_cap, msi_cap_sizeof(flags))) {
         return;
     }
 

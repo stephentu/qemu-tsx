@@ -1,3 +1,0 @@
-obj-y = openrisc_pic.o openrisc_sim.o openrisc_timer.o
-
-obj-y := $(addprefix ../,$(obj-y))

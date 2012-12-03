@@ -22,9 +22,8 @@
 
 #define TARGET_LONG_BITS 32
 
-#define CPUArchState struct CPUM68KState
+#define CPUState struct CPUM68KState
 
-#include "config.h"
 #include "qemu-common.h"
 #include "cpu-defs.h"
 
@@ -116,13 +115,11 @@ typedef struct CPUM68KState {
     uint32_t features;
 } CPUM68KState;
 
-#include "cpu-qom.h"
-
 void m68k_tcg_init(void);
 CPUM68KState *cpu_m68k_init(const char *cpu_model);
 int cpu_m68k_exec(CPUM68KState *s);
-void do_interrupt(CPUM68KState *env1);
-void do_interrupt_m68k_hardirq(CPUM68KState *env1);
+void cpu_m68k_close(CPUM68KState *s);
+void do_interrupt(int is_hw);
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero
    is returned if the signal was handled by the virtual CPU.  */
@@ -227,17 +224,17 @@ void register_m68k_insns (CPUM68KState *env);
 #define MMU_MODE0_SUFFIX _kernel
 #define MMU_MODE1_SUFFIX _user
 #define MMU_USER_IDX 1
-static inline int cpu_mmu_index (CPUM68KState *env)
+static inline int cpu_mmu_index (CPUState *env)
 {
     return (env->sr & SR_S) == 0 ? 1 : 0;
 }
 
-int cpu_m68k_handle_mmu_fault(CPUM68KState *env, target_ulong address, int rw,
-                              int mmu_idx);
+int cpu_m68k_handle_mmu_fault(CPUState *env, target_ulong address, int rw,
+                              int mmu_idx, int is_softmmu);
 #define cpu_handle_mmu_fault cpu_m68k_handle_mmu_fault
 
 #if defined(CONFIG_USER_ONLY)
-static inline void cpu_clone_regs(CPUM68KState *env, target_ulong newsp)
+static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
 {
     if (newsp)
         env->aregs[7] = newsp;
@@ -247,7 +244,7 @@ static inline void cpu_clone_regs(CPUM68KState *env, target_ulong newsp)
 
 #include "cpu-all.h"
 
-static inline void cpu_get_tb_cpu_state(CPUM68KState *env, target_ulong *pc,
+static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
                                         target_ulong *cs_base, int *flags)
 {
     *pc = env->pc;
@@ -255,20 +252,6 @@ static inline void cpu_get_tb_cpu_state(CPUM68KState *env, target_ulong *pc,
     *flags = (env->fpcr & M68K_FPCR_PREC)       /* Bit  6 */
             | (env->sr & SR_S)                  /* Bit  13 */
             | ((env->macsr >> 4) & 0xf);        /* Bits 0-3 */
-}
-
-static inline bool cpu_has_work(CPUState *cpu)
-{
-    CPUM68KState *env = &M68K_CPU(cpu)->env;
-
-    return env->interrupt_request & CPU_INTERRUPT_HARD;
-}
-
-#include "exec-all.h"
-
-static inline void cpu_pc_from_tb(CPUM68KState *env, TranslationBlock *tb)
-{
-    env->pc = tb->pc;
 }
 
 #endif

@@ -80,15 +80,15 @@ typedef struct {
     /* buffer holding kernel, cmdlines and mb_infos */
     void *mb_buf;
     /* address in target */
-    hwaddr mb_buf_phys;
+    target_phys_addr_t mb_buf_phys;
     /* size of mb_buf in bytes */
     unsigned mb_buf_size;
     /* offset of mb-info's in bytes */
-    hwaddr offset_mbinfo;
+    target_phys_addr_t offset_mbinfo;
     /* offset in buffer for cmdlines in bytes */
-    hwaddr offset_cmdlines;
+    target_phys_addr_t offset_cmdlines;
     /* offset of modules in bytes */
-    hwaddr offset_mods;
+    target_phys_addr_t offset_mods;
     /* available slots for mb modules infos */
     int mb_mods_avail;
     /* currently used slots of mb modules */
@@ -97,17 +97,17 @@ typedef struct {
 
 static uint32_t mb_add_cmdline(MultibootState *s, const char *cmdline)
 {
-    hwaddr p = s->offset_cmdlines;
-    char *b = (char *)s->mb_buf + p;
+    int len = strlen(cmdline) + 1;
+    target_phys_addr_t p = s->offset_cmdlines;
 
-    get_opt_value(b, strlen(cmdline) + 1, cmdline);
-    s->offset_cmdlines += strlen(b) + 1;
+    pstrcpy((char *)s->mb_buf + p, len, cmdline);
+    s->offset_cmdlines += len;
     return s->mb_buf_phys + p;
 }
 
 static void mb_add_mod(MultibootState *s,
-                       hwaddr start, hwaddr end,
-                       hwaddr cmdline_phys)
+                       target_phys_addr_t start, target_phys_addr_t end,
+                       target_phys_addr_t cmdline_phys)
 {
     char *p;
     assert(s->mb_mods_count < s->mb_mods_avail);
@@ -187,7 +187,7 @@ int load_multiboot(void *fw_cfg,
         mb_kernel_size = elf_high - elf_low;
         mh_entry_addr = elf_entry;
 
-        mbs.mb_buf = g_malloc(mb_kernel_size);
+        mbs.mb_buf = qemu_malloc(mb_kernel_size);
         if (rom_copy(mbs.mb_buf, mh_load_addr, mb_kernel_size) != mb_kernel_size) {
             fprintf(stderr, "Error while fetching elf kernel from rom\n");
             exit(1);
@@ -198,20 +198,11 @@ int load_multiboot(void *fw_cfg,
     } else {
         /* Valid if mh_flags sets MULTIBOOT_HEADER_HAS_ADDR. */
         uint32_t mh_header_addr = ldl_p(header+i+12);
-        uint32_t mh_load_end_addr = ldl_p(header+i+20);
-        uint32_t mh_bss_end_addr = ldl_p(header+i+24);
         mh_load_addr = ldl_p(header+i+16);
         uint32_t mb_kernel_text_offset = i - (mh_header_addr - mh_load_addr);
-        uint32_t mb_load_size = 0;
-        mh_entry_addr = ldl_p(header+i+28);
 
-        if (mh_load_end_addr) {
-            mb_kernel_size = mh_bss_end_addr - mh_load_addr;
-            mb_load_size = mh_load_end_addr - mh_load_addr;
-        } else {
-            mb_kernel_size = kernel_file_size - mb_kernel_text_offset;
-            mb_load_size = mb_kernel_size;
-        }
+        mh_entry_addr = ldl_p(header+i+28);
+        mb_kernel_size = kernel_file_size - mb_kernel_text_offset;
 
         /* Valid if mh_flags sets MULTIBOOT_HEADER_HAS_VBE.
         uint32_t mh_mode_type = ldl_p(header+i+32);
@@ -221,18 +212,17 @@ int load_multiboot(void *fw_cfg,
 
         mb_debug("multiboot: mh_header_addr = %#x\n", mh_header_addr);
         mb_debug("multiboot: mh_load_addr = %#x\n", mh_load_addr);
-        mb_debug("multiboot: mh_load_end_addr = %#x\n", mh_load_end_addr);
-        mb_debug("multiboot: mh_bss_end_addr = %#x\n", mh_bss_end_addr);
+        mb_debug("multiboot: mh_load_end_addr = %#x\n", ldl_p(header+i+20));
+        mb_debug("multiboot: mh_bss_end_addr = %#x\n", ldl_p(header+i+24));
         mb_debug("qemu: loading multiboot kernel (%#x bytes) at %#x\n",
-                 mb_load_size, mh_load_addr);
+                 mb_kernel_size, mh_load_addr);
 
-        mbs.mb_buf = g_malloc(mb_kernel_size);
+        mbs.mb_buf = qemu_malloc(mb_kernel_size);
         fseek(f, mb_kernel_text_offset, SEEK_SET);
-        if (fread(mbs.mb_buf, 1, mb_load_size, f) != mb_load_size) {
+        if (fread(mbs.mb_buf, 1, mb_kernel_size, f) != mb_kernel_size) {
             fprintf(stderr, "fread() failed\n");
             exit(1);
         }
-        memset(mbs.mb_buf + mb_load_size, 0, mb_kernel_size - mb_load_size);
         fclose(f);
     }
 
@@ -248,7 +238,7 @@ int load_multiboot(void *fw_cfg,
         const char *r = initrd_filename;
         mbs.mb_buf_size += strlen(r) + 1;
         mbs.mb_mods_avail = 1;
-        while (*(r = get_opt_value(NULL, 0, r))) {
+        while ((r = strchr(r, ','))) {
            mbs.mb_mods_avail++;
            r++;
         }
@@ -258,11 +248,11 @@ int load_multiboot(void *fw_cfg,
     mbs.mb_buf_size = TARGET_PAGE_ALIGN(mbs.mb_buf_size);
 
     /* enlarge mb_buf to hold cmdlines and mb-info structs */
-    mbs.mb_buf          = g_realloc(mbs.mb_buf, mbs.mb_buf_size);
+    mbs.mb_buf          = qemu_realloc(mbs.mb_buf, mbs.mb_buf_size);
     mbs.offset_cmdlines = mbs.offset_mbinfo + mbs.mb_mods_avail * MB_MOD_SIZE;
 
     if (initrd_filename) {
-        char *next_initrd, not_last;
+        char *next_initrd;
 
         mbs.offset_mods = mbs.mb_buf_size;
 
@@ -271,23 +261,23 @@ int load_multiboot(void *fw_cfg,
             int mb_mod_length;
             uint32_t offs = mbs.mb_buf_size;
 
-            next_initrd = (char *)get_opt_value(NULL, 0, initrd_filename);
-            not_last = *next_initrd;
-            *next_initrd = '\0';
+            next_initrd = strchr(initrd_filename, ',');
+            if (next_initrd)
+                *next_initrd = '\0';
             /* if a space comes after the module filename, treat everything
                after that as parameters */
-            hwaddr c = mb_add_cmdline(&mbs, initrd_filename);
+            target_phys_addr_t c = mb_add_cmdline(&mbs, initrd_filename);
             if ((next_space = strchr(initrd_filename, ' ')))
                 *next_space = '\0';
             mb_debug("multiboot loading module: %s\n", initrd_filename);
             mb_mod_length = get_image_size(initrd_filename);
             if (mb_mod_length < 0) {
-                fprintf(stderr, "Failed to open file '%s'\n", initrd_filename);
+                fprintf(stderr, "failed to get %s image size\n", initrd_filename);
                 exit(1);
             }
 
             mbs.mb_buf_size = TARGET_PAGE_ALIGN(mb_mod_length + mbs.mb_buf_size);
-            mbs.mb_buf = g_realloc(mbs.mb_buf, mbs.mb_buf_size);
+            mbs.mb_buf = qemu_realloc(mbs.mb_buf, mbs.mb_buf_size);
 
             load_image(initrd_filename, (unsigned char *)mbs.mb_buf + offs);
             mb_add_mod(&mbs, mbs.mb_buf_phys + offs,
@@ -297,7 +287,7 @@ int load_multiboot(void *fw_cfg,
                      (char *)mbs.mb_buf + offs,
                      (char *)mbs.mb_buf + offs + mb_mod_length, c);
             initrd_filename = next_initrd+1;
-        } while (not_last);
+        } while (next_initrd);
     }
 
     /* Commandline support */
@@ -317,7 +307,7 @@ int load_multiboot(void *fw_cfg,
                                 | MULTIBOOT_FLAGS_MMAP);
     stl_p(bootinfo + MBI_MEM_LOWER,   640);
     stl_p(bootinfo + MBI_MEM_UPPER,   (ram_size / 1024) - 1024);
-    stl_p(bootinfo + MBI_BOOT_DEVICE, 0x8000ffff); /* XXX: use the -boot switch? */
+    stl_p(bootinfo + MBI_BOOT_DEVICE, 0x8001ffff); /* XXX: use the -boot switch? */
     stl_p(bootinfo + MBI_MMAP_ADDR,   ADDR_E820_MAP);
 
     mb_debug("multiboot: mh_entry_addr = %#x\n", mh_entry_addr);
@@ -326,7 +316,7 @@ int load_multiboot(void *fw_cfg,
     mb_debug("           mb_mods_count = %d\n", mbs.mb_mods_count);
 
     /* save bootinfo off the stack */
-    mb_bootinfo_data = g_malloc(sizeof(bootinfo));
+    mb_bootinfo_data = qemu_malloc(sizeof(bootinfo));
     memcpy(mb_bootinfo_data, bootinfo, sizeof(bootinfo));
 
     /* Pass variables to option rom */

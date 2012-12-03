@@ -1,0 +1,26 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          run-cmdline
+# Required-Start:
+# Required-Stop:
+# Default-Start:     2
+# Default-Stop:      
+# Short-Description:
+# Description:
+### END INIT INFO
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+do_start()
+{
+    /usr/bin/run-cmdline.py 10 &
+    return 0
+}
+
+case "$1" in
+  start)
+	do_start
+	;;
+  stop)
+	;;
+esac

@@ -3,15 +3,13 @@
  *
  * Copyright (c) 2007 CodeSourcery.
  *
- * This code is licensed under the GPL
+ * This code is licenced under the GPL
  */
 #include "hw.h"
 #include "mcf.h"
 #include "qemu-char.h"
-#include "exec-memory.h"
 
 typedef struct {
-    MemoryRegion iomem;
     uint8_t mr[2];
     uint8_t sr;
     uint8_t isr;
@@ -66,8 +64,7 @@ static void mcf_uart_update(mcf_uart_state *s)
     qemu_set_irq(s->irq, (s->isr & s->imr) != 0);
 }
 
-uint64_t mcf_uart_read(void *opaque, hwaddr addr,
-                       unsigned size)
+uint32_t mcf_uart_read(void *opaque, target_phys_addr_t addr)
 {
     mcf_uart_state *s = (mcf_uart_state *)opaque;
     switch (addr & 0x3f) {
@@ -113,7 +110,7 @@ static void mcf_uart_do_tx(mcf_uart_state *s)
 {
     if (s->tx_enabled && (s->sr & MCF_UART_TxEMP) == 0) {
         if (s->chr)
-            qemu_chr_fe_write(s->chr, (unsigned char *)&s->tb, 1);
+            qemu_chr_write(s->chr, (unsigned char *)&s->tb, 1);
         s->sr |= MCF_UART_TxEMP;
     }
     if (s->tx_enabled) {
@@ -185,8 +182,7 @@ static void mcf_do_command(mcf_uart_state *s, uint8_t cmd)
     }
 }
 
-void mcf_uart_write(void *opaque, hwaddr addr,
-                    uint64_t val, unsigned size)
+void mcf_uart_write(void *opaque, target_phys_addr_t addr, uint32_t val)
 {
     mcf_uart_state *s = (mcf_uart_state *)opaque;
     switch (addr & 0x3f) {
@@ -276,7 +272,7 @@ void *mcf_uart_init(qemu_irq irq, CharDriverState *chr)
 {
     mcf_uart_state *s;
 
-    s = g_malloc0(sizeof(mcf_uart_state));
+    s = qemu_mallocz(sizeof(mcf_uart_state));
     s->chr = chr;
     s->irq = irq;
     if (chr) {
@@ -287,20 +283,28 @@ void *mcf_uart_init(qemu_irq irq, CharDriverState *chr)
     return s;
 }
 
-static const MemoryRegionOps mcf_uart_ops = {
-    .read = mcf_uart_read,
-    .write = mcf_uart_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+
+static CPUReadMemoryFunc * const mcf_uart_readfn[] = {
+   mcf_uart_read,
+   mcf_uart_read,
+   mcf_uart_read
 };
 
-void mcf_uart_mm_init(MemoryRegion *sysmem,
-                      hwaddr base,
-                      qemu_irq irq,
+static CPUWriteMemoryFunc * const mcf_uart_writefn[] = {
+   mcf_uart_write,
+   mcf_uart_write,
+   mcf_uart_write
+};
+
+void mcf_uart_mm_init(target_phys_addr_t base, qemu_irq irq,
                       CharDriverState *chr)
 {
     mcf_uart_state *s;
+    int iomemtype;
 
     s = mcf_uart_init(irq, chr);
-    memory_region_init_io(&s->iomem, &mcf_uart_ops, s, "uart", 0x40);
-    memory_region_add_subregion(sysmem, base, &s->iomem);
+    iomemtype = cpu_register_io_memory(mcf_uart_readfn,
+                                       mcf_uart_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x40, iomemtype);
 }

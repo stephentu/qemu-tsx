@@ -9,8 +9,6 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
@@ -28,45 +26,45 @@ struct sigfd_compat_info
 static void *sigwait_compat(void *opaque)
 {
     struct sigfd_compat_info *info = opaque;
+    int err;
     sigset_t all;
 
     sigfillset(&all);
-    pthread_sigmask(SIG_BLOCK, &all, NULL);
+    sigprocmask(SIG_BLOCK, &all, NULL);
 
-    while (1) {
-        int sig;
-        int err;
+    do {
+        siginfo_t siginfo;
 
-        err = sigwait(&info->mask, &sig);
-        if (err != 0) {
-            if (errno == EINTR) {
-                continue;
-            } else {
-                return NULL;
-            }
-        } else {
-            struct qemu_signalfd_siginfo buffer;
+        err = sigwaitinfo(&info->mask, &siginfo);
+        if (err == -1 && errno == EINTR) {
+            err = 0;
+            continue;
+        }
+
+        if (err > 0) {
+            char buffer[128];
             size_t offset = 0;
 
-            memset(&buffer, 0, sizeof(buffer));
-            buffer.ssi_signo = sig;
-
+            memcpy(buffer, &err, sizeof(err));
             while (offset < sizeof(buffer)) {
                 ssize_t len;
 
-                len = write(info->fd, (char *)&buffer + offset,
+                len = write(info->fd, buffer + offset,
                             sizeof(buffer) - offset);
                 if (len == -1 && errno == EINTR)
                     continue;
 
                 if (len <= 0) {
-                    return NULL;
+                    err = -1;
+                    break;
                 }
 
                 offset += len;
             }
         }
-    }
+    } while (err >= 0);
+
+    return NULL;
 }
 
 static int qemu_signalfd_compat(const sigset_t *mask)
@@ -116,23 +114,4 @@ int qemu_signalfd(const sigset_t *mask)
 #endif
 
     return qemu_signalfd_compat(mask);
-}
-
-bool qemu_signalfd_available(void)
-{
-#ifdef CONFIG_SIGNALFD
-    sigset_t mask;
-    int fd;
-    bool ok;
-    sigemptyset(&mask);
-    errno = 0;
-    fd = syscall(SYS_signalfd, -1, &mask, _NSIG / 8);
-    ok = (errno != ENOSYS);
-    if (fd >= 0) {
-        close(fd);
-    }
-    return ok;
-#else
-    return false;
-#endif
 }

@@ -30,7 +30,7 @@ QInt *qint_from_int(int64_t value)
 {
     QInt *qi;
 
-    qi = g_malloc(sizeof(*qi));
+    qi = qemu_malloc(sizeof(*qi));
     qi->value = value;
     QOBJECT_INIT(qi, &qint_type);
 
@@ -63,5 +63,5 @@ QInt *qobject_to_qint(const QObject *obj)
 static void qint_destroy_obj(QObject *obj)
 {
     assert(obj != NULL);
-    g_free(qobject_to_qint(obj));
+    qemu_free(qobject_to_qint(obj));
 }

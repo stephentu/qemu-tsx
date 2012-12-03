@@ -32,6 +32,7 @@
 #elif defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
 #include <pthread.h>
 #endif
+#include <signal.h>
 #endif
 
 #define AUDIO_CAP "sdl"
@@ -138,36 +139,36 @@ static int aud_to_sdlfmt (audfmt_e fmt)
     }
 }
 
-static int sdl_to_audfmt(int sdlfmt, audfmt_e *fmt, int *endianness)
+static int sdl_to_audfmt (int sdlfmt, audfmt_e *fmt, int *endianess)
 {
     switch (sdlfmt) {
     case AUDIO_S8:
-        *endianness = 0;
+        *endianess = 0;
         *fmt = AUD_FMT_S8;
         break;
 
     case AUDIO_U8:
-        *endianness = 0;
+        *endianess = 0;
         *fmt = AUD_FMT_U8;
         break;
 
     case AUDIO_S16LSB:
-        *endianness = 0;
+        *endianess = 0;
         *fmt = AUD_FMT_S16;
         break;
 
     case AUDIO_U16LSB:
-        *endianness = 0;
+        *endianess = 0;
         *fmt = AUD_FMT_U16;
         break;
 
     case AUDIO_S16MSB:
-        *endianness = 1;
+        *endianess = 1;
         *fmt = AUD_FMT_S16;
         break;
 
     case AUDIO_U16MSB:
-        *endianness = 1;
+        *endianess = 1;
         *fmt = AUD_FMT_U16;
         break;
 
@@ -337,7 +338,7 @@ static int sdl_init_out (HWVoiceOut *hw, struct audsettings *as)
     SDLVoiceOut *sdl = (SDLVoiceOut *) hw;
     SDLAudioState *s = &glob_sdl;
     SDL_AudioSpec req, obt;
-    int endianness;
+    int endianess;
     int err;
     audfmt_e effective_fmt;
     struct audsettings obt_as;
@@ -353,7 +354,7 @@ static int sdl_init_out (HWVoiceOut *hw, struct audsettings *as)
         return -1;
     }
 
-    err = sdl_to_audfmt(obt.format, &effective_fmt, &endianness);
+    err = sdl_to_audfmt (obt.format, &effective_fmt, &endianess);
     if (err) {
         sdl_close (s);
         return -1;
@@ -362,7 +363,7 @@ static int sdl_init_out (HWVoiceOut *hw, struct audsettings *as)
     obt_as.freq = obt.freq;
     obt_as.nchannels = obt.channels;
     obt_as.fmt = effective_fmt;
-    obt_as.endianness = endianness;
+    obt_as.endianness = endianess;
 
     audio_pcm_init_info (&hw->info, &obt_as);
     hw->samples = obt.samples;

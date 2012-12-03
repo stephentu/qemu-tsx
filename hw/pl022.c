@@ -4,11 +4,12 @@
  * Copyright (c) 2007 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "sysbus.h"
 #include "ssi.h"
+#include "primecell.h"
 
 //#define DEBUG_PL022 1
 
@@ -41,7 +42,6 @@ do { fprintf(stderr, "pl022: error: " fmt , ## __VA_ARGS__);} while (0)
 
 typedef struct {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint32_t cr0;
     uint32_t cr1;
     uint32_t bitmask;
@@ -130,8 +130,7 @@ static void pl022_xfer(pl022_state *s)
     pl022_update(s);
 }
 
-static uint64_t pl022_read(void *opaque, hwaddr offset,
-                           unsigned size)
+static uint32_t pl022_read(void *opaque, target_phys_addr_t offset)
 {
     pl022_state *s = (pl022_state *)opaque;
     int val;
@@ -168,14 +167,13 @@ static uint64_t pl022_read(void *opaque, hwaddr offset,
         /* Not implemented.  */
         return 0;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "pl022_read: Bad offset %x\n", (int)offset);
+        hw_error("pl022_read: Bad offset %x\n", (int)offset);
         return 0;
     }
 }
 
-static void pl022_write(void *opaque, hwaddr offset,
-                        uint64_t value, unsigned size)
+static void pl022_write(void *opaque, target_phys_addr_t offset,
+                        uint32_t value)
 {
     pl022_state *s = (pl022_state *)opaque;
 
@@ -195,7 +193,7 @@ static void pl022_write(void *opaque, hwaddr offset,
         break;
     case 0x08: /* DR */
         if (s->tx_fifo_len < 8) {
-            DPRINTF("TX %02x\n", (unsigned)value);
+            DPRINTF("TX %02x\n", value);
             s->tx_fifo[s->tx_fifo_head] = value & s->bitmask;
             s->tx_fifo_head = (s->tx_fifo_head + 1) & 7;
             s->tx_fifo_len++;
@@ -212,12 +210,11 @@ static void pl022_write(void *opaque, hwaddr offset,
         break;
     case 0x20: /* DMACR */
         if (value) {
-            qemu_log_mask(LOG_UNIMP, "pl022: DMA not implemented\n");
+            hw_error("pl022: DMA not implemented\n");
         }
         break;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "pl022_write: Bad offset %x\n", (int)offset);
+        hw_error("pl022_write: Bad offset %x\n", (int)offset);
     }
 }
 
@@ -230,79 +227,86 @@ static void pl022_reset(pl022_state *s)
     s->sr = PL022_SR_TFE | PL022_SR_TNF;
 }
 
-static const MemoryRegionOps pl022_ops = {
-    .read = pl022_read,
-    .write = pl022_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pl022_readfn[] = {
+   pl022_read,
+   pl022_read,
+   pl022_read
 };
 
-static const VMStateDescription vmstate_pl022 = {
-    .name = "pl022_ssp",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(cr0, pl022_state),
-        VMSTATE_UINT32(cr1, pl022_state),
-        VMSTATE_UINT32(bitmask, pl022_state),
-        VMSTATE_UINT32(sr, pl022_state),
-        VMSTATE_UINT32(cpsr, pl022_state),
-        VMSTATE_UINT32(is, pl022_state),
-        VMSTATE_UINT32(im, pl022_state),
-        VMSTATE_INT32(tx_fifo_head, pl022_state),
-        VMSTATE_INT32(rx_fifo_head, pl022_state),
-        VMSTATE_INT32(tx_fifo_len, pl022_state),
-        VMSTATE_INT32(rx_fifo_len, pl022_state),
-        VMSTATE_UINT16(tx_fifo[0], pl022_state),
-        VMSTATE_UINT16(rx_fifo[0], pl022_state),
-        VMSTATE_UINT16(tx_fifo[1], pl022_state),
-        VMSTATE_UINT16(rx_fifo[1], pl022_state),
-        VMSTATE_UINT16(tx_fifo[2], pl022_state),
-        VMSTATE_UINT16(rx_fifo[2], pl022_state),
-        VMSTATE_UINT16(tx_fifo[3], pl022_state),
-        VMSTATE_UINT16(rx_fifo[3], pl022_state),
-        VMSTATE_UINT16(tx_fifo[4], pl022_state),
-        VMSTATE_UINT16(rx_fifo[4], pl022_state),
-        VMSTATE_UINT16(tx_fifo[5], pl022_state),
-        VMSTATE_UINT16(rx_fifo[5], pl022_state),
-        VMSTATE_UINT16(tx_fifo[6], pl022_state),
-        VMSTATE_UINT16(rx_fifo[6], pl022_state),
-        VMSTATE_UINT16(tx_fifo[7], pl022_state),
-        VMSTATE_UINT16(rx_fifo[7], pl022_state),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUWriteMemoryFunc * const pl022_writefn[] = {
+   pl022_write,
+   pl022_write,
+   pl022_write
 };
+
+static void pl022_save(QEMUFile *f, void *opaque)
+{
+    pl022_state *s = (pl022_state *)opaque;
+    int i;
+
+    qemu_put_be32(f, s->cr0);
+    qemu_put_be32(f, s->cr1);
+    qemu_put_be32(f, s->bitmask);
+    qemu_put_be32(f, s->sr);
+    qemu_put_be32(f, s->cpsr);
+    qemu_put_be32(f, s->is);
+    qemu_put_be32(f, s->im);
+    qemu_put_be32(f, s->tx_fifo_head);
+    qemu_put_be32(f, s->rx_fifo_head);
+    qemu_put_be32(f, s->tx_fifo_len);
+    qemu_put_be32(f, s->rx_fifo_len);
+    for (i = 0; i < 8; i++) {
+        qemu_put_be16(f, s->tx_fifo[i]);
+        qemu_put_be16(f, s->rx_fifo[i]);
+    }
+}
+
+static int pl022_load(QEMUFile *f, void *opaque, int version_id)
+{
+    pl022_state *s = (pl022_state *)opaque;
+    int i;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->cr0 = qemu_get_be32(f);
+    s->cr1 = qemu_get_be32(f);
+    s->bitmask = qemu_get_be32(f);
+    s->sr = qemu_get_be32(f);
+    s->cpsr = qemu_get_be32(f);
+    s->is = qemu_get_be32(f);
+    s->im = qemu_get_be32(f);
+    s->tx_fifo_head = qemu_get_be32(f);
+    s->rx_fifo_head = qemu_get_be32(f);
+    s->tx_fifo_len = qemu_get_be32(f);
+    s->rx_fifo_len = qemu_get_be32(f);
+    for (i = 0; i < 8; i++) {
+        s->tx_fifo[i] = qemu_get_be16(f);
+        s->rx_fifo[i] = qemu_get_be16(f);
+    }
+
+    return 0;
+}
 
 static int pl022_init(SysBusDevice *dev)
 {
     pl022_state *s = FROM_SYSBUS(pl022_state, dev);
+    int iomemtype;
 
-    memory_region_init_io(&s->iomem, &pl022_ops, s, "pl022", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(pl022_readfn,
+                                       pl022_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
     sysbus_init_irq(dev, &s->irq);
     s->ssi = ssi_create_bus(&dev->qdev, "ssi");
     pl022_reset(s);
-    vmstate_register(&dev->qdev, -1, &vmstate_pl022, s);
+    register_savevm(&dev->qdev, "pl022_ssp", -1, 1, pl022_save, pl022_load, s);
     return 0;
 }
 
-static void pl022_class_init(ObjectClass *klass, void *data)
+static void pl022_register_devices(void)
 {
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
-
-    sdc->init = pl022_init;
+    sysbus_register_dev("pl022", sizeof(pl022_state), pl022_init);
 }
 
-static TypeInfo pl022_info = {
-    .name          = "pl022",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(pl022_state),
-    .class_init    = pl022_class_init,
-};
-
-static void pl022_register_types(void)
-{
-    type_register_static(&pl022_info);
-}
-
-type_init(pl022_register_types)
+device_init(pl022_register_devices)

@@ -23,11 +23,17 @@
  */
 #define TCG_TARGET_SPARC 1
 
+#if defined(__sparc_v9__) && !defined(__sparc_v8plus__)
+#define TCG_TARGET_REG_BITS 64
+#else
+#define TCG_TARGET_REG_BITS 32
+#endif
+
 #define TCG_TARGET_WORDS_BIGENDIAN
 
 #define TCG_TARGET_NB_REGS 32
 
-typedef enum {
+enum {
     TCG_REG_G0 = 0,
     TCG_REG_G1,
     TCG_REG_G2,
@@ -60,75 +66,79 @@ typedef enum {
     TCG_REG_I5,
     TCG_REG_I6,
     TCG_REG_I7,
-} TCGReg;
+};
 
-#define TCG_CT_CONST_S11  0x100
-#define TCG_CT_CONST_S13  0x200
-#define TCG_CT_CONST_ZERO 0x400
+#define TCG_CT_CONST_S11 0x100
+#define TCG_CT_CONST_S13 0x200
 
 /* used for function call generation */
-#define TCG_REG_CALL_STACK TCG_REG_O6
-
-#if TCG_TARGET_REG_BITS == 64
-#define TCG_TARGET_STACK_BIAS           2047
-#define TCG_TARGET_STACK_ALIGN          16
-#define TCG_TARGET_CALL_STACK_OFFSET    (128 + 6*8 + TCG_TARGET_STACK_BIAS)
+#define TCG_REG_CALL_STACK TCG_REG_I6
+#ifdef __arch64__
+// Reserve space for AREG0
+#define TCG_TARGET_STACK_MINFRAME (176 + 4 * (int)sizeof(long) + \
+                                   TCG_STATIC_CALL_ARGS_SIZE)
+#define TCG_TARGET_CALL_STACK_OFFSET (2047 - 16)
+#define TCG_TARGET_STACK_ALIGN 16
 #else
-#define TCG_TARGET_STACK_BIAS           0
-#define TCG_TARGET_STACK_ALIGN          8
-#define TCG_TARGET_CALL_STACK_OFFSET    (64 + 4 + 6*4)
+// AREG0 + one word for alignment
+#define TCG_TARGET_STACK_MINFRAME (92 + (2 + 1) * (int)sizeof(long) + \
+                                   TCG_STATIC_CALL_ARGS_SIZE)
+#define TCG_TARGET_CALL_STACK_OFFSET TCG_TARGET_STACK_MINFRAME
+#define TCG_TARGET_STACK_ALIGN 8
 #endif
 
-#if TCG_TARGET_REG_BITS == 64
+#ifdef __arch64__
 #define TCG_TARGET_EXTEND_ARGS 1
 #endif
 
 /* optional instructions */
-#define TCG_TARGET_HAS_div_i32		1
-#define TCG_TARGET_HAS_rot_i32          0
-#define TCG_TARGET_HAS_ext8s_i32        0
-#define TCG_TARGET_HAS_ext16s_i32       0
-#define TCG_TARGET_HAS_ext8u_i32        0
-#define TCG_TARGET_HAS_ext16u_i32       0
-#define TCG_TARGET_HAS_bswap16_i32      0
-#define TCG_TARGET_HAS_bswap32_i32      0
-#define TCG_TARGET_HAS_neg_i32          1
-#define TCG_TARGET_HAS_not_i32          1
-#define TCG_TARGET_HAS_andc_i32         1
-#define TCG_TARGET_HAS_orc_i32          1
-#define TCG_TARGET_HAS_eqv_i32          0
-#define TCG_TARGET_HAS_nand_i32         0
-#define TCG_TARGET_HAS_nor_i32          0
-#define TCG_TARGET_HAS_deposit_i32      0
-#define TCG_TARGET_HAS_movcond_i32      1
+#define TCG_TARGET_HAS_div_i32
+// #define TCG_TARGET_HAS_rot_i32
+// #define TCG_TARGET_HAS_ext8s_i32
+// #define TCG_TARGET_HAS_ext16s_i32
+// #define TCG_TARGET_HAS_ext8u_i32
+// #define TCG_TARGET_HAS_ext16u_i32
+// #define TCG_TARGET_HAS_bswap16_i32
+// #define TCG_TARGET_HAS_bswap32_i32
+#define TCG_TARGET_HAS_neg_i32
+#define TCG_TARGET_HAS_not_i32
+#define TCG_TARGET_HAS_andc_i32
+#define TCG_TARGET_HAS_orc_i32
+// #define TCG_TARGET_HAS_eqv_i32
+// #define TCG_TARGET_HAS_nand_i32
+// #define TCG_TARGET_HAS_nor_i32
 
 #if TCG_TARGET_REG_BITS == 64
-#define TCG_TARGET_HAS_div_i64          1
-#define TCG_TARGET_HAS_rot_i64          0
-#define TCG_TARGET_HAS_ext8s_i64        0
-#define TCG_TARGET_HAS_ext16s_i64       0
-#define TCG_TARGET_HAS_ext32s_i64       1
-#define TCG_TARGET_HAS_ext8u_i64        0
-#define TCG_TARGET_HAS_ext16u_i64       0
-#define TCG_TARGET_HAS_ext32u_i64       1
-#define TCG_TARGET_HAS_bswap16_i64      0
-#define TCG_TARGET_HAS_bswap32_i64      0
-#define TCG_TARGET_HAS_bswap64_i64      0
-#define TCG_TARGET_HAS_neg_i64          1
-#define TCG_TARGET_HAS_not_i64          1
-#define TCG_TARGET_HAS_andc_i64         1
-#define TCG_TARGET_HAS_orc_i64          1
-#define TCG_TARGET_HAS_eqv_i64          0
-#define TCG_TARGET_HAS_nand_i64         0
-#define TCG_TARGET_HAS_nor_i64          0
-#define TCG_TARGET_HAS_deposit_i64      0
-#define TCG_TARGET_HAS_movcond_i64      1
+#define TCG_TARGET_HAS_div_i64
+// #define TCG_TARGET_HAS_rot_i64
+// #define TCG_TARGET_HAS_ext8s_i64
+// #define TCG_TARGET_HAS_ext16s_i64
+#define TCG_TARGET_HAS_ext32s_i64
+// #define TCG_TARGET_HAS_ext8u_i64
+// #define TCG_TARGET_HAS_ext16u_i64
+#define TCG_TARGET_HAS_ext32u_i64
+// #define TCG_TARGET_HAS_bswap16_i64
+// #define TCG_TARGET_HAS_bswap32_i64
+// #define TCG_TARGET_HAS_bswap64_i64
+#define TCG_TARGET_HAS_neg_i64
+#define TCG_TARGET_HAS_not_i64
+#define TCG_TARGET_HAS_andc_i64
+#define TCG_TARGET_HAS_orc_i64
+// #define TCG_TARGET_HAS_eqv_i64
+// #define TCG_TARGET_HAS_nand_i64
+// #define TCG_TARGET_HAS_nor_i64
 #endif
 
-#define TCG_AREG0 TCG_REG_I0
+/* Note: must be synced with dyngen-exec.h */
+#ifdef CONFIG_SOLARIS
+#define TCG_AREG0 TCG_REG_G2
+#elif defined(__sparc_v9__)
+#define TCG_AREG0 TCG_REG_G5
+#else
+#define TCG_AREG0 TCG_REG_G6
+#endif
 
-static inline void flush_icache_range(tcg_target_ulong start,
-                                      tcg_target_ulong stop)
+static inline void flush_icache_range(unsigned long start, unsigned long stop)
 {
     unsigned long p;
 

@@ -122,15 +122,13 @@
 
 typedef struct ECCState {
     SysBusDevice busdev;
-    MemoryRegion iomem, iomem_diag;
     qemu_irq irq;
     uint32_t regs[ECC_NREGS];
     uint8_t diag[ECC_DIAG_SIZE];
     uint32_t version;
 } ECCState;
 
-static void ecc_mem_write(void *opaque, hwaddr addr, uint64_t val,
-                          unsigned size)
+static void ecc_mem_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
 {
     ECCState *s = opaque;
 
@@ -172,8 +170,7 @@ static void ecc_mem_write(void *opaque, hwaddr addr, uint64_t val,
     }
 }
 
-static uint64_t ecc_mem_read(void *opaque, hwaddr addr,
-                             unsigned size)
+static uint32_t ecc_mem_readl(void *opaque, target_phys_addr_t addr)
 {
     ECCState *s = opaque;
     uint32_t ret = 0;
@@ -219,18 +216,20 @@ static uint64_t ecc_mem_read(void *opaque, hwaddr addr,
     return ret;
 }
 
-static const MemoryRegionOps ecc_mem_ops = {
-    .read = ecc_mem_read,
-    .write = ecc_mem_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
+static CPUReadMemoryFunc * const ecc_mem_read[3] = {
+    NULL,
+    NULL,
+    ecc_mem_readl,
 };
 
-static void ecc_diag_mem_write(void *opaque, hwaddr addr,
-                               uint64_t val, unsigned size)
+static CPUWriteMemoryFunc * const ecc_mem_write[3] = {
+    NULL,
+    NULL,
+    ecc_mem_writel,
+};
+
+static void ecc_diag_mem_writeb(void *opaque, target_phys_addr_t addr,
+                                uint32_t val)
 {
     ECCState *s = opaque;
 
@@ -238,8 +237,7 @@ static void ecc_diag_mem_write(void *opaque, hwaddr addr,
     s->diag[addr & ECC_DIAG_MASK] = val;
 }
 
-static uint64_t ecc_diag_mem_read(void *opaque, hwaddr addr,
-                                  unsigned size)
+static uint32_t ecc_diag_mem_readb(void *opaque, target_phys_addr_t addr)
 {
     ECCState *s = opaque;
     uint32_t ret = s->diag[(int)addr];
@@ -248,14 +246,16 @@ static uint64_t ecc_diag_mem_read(void *opaque, hwaddr addr,
     return ret;
 }
 
-static const MemoryRegionOps ecc_diag_mem_ops = {
-    .read = ecc_diag_mem_read,
-    .write = ecc_diag_mem_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 1,
-    },
+static CPUReadMemoryFunc * const ecc_diag_mem_read[3] = {
+    ecc_diag_mem_readb,
+    NULL,
+    NULL,
+};
+
+static CPUWriteMemoryFunc * const ecc_diag_mem_write[3] = {
+    ecc_diag_mem_writeb,
+    NULL,
+    NULL,
 };
 
 static const VMStateDescription vmstate_ecc = {
@@ -292,49 +292,41 @@ static void ecc_reset(DeviceState *d)
 
 static int ecc_init1(SysBusDevice *dev)
 {
+    int ecc_io_memory;
     ECCState *s = FROM_SYSBUS(ECCState, dev);
 
     sysbus_init_irq(dev, &s->irq);
     s->regs[0] = s->version;
-    memory_region_init_io(&s->iomem, &ecc_mem_ops, s, "ecc", ECC_SIZE);
-    sysbus_init_mmio(dev, &s->iomem);
+    ecc_io_memory = cpu_register_io_memory(ecc_mem_read, ecc_mem_write, s,
+                                           DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, ECC_SIZE, ecc_io_memory);
 
     if (s->version == ECC_MCC) { // SS-600MP only
-        memory_region_init_io(&s->iomem_diag, &ecc_diag_mem_ops, s,
-                              "ecc.diag", ECC_DIAG_SIZE);
-        sysbus_init_mmio(dev, &s->iomem_diag);
+        ecc_io_memory = cpu_register_io_memory(ecc_diag_mem_read,
+                                               ecc_diag_mem_write, s,
+                                               DEVICE_NATIVE_ENDIAN);
+        sysbus_init_mmio(dev, ECC_DIAG_SIZE, ecc_io_memory);
     }
 
     return 0;
 }
 
-static Property ecc_properties[] = {
-    DEFINE_PROP_HEX32("version", ECCState, version, -1),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void ecc_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = ecc_init1;
-    dc->reset = ecc_reset;
-    dc->vmsd = &vmstate_ecc;
-    dc->props = ecc_properties;
-}
-
-static TypeInfo ecc_info = {
-    .name          = "eccmemctl",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(ECCState),
-    .class_init    = ecc_class_init,
+static SysBusDeviceInfo ecc_info = {
+    .init = ecc_init1,
+    .qdev.name  = "eccmemctl",
+    .qdev.size  = sizeof(ECCState),
+    .qdev.vmsd  = &vmstate_ecc,
+    .qdev.reset = ecc_reset,
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_HEX32("version", ECCState, version, -1),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
 
-static void ecc_register_types(void)
+static void ecc_register_devices(void)
 {
-    type_register_static(&ecc_info);
+    sysbus_register_withprop(&ecc_info);
 }
 
-type_init(ecc_register_types)
+device_init(ecc_register_devices)

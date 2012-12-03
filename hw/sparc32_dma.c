@@ -64,7 +64,6 @@ typedef struct DMAState DMAState;
 
 struct DMAState {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint32_t dmaregs[DMA_REGS];
     qemu_irq irq;
     void *iommu;
@@ -78,7 +77,7 @@ enum {
 };
 
 /* Note: on sparc, the lance 16 bit bus is swapped */
-void ledma_memory_read(void *opaque, hwaddr addr,
+void ledma_memory_read(void *opaque, target_phys_addr_t addr,
                        uint8_t *buf, int len, int do_bswap)
 {
     DMAState *s = opaque;
@@ -98,7 +97,7 @@ void ledma_memory_read(void *opaque, hwaddr addr,
     }
 }
 
-void ledma_memory_write(void *opaque, hwaddr addr,
+void ledma_memory_write(void *opaque, target_phys_addr_t addr,
                         uint8_t *buf, int len, int do_bswap)
 {
     DMAState *s = opaque;
@@ -165,8 +164,7 @@ void espdma_memory_write(void *opaque, uint8_t *buf, int len)
     s->dmaregs[1] += len;
 }
 
-static uint64_t dma_mem_read(void *opaque, hwaddr addr,
-                             unsigned size)
+static uint32_t dma_mem_readl(void *opaque, target_phys_addr_t addr)
 {
     DMAState *s = opaque;
     uint32_t saddr;
@@ -182,8 +180,7 @@ static uint64_t dma_mem_read(void *opaque, hwaddr addr,
     return s->dmaregs[saddr];
 }
 
-static void dma_mem_write(void *opaque, hwaddr addr,
-                          uint64_t val, unsigned size)
+static void dma_mem_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
 {
     DMAState *s = opaque;
     uint32_t saddr;
@@ -237,14 +234,16 @@ static void dma_mem_write(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps dma_mem_ops = {
-    .read = dma_mem_read,
-    .write = dma_mem_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
+static CPUReadMemoryFunc * const dma_mem_read[3] = {
+    NULL,
+    NULL,
+    dma_mem_readl,
+};
+
+static CPUWriteMemoryFunc * const dma_mem_write[3] = {
+    NULL,
+    NULL,
+    dma_mem_writel,
 };
 
 static void dma_reset(DeviceState *d)
@@ -269,13 +268,15 @@ static const VMStateDescription vmstate_dma = {
 static int sparc32_dma_init1(SysBusDevice *dev)
 {
     DMAState *s = FROM_SYSBUS(DMAState, dev);
+    int dma_io_memory;
     int reg_size;
 
     sysbus_init_irq(dev, &s->irq);
 
+    dma_io_memory = cpu_register_io_memory(dma_mem_read, dma_mem_write, s,
+                                           DEVICE_NATIVE_ENDIAN);
     reg_size = s->is_ledma ? DMA_ETH_SIZE : DMA_SIZE;
-    memory_region_init_io(&s->iomem, &dma_mem_ops, s, "dma", reg_size);
-    sysbus_init_mmio(dev, &s->iomem);
+    sysbus_init_mmio(dev, reg_size, dma_io_memory);
 
     qdev_init_gpio_in(&dev->qdev, dma_set_irq, 1);
     qdev_init_gpio_out(&dev->qdev, s->gpio, 2);
@@ -283,33 +284,22 @@ static int sparc32_dma_init1(SysBusDevice *dev)
     return 0;
 }
 
-static Property sparc32_dma_properties[] = {
-    DEFINE_PROP_PTR("iommu_opaque", DMAState, iommu),
-    DEFINE_PROP_UINT32("is_ledma", DMAState, is_ledma, 0),
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo sparc32_dma_info = {
+    .init = sparc32_dma_init1,
+    .qdev.name  = "sparc32_dma",
+    .qdev.size  = sizeof(DMAState),
+    .qdev.vmsd  = &vmstate_dma,
+    .qdev.reset = dma_reset,
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_PTR("iommu_opaque", DMAState, iommu),
+        DEFINE_PROP_UINT32("is_ledma", DMAState, is_ledma, 0),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void sparc32_dma_class_init(ObjectClass *klass, void *data)
+static void sparc32_dma_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = sparc32_dma_init1;
-    dc->reset = dma_reset;
-    dc->vmsd = &vmstate_dma;
-    dc->props = sparc32_dma_properties;
+    sysbus_register_withprop(&sparc32_dma_info);
 }
 
-static TypeInfo sparc32_dma_info = {
-    .name          = "sparc32_dma",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(DMAState),
-    .class_init    = sparc32_dma_class_init,
-};
-
-static void sparc32_dma_register_types(void)
-{
-    type_register_static(&sparc32_dma_info);
-}
-
-type_init(sparc32_dma_register_types)
+device_init(sparc32_dma_register_devices)

@@ -19,9 +19,7 @@
  */
 
 #include "qemu-common.h"
-#include "qemu-timer.h"
-#include "console.h"
-#include "hid.h"
+#include "usb.h"
 #include "bt.h"
 
 enum hid_transaction_req {
@@ -88,7 +86,7 @@ struct bt_hid_device_s {
     struct bt_l2cap_device_s btdev;
     struct bt_l2cap_conn_params_s *control;
     struct bt_l2cap_conn_params_s *interrupt;
-    HIDState hid;
+    USBDevice *usbdev;
 
     int proto;
     int connected;
@@ -113,7 +111,7 @@ static void bt_hid_reset(struct bt_hid_device_s *s)
     bt_l2cap_device_done(&s->btdev);
     bt_l2cap_device_init(&s->btdev, net);
 
-    hid_reset(&s->hid);
+    s->usbdev->info->handle_reset(s->usbdev);
     s->proto = BT_HID_PROTO_REPORT;
     s->state = bt_state_ready;
     s->dataother.len = 0;
@@ -126,16 +124,23 @@ static void bt_hid_reset(struct bt_hid_device_s *s)
 
 static int bt_hid_out(struct bt_hid_device_s *s)
 {
+    USBPacket p;
+
     if (s->data_type == BT_DATA_OUTPUT) {
-        /* nothing */
-        ;
+        p.pid = USB_TOKEN_OUT;
+        p.devep = 1;
+        p.data = s->dataout.buffer;
+        p.len = s->dataout.len;
+        s->dataout.len = s->usbdev->info->handle_data(s->usbdev, &p);
+
+        return s->dataout.len;
     }
 
     if (s->data_type == BT_DATA_FEATURE) {
         /* XXX:
          * does this send a USB_REQ_CLEAR_FEATURE/USB_REQ_SET_FEATURE
          * or a SET_REPORT? */
-        ;
+        p.devep = 0;
     }
 
     return -1;
@@ -143,8 +148,14 @@ static int bt_hid_out(struct bt_hid_device_s *s)
 
 static int bt_hid_in(struct bt_hid_device_s *s)
 {
-    s->datain.len = hid_keyboard_poll(&s->hid, s->datain.buffer,
-                                      sizeof(s->datain.buffer));
+    USBPacket p;
+
+    p.pid = USB_TOKEN_IN;
+    p.devep = 1;
+    p.data = s->datain.buffer;
+    p.len = sizeof(s->datain.buffer);
+    s->datain.len = s->usbdev->info->handle_data(s->usbdev, &p);
+
     return s->datain.len;
 }
 
@@ -312,7 +323,8 @@ static void bt_hid_control_transaction(struct bt_hid_device_s *s,
             break;
         }
         s->proto = parameter;
-        s->hid.protocol = parameter;
+        s->usbdev->info->handle_control(s->usbdev, SET_PROTOCOL, s->proto, 0, 0,
+                                        NULL);
         ret = BT_HS_SUCCESSFUL;
         break;
 
@@ -321,7 +333,8 @@ static void bt_hid_control_transaction(struct bt_hid_device_s *s,
             ret = BT_HS_ERR_INVALID_PARAMETER;
             break;
         }
-        *s->control->sdu_out(s->control, 1) = s->hid.idle;
+        s->usbdev->info->handle_control(s->usbdev, GET_IDLE, 0, 0, 1,
+                        s->control->sdu_out(s->control, 1));
         s->control->sdu_submit(s->control);
         break;
 
@@ -331,7 +344,11 @@ static void bt_hid_control_transaction(struct bt_hid_device_s *s,
             break;
         }
 
-        s->hid.idle = data[1];
+        /* We don't need to know about the Idle Rate here really,
+         * so just pass it on to the device.  */
+        ret = s->usbdev->info->handle_control(s->usbdev,
+                        SET_IDLE, data[1], 0, 0, NULL) ?
+                BT_HS_SUCCESSFUL : BT_HS_ERR_INVALID_PARAMETER;
         /* XXX: Does this generate a handshake? */
         break;
 
@@ -368,10 +385,9 @@ static void bt_hid_control_sdu(void *opaque, const uint8_t *data, int len)
     bt_hid_control_transaction(hid, data, len);
 }
 
-static void bt_hid_datain(HIDState *hs)
+static void bt_hid_datain(void *opaque)
 {
-    struct bt_hid_device_s *hid =
-        container_of(hs, struct bt_hid_device_s, hid);
+    struct bt_hid_device_s *hid = opaque;
 
     /* If suspended, wake-up and send a wake-up event first.  We might
      * want to also inspect the input report and ignore event like
@@ -434,7 +450,7 @@ static void bt_hid_connected_update(struct bt_hid_device_s *hid)
     hid->btdev.device.inquiry_scan = !hid->connected;
 
     if (hid->connected && !prev) {
-        hid_reset(&hid->hid);
+        hid->usbdev->info->handle_reset(hid->usbdev);
         hid->proto = BT_HID_PROTO_REPORT;
     }
 
@@ -502,9 +518,9 @@ static void bt_hid_destroy(struct bt_device_s *dev)
         bt_hid_send_control(hid, BT_HC_VIRTUAL_CABLE_UNPLUG);
     bt_l2cap_device_done(&hid->btdev);
 
-    hid_free(&hid->hid);
+    hid->usbdev->info->handle_destroy(hid->usbdev);
 
-    g_free(hid);
+    qemu_free(hid);
 }
 
 enum peripheral_minor_class {
@@ -515,9 +531,9 @@ enum peripheral_minor_class {
 };
 
 static struct bt_device_s *bt_hid_init(struct bt_scatternet_s *net,
-                                       enum peripheral_minor_class minor)
+                USBDevice *dev, enum peripheral_minor_class minor)
 {
-    struct bt_hid_device_s *s = g_malloc0(sizeof(*s));
+    struct bt_hid_device_s *s = qemu_mallocz(sizeof(*s));
     uint32_t class =
             /* Format type */
             (0 << 0) |
@@ -535,8 +551,9 @@ static struct bt_device_s *bt_hid_init(struct bt_scatternet_s *net,
     bt_l2cap_psm_register(&s->btdev, BT_PSM_HID_INTR,
                     BT_HID_MTU, bt_hid_new_interrupt_ch);
 
-    hid_init(&s->hid, HID_KEYBOARD, bt_hid_datain);
-    s->btdev.device.lmp_name = "BT Keyboard";
+    s->usbdev = dev;
+    s->btdev.device.lmp_name = s->usbdev->product_desc;
+    usb_hid_datain_cb(s->usbdev, s, bt_hid_datain);
 
     s->btdev.device.handle_destroy = bt_hid_destroy;
 
@@ -549,5 +566,6 @@ static struct bt_device_s *bt_hid_init(struct bt_scatternet_s *net,
 
 struct bt_device_s *bt_keyboard_init(struct bt_scatternet_s *net)
 {
-    return bt_hid_init(net, class_keyboard);
+    USBDevice *dev = usb_create_simple(NULL /* FIXME */, "usb-kbd");
+    return bt_hid_init(net, dev, class_keyboard);
 }

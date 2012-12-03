@@ -28,7 +28,6 @@
 
 #include <stdint.h>
 #include "qemu-queue.h"
-#include "error.h"
 #include "qdict.h"
 
 enum QEMUOptionParType {
@@ -101,51 +100,31 @@ typedef struct QemuOptDesc {
 struct QemuOptsList {
     const char *name;
     const char *implied_opt_name;
-    bool merge_lists;  /* Merge multiple uses of option into a single list? */
     QTAILQ_HEAD(, QemuOpts) head;
     QemuOptDesc desc[];
 };
 
 const char *qemu_opt_get(QemuOpts *opts, const char *name);
-/**
- * qemu_opt_has_help_opt:
- * @opts: options to search for a help request
- *
- * Check whether the options specified by @opts include one of the
- * standard strings which indicate that the user is asking for a
- * list of the valid values for a command line option (as defined
- * by is_help_option()).
- *
- * Returns: true if @opts includes 'help' or equivalent.
- */
-bool qemu_opt_has_help_opt(QemuOpts *opts);
-bool qemu_opt_get_bool(QemuOpts *opts, const char *name, bool defval);
+int qemu_opt_get_bool(QemuOpts *opts, const char *name, int defval);
 uint64_t qemu_opt_get_number(QemuOpts *opts, const char *name, uint64_t defval);
 uint64_t qemu_opt_get_size(QemuOpts *opts, const char *name, uint64_t defval);
 int qemu_opt_set(QemuOpts *opts, const char *name, const char *value);
-void qemu_opt_set_err(QemuOpts *opts, const char *name, const char *value,
-                      Error **errp);
-int qemu_opt_set_bool(QemuOpts *opts, const char *name, bool val);
 typedef int (*qemu_opt_loopfunc)(const char *name, const char *value, void *opaque);
 int qemu_opt_foreach(QemuOpts *opts, qemu_opt_loopfunc func, void *opaque,
                      int abort_on_failure);
 
 QemuOpts *qemu_opts_find(QemuOptsList *list, const char *id);
-QemuOpts *qemu_opts_create(QemuOptsList *list, const char *id,
-                           int fail_if_exists, Error **errp);
+QemuOpts *qemu_opts_create(QemuOptsList *list, const char *id, int fail_if_exists);
 void qemu_opts_reset(QemuOptsList *list);
 void qemu_opts_loc_restore(QemuOpts *opts);
 int qemu_opts_set(QemuOptsList *list, const char *id,
                   const char *name, const char *value);
 const char *qemu_opts_id(QemuOpts *opts);
 void qemu_opts_del(QemuOpts *opts);
-void qemu_opts_validate(QemuOpts *opts, const QemuOptDesc *desc, Error **errp);
+int qemu_opts_validate(QemuOpts *opts, const QemuOptDesc *desc);
 int qemu_opts_do_parse(QemuOpts *opts, const char *params, const char *firstname);
 QemuOpts *qemu_opts_parse(QemuOptsList *list, const char *params, int permit_abbrev);
-void qemu_opts_set_defaults(QemuOptsList *list, const char *params,
-                            int permit_abbrev);
-QemuOpts *qemu_opts_from_qdict(QemuOptsList *list, const QDict *qdict,
-                               Error **errp);
+QemuOpts *qemu_opts_from_qdict(QemuOptsList *list, const QDict *qdict);
 QDict *qemu_opts_to_qdict(QemuOpts *opts, QDict *qdict);
 
 typedef int (*qemu_opts_loopfunc)(QemuOpts *opts, void *opaque);

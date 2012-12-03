@@ -37,11 +37,7 @@ static inline void tftp_session_update(struct tftp_session *spt)
 
 static void tftp_session_terminate(struct tftp_session *spt)
 {
-    if (spt->fd >= 0) {
-        close(spt->fd);
-        spt->fd = -1;
-    }
-    g_free(spt->filename);
+    qemu_free(spt->filename);
     spt->slirp = NULL;
 }
 
@@ -58,7 +54,7 @@ static int tftp_session_allocate(Slirp *slirp, struct tftp_t *tp)
 
     /* sessions time out after 5 inactive seconds */
     if ((int)(curtime - spt->timestamp) > 5000) {
-        tftp_session_terminate(spt);
+        qemu_free(spt->filename);
         goto found;
     }
   }
@@ -68,7 +64,6 @@ static int tftp_session_allocate(Slirp *slirp, struct tftp_t *tp)
  found:
   memset(spt, 0, sizeof(*spt));
   memcpy(&spt->client_ip, &tp->ip.ip_src, sizeof(spt->client_ip));
-  spt->fd = -1;
   spt->client_port = tp->udp.uh_sport;
   spt->slirp = slirp;
 
@@ -97,36 +92,37 @@ static int tftp_session_find(Slirp *slirp, struct tftp_t *tp)
   return -1;
 }
 
-static int tftp_read_data(struct tftp_session *spt, uint32_t block_nr,
+static int tftp_read_data(struct tftp_session *spt, uint16_t block_nr,
                           uint8_t *buf, int len)
 {
-    int bytes_read = 0;
+  int fd;
+  int bytes_read = 0;
 
-    if (spt->fd < 0) {
-        spt->fd = open(spt->filename, O_RDONLY | O_BINARY);
-    }
+  fd = open(spt->filename, O_RDONLY | O_BINARY);
 
-    if (spt->fd < 0) {
-        return -1;
-    }
+  if (fd < 0) {
+    return -1;
+  }
 
-    if (len) {
-        lseek(spt->fd, block_nr * 512, SEEK_SET);
+  if (len) {
+    lseek(fd, block_nr * 512, SEEK_SET);
 
-        bytes_read = read(spt->fd, buf, len);
-    }
+    bytes_read = read(fd, buf, len);
+  }
 
-    return bytes_read;
+  close(fd);
+
+  return bytes_read;
 }
 
 static int tftp_send_oack(struct tftp_session *spt,
-                          const char *keys[], uint32_t values[], int nb,
+                          const char *key, uint32_t value,
                           struct tftp_t *recv_tp)
 {
     struct sockaddr_in saddr, daddr;
     struct mbuf *m;
     struct tftp_t *tp;
-    int i, n = 0;
+    int n = 0;
 
     m = m_get(spt->slirp);
 
@@ -140,12 +136,10 @@ static int tftp_send_oack(struct tftp_session *spt,
     m->m_data += sizeof(struct udpiphdr);
 
     tp->tp_op = htons(TFTP_OACK);
-    for (i = 0; i < nb; i++) {
-        n += snprintf(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%s",
-                      keys[i]) + 1;
-        n += snprintf(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%u",
-                      values[i]) + 1;
-    }
+    n += snprintf((char *)tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%s",
+                  key) + 1;
+    n += snprintf((char *)tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%u",
+                  value) + 1;
 
     saddr.sin_addr = recv_tp->ip.ip_dst;
     saddr.sin_port = recv_tp->udp.uh_dport;
@@ -199,18 +193,23 @@ out:
   tftp_session_terminate(spt);
 }
 
-static void tftp_send_next_block(struct tftp_session *spt,
-                                 struct tftp_t *recv_tp)
+static int tftp_send_data(struct tftp_session *spt,
+                          uint16_t block_nr,
+			  struct tftp_t *recv_tp)
 {
   struct sockaddr_in saddr, daddr;
   struct mbuf *m;
   struct tftp_t *tp;
   int nobytes;
 
+  if (block_nr < 1) {
+    return -1;
+  }
+
   m = m_get(spt->slirp);
 
   if (!m) {
-    return;
+    return -1;
   }
 
   memset(m->m_data, 0, m->m_size);
@@ -220,7 +219,7 @@ static void tftp_send_next_block(struct tftp_session *spt,
   m->m_data += sizeof(struct udpiphdr);
 
   tp->tp_op = htons(TFTP_DATA);
-  tp->x.tp_data.tp_block_nr = htons((spt->block_nr + 1) & 0xffff);
+  tp->x.tp_data.tp_block_nr = htons(block_nr);
 
   saddr.sin_addr = recv_tp->ip.ip_dst;
   saddr.sin_port = recv_tp->udp.uh_dport;
@@ -228,7 +227,7 @@ static void tftp_send_next_block(struct tftp_session *spt,
   daddr.sin_addr = spt->client_ip;
   daddr.sin_port = spt->client_port;
 
-  nobytes = tftp_read_data(spt, spt->block_nr, tp->x.tp_data.tp_buf, 512);
+  nobytes = tftp_read_data(spt, block_nr - 1, tp->x.tp_data.tp_buf, 512);
 
   if (nobytes < 0) {
     m_free(m);
@@ -237,7 +236,7 @@ static void tftp_send_next_block(struct tftp_session *spt,
 
     tftp_send_error(spt, 1, "File not found", tp);
 
-    return;
+    return -1;
   }
 
   m->m_len = sizeof(struct tftp_t) - (512 - nobytes) -
@@ -252,7 +251,7 @@ static void tftp_send_next_block(struct tftp_session *spt,
     tftp_session_terminate(spt);
   }
 
-  spt->block_nr++;
+  return 0;
 }
 
 static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
@@ -261,9 +260,6 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
   int s, k;
   size_t prefix_len;
   char *req_fname;
-  const char *option_name[2];
-  uint32_t option_value[2];
-  int nb_options = 0;
 
   /* check if a session already exists and if so terminate it */
   s = tftp_session_find(slirp, tp);
@@ -287,11 +283,11 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
 
   /* skip header fields */
   k = 0;
-  pktlen -= offsetof(struct tftp_t, x.tp_buf);
+  pktlen -= ((uint8_t *)&tp->x.tp_buf[0] - (uint8_t *)tp);
 
   /* prepend tftp_prefix */
   prefix_len = strlen(slirp->tftp_prefix);
-  spt->filename = g_malloc(prefix_len + TFTP_FILENAME_MAX + 2);
+  spt->filename = qemu_malloc(prefix_len + TFTP_FILENAME_MAX + 2);
   memcpy(spt->filename, slirp->tftp_prefix, prefix_len);
   spt->filename[prefix_len] = '/';
 
@@ -303,7 +299,7 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
       tftp_send_error(spt, 2, "Access violation", tp);
       return;
     }
-    req_fname[k] = tp->x.tp_buf[k];
+    req_fname[k] = (char)tp->x.tp_buf[k];
     if (req_fname[k++] == '\0') {
       break;
     }
@@ -315,7 +311,7 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
     return;
   }
 
-  if (strcasecmp(&tp->x.tp_buf[k], "octet") != 0) {
+  if (strcasecmp((const char *)&tp->x.tp_buf[k], "octet") != 0) {
       tftp_send_error(spt, 4, "Unsupported transfer mode", tp);
       return;
   }
@@ -341,10 +337,10 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
       return;
   }
 
-  while (k < pktlen && nb_options < ARRAY_SIZE(option_name)) {
+  while (k < pktlen) {
       const char *key, *value;
 
-      key = &tp->x.tp_buf[k];
+      key = (const char *)&tp->x.tp_buf[k];
       k += strlen(key) + 1;
 
       if (k >= pktlen) {
@@ -352,7 +348,7 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
 	  return;
       }
 
-      value = &tp->x.tp_buf[k];
+      value = (const char *)&tp->x.tp_buf[k];
       k += strlen(value) + 1;
 
       if (strcasecmp(key, "tsize") == 0) {
@@ -368,32 +364,12 @@ static void tftp_handle_rrq(Slirp *slirp, struct tftp_t *tp, int pktlen)
 	      }
 	  }
 
-          option_name[nb_options] = "tsize";
-          option_value[nb_options] = tsize;
-          nb_options++;
-      } else if (strcasecmp(key, "blksize") == 0) {
-          int blksize = atoi(value);
-
-          /* If blksize option is bigger than what we will
-           * emit, accept the option with our packet size.
-           * Otherwise, simply do as we didn't see the option.
-           */
-          if (blksize >= 512) {
-              option_name[nb_options] = "blksize";
-              option_value[nb_options] = 512;
-              nb_options++;
-          }
+	  tftp_send_oack(spt, "tsize", tsize, tp);
+	  return;
       }
   }
 
-  if (nb_options > 0) {
-      assert(nb_options <= ARRAY_SIZE(option_name));
-      tftp_send_oack(spt, option_name, option_value, nb_options, tp);
-      return;
-  }
-
-  spt->block_nr = 0;
-  tftp_send_next_block(spt, tp);
+  tftp_send_data(spt, 1, tp);
 }
 
 static void tftp_handle_ack(Slirp *slirp, struct tftp_t *tp, int pktlen)
@@ -406,7 +382,11 @@ static void tftp_handle_ack(Slirp *slirp, struct tftp_t *tp, int pktlen)
     return;
   }
 
-  tftp_send_next_block(&slirp->tftp_sessions[s], tp);
+  if (tftp_send_data(&slirp->tftp_sessions[s],
+		     ntohs(tp->x.tp_data.tp_block_nr) + 1,
+		     tp) < 0) {
+    return;
+  }
 }
 
 static void tftp_handle_error(Slirp *slirp, struct tftp_t *tp, int pktlen)

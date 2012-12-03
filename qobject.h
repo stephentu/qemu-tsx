@@ -71,7 +71,7 @@ typedef struct QObject {
 
 /* High-level interface for qobject_decref() */
 #define QDECREF(obj)              \
-    qobject_decref(obj ? QOBJECT(obj) : NULL)
+    qobject_decref(QOBJECT(obj))
 
 /* Initialize an object to default values */
 #define QOBJECT_INIT(obj, qtype_type)   \

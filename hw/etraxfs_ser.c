@@ -24,7 +24,6 @@
 
 #include "sysbus.h"
 #include "qemu-char.h"
-#include "qemu-log.h"
 
 #define D(x)
 
@@ -47,7 +46,6 @@
 struct etrax_serial
 {
     SysBusDevice busdev;
-    MemoryRegion mmio;
     CharDriverState *chr;
     qemu_irq irq;
 
@@ -74,11 +72,10 @@ static void ser_update_irq(struct etrax_serial *s)
     qemu_set_irq(s->irq, !!s->regs[R_MASKED_INTR]);
 }
 
-static uint64_t
-ser_read(void *opaque, hwaddr addr, unsigned int size)
+static uint32_t ser_readl (void *opaque, target_phys_addr_t addr)
 {
     struct etrax_serial *s = opaque;
-    D(CPUCRISState *env = s->env);
+    D(CPUState *env = s->env);
     uint32_t r = 0;
 
     addr >>= 2;
@@ -103,27 +100,25 @@ ser_read(void *opaque, hwaddr addr, unsigned int size)
             break;
         default:
             r = s->regs[addr];
-            D(qemu_log("%s " TARGET_FMT_plx "=%x\n", __func__, addr, r));
+            D(printf ("%s " TARGET_FMT_plx "=%x\n", __func__, addr, r));
             break;
     }
     return r;
 }
 
 static void
-ser_write(void *opaque, hwaddr addr,
-          uint64_t val64, unsigned int size)
+ser_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
 {
     struct etrax_serial *s = opaque;
-    uint32_t value = val64;
-    unsigned char ch = val64;
-    D(CPUCRISState *env = s->env);
+    unsigned char ch = value;
+    D(CPUState *env = s->env);
 
-    D(qemu_log("%s " TARGET_FMT_plx "=%x\n",  __func__, addr, value));
+    D(printf ("%s " TARGET_FMT_plx "=%x\n",  __func__, addr, value));
     addr >>= 2;
     switch (addr)
     {
         case RW_DOUT:
-            qemu_chr_fe_write(s->chr, &ch, 1);
+            qemu_chr_write(s->chr, &ch, 1);
             s->regs[R_INTR] |= 3;
             s->pending_tx = 1;
             s->regs[addr] = value;
@@ -132,8 +127,7 @@ ser_write(void *opaque, hwaddr addr,
             if (s->pending_tx) {
                 value &= ~1;
                 s->pending_tx = 0;
-                D(qemu_log("fixedup value=%x r_intr=%x\n",
-                           value, s->regs[R_INTR]));
+                D(printf("fixedup value=%x r_intr=%x\n", value, s->regs[R_INTR]));
             }
             s->regs[addr] = value;
             s->regs[R_INTR] &= ~value;
@@ -146,14 +140,14 @@ ser_write(void *opaque, hwaddr addr,
     ser_update_irq(s);
 }
 
-static const MemoryRegionOps ser_ops = {
-    .read = ser_read,
-    .write = ser_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4
-    }
+static CPUReadMemoryFunc * const ser_read[] = {
+    NULL, NULL,
+    &ser_readl,
+};
+
+static CPUWriteMemoryFunc * const ser_write[] = {
+    NULL, NULL,
+    &ser_writel,
 };
 
 static void serial_receive(void *opaque, const uint8_t *buf, int size)
@@ -163,7 +157,7 @@ static void serial_receive(void *opaque, const uint8_t *buf, int size)
 
     /* Got a byte.  */
     if (s->rx_fifo_len >= 16) {
-        qemu_log("WARNING: UART dropped char.\n");
+        printf("WARNING: UART dropped char.\n");
         return;
     }
 
@@ -196,27 +190,20 @@ static void serial_event(void *opaque, int event)
 
 }
 
-static void etraxfs_ser_reset(DeviceState *d)
+static int etraxfs_ser_init(SysBusDevice *dev)
 {
-    struct etrax_serial *s = container_of(d, typeof(*s), busdev.qdev);
+    struct etrax_serial *s = FROM_SYSBUS(typeof (*s), dev);
+    int ser_regs;
 
     /* transmitter begins ready and idle.  */
     s->regs[RS_STAT_DIN] |= (1 << STAT_TR_RDY);
     s->regs[RS_STAT_DIN] |= (1 << STAT_TR_IDLE);
 
-    s->regs[RW_REC_CTRL] = 0x10000;
-
-}
-
-static int etraxfs_ser_init(SysBusDevice *dev)
-{
-    struct etrax_serial *s = FROM_SYSBUS(typeof (*s), dev);
-
     sysbus_init_irq(dev, &s->irq);
-    memory_region_init_io(&s->mmio, &ser_ops, s, "etraxfs-serial", R_MAX * 4);
-    sysbus_init_mmio(dev, &s->mmio);
-
-    s->chr = qemu_char_get_next_serial();
+    ser_regs = cpu_register_io_memory(ser_read, ser_write, s,
+                                      DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, R_MAX * 4, ser_regs);
+    s->chr = qdev_init_chardev(&dev->qdev);
     if (s->chr)
         qemu_chr_add_handlers(s->chr,
                       serial_can_receive, serial_receive,
@@ -224,25 +211,10 @@ static int etraxfs_ser_init(SysBusDevice *dev)
     return 0;
 }
 
-static void etraxfs_ser_class_init(ObjectClass *klass, void *data)
+static void etraxfs_serial_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = etraxfs_ser_init;
-    dc->reset = etraxfs_ser_reset;
+    sysbus_register_dev("etraxfs,serial", sizeof (struct etrax_serial),
+                etraxfs_ser_init);
 }
 
-static TypeInfo etraxfs_ser_info = {
-    .name          = "etraxfs,serial",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(struct etrax_serial),
-    .class_init    = etraxfs_ser_class_init,
-};
-
-static void etraxfs_serial_register_types(void)
-{
-    type_register_static(&etraxfs_ser_info);
-}
-
-type_init(etraxfs_serial_register_types)
+device_init(etraxfs_serial_register)

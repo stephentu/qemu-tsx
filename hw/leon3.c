@@ -23,14 +23,12 @@
  */
 #include "hw.h"
 #include "qemu-timer.h"
-#include "ptimer.h"
 #include "qemu-char.h"
 #include "sysemu.h"
 #include "boards.h"
 #include "loader.h"
 #include "elf.h"
 #include "trace.h"
-#include "exec-memory.h"
 
 #include "grlib.h"
 
@@ -42,16 +40,16 @@
 #define MAX_PILS 16
 
 typedef struct ResetData {
-    SPARCCPU *cpu;
+    CPUState *env;
     uint32_t  entry;            /* save kernel entry in case of reset */
 } ResetData;
 
 static void main_cpu_reset(void *opaque)
 {
     ResetData *s   = (ResetData *)opaque;
-    CPUSPARCState  *env = &s->cpu->env;
+    CPUState  *env = s->env;
 
-    cpu_reset(CPU(s->cpu));
+    cpu_reset(env);
 
     env->halted = 0;
     env->pc     = s->entry;
@@ -65,7 +63,7 @@ void leon3_irq_ack(void *irq_manager, int intno)
 
 static void leon3_set_pil_in(void *opaque, uint32_t pil_in)
 {
-    CPUSPARCState *env = (CPUSPARCState *)opaque;
+    CPUState *env = (CPUState *)opaque;
 
     assert(env != NULL);
 
@@ -94,16 +92,15 @@ static void leon3_set_pil_in(void *opaque, uint32_t pil_in)
     }
 }
 
-static void leon3_generic_hw_init(QEMUMachineInitArgs *args)
+static void leon3_generic_hw_init(ram_addr_t  ram_size,
+                                  const char *boot_device,
+                                  const char *kernel_filename,
+                                  const char *kernel_cmdline,
+                                  const char *initrd_filename,
+                                  const char *cpu_model)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    SPARCCPU *cpu;
-    CPUSPARCState   *env;
-    MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
-    MemoryRegion *prom = g_new(MemoryRegion, 1);
+    CPUState   *env;
+    ram_addr_t  ram_offset, prom_offset;
     int         ret;
     char       *filename;
     qemu_irq   *cpu_irqs = NULL;
@@ -116,18 +113,17 @@ static void leon3_generic_hw_init(QEMUMachineInitArgs *args)
         cpu_model = "LEON3";
     }
 
-    cpu = cpu_sparc_init(cpu_model);
-    if (cpu == NULL) {
+    env = cpu_init(cpu_model);
+    if (!env) {
         fprintf(stderr, "qemu: Unable to find Sparc CPU definition\n");
         exit(1);
     }
-    env = &cpu->env;
 
     cpu_sparc_set_id(env, 0);
 
     /* Reset data */
-    reset_info        = g_malloc0(sizeof(ResetData));
-    reset_info->cpu   = cpu;
+    reset_info        = qemu_mallocz(sizeof(ResetData));
+    reset_info->env   = env;
     qemu_register_reset(main_cpu_reset, reset_info);
 
     /* Allocate IRQ manager */
@@ -143,16 +139,14 @@ static void leon3_generic_hw_init(QEMUMachineInitArgs *args)
         exit(1);
     }
 
-    memory_region_init_ram(ram, "leon3.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_add_subregion(address_space_mem, 0x40000000, ram);
+    ram_offset = qemu_ram_alloc(NULL, "leon3.ram", ram_size);
+    cpu_register_physical_memory(0x40000000, ram_size, ram_offset | IO_MEM_RAM);
 
     /* Allocate BIOS */
     prom_size = 8 * 1024 * 1024; /* 8Mb */
-    memory_region_init_ram(prom, "Leon3.bios", prom_size);
-    vmstate_register_ram_global(prom);
-    memory_region_set_readonly(prom, true);
-    memory_region_add_subregion(address_space_mem, 0x00000000, prom);
+    prom_offset = qemu_ram_alloc(NULL, "Leon3.bios", prom_size);
+    cpu_register_physical_memory(0x00000000, prom_size,
+                                 prom_offset | IO_MEM_ROM);
 
     /* Load boot prom */
     if (bios_name == NULL) {
@@ -208,7 +202,7 @@ static void leon3_generic_hw_init(QEMUMachineInitArgs *args)
     }
 }
 
-static QEMUMachine leon3_generic_machine = {
+QEMUMachine leon3_generic_machine = {
     .name     = "leon3_generic",
     .desc     = "Leon-3 generic",
     .init     = leon3_generic_hw_init,

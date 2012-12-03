@@ -5,30 +5,26 @@
  * Copyright (c) 2006 Thorsten Zitterell
  * Written by Andrzej Zaborowski <balrog@zabor.org>
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "hw.h"
 #include "pxa.h"
-#include "sysbus.h"
-
-#define PXA255_DMA_NUM_CHANNELS 16
-#define PXA27X_DMA_NUM_CHANNELS 32
-
-#define PXA2XX_DMA_NUM_REQUESTS 75
 
 typedef struct {
-    uint32_t descr;
-    uint32_t src;
-    uint32_t dest;
+    target_phys_addr_t descr;
+    target_phys_addr_t src;
+    target_phys_addr_t dest;
     uint32_t cmd;
     uint32_t state;
     int request;
 } PXA2xxDMAChannel;
 
-typedef struct PXA2xxDMAState {
-    SysBusDevice busdev;
-    MemoryRegion iomem;
+/* Allow the DMA to be used as a PIC.  */
+typedef void (*pxa2xx_dma_handler_t)(void *opaque, int irq, int level);
+
+struct PXA2xxDMAState {
+    pxa2xx_dma_handler_t handler;
     qemu_irq irq;
 
     uint32_t stopintr;
@@ -43,11 +39,16 @@ typedef struct PXA2xxDMAState {
     int channels;
     PXA2xxDMAChannel *chan;
 
-    uint8_t req[PXA2XX_DMA_NUM_REQUESTS];
+    uint8_t *req;
 
     /* Flag to avoid recursive DMA invocations.  */
     int running;
-} PXA2xxDMAState;
+};
+
+#define PXA255_DMA_NUM_CHANNELS	16
+#define PXA27X_DMA_NUM_CHANNELS	32
+
+#define PXA2XX_DMA_NUM_REQUESTS	75
 
 #define DCSR0	0x0000	/* DMA Control / Status register for Channel 0 */
 #define DCSR31	0x007c	/* DMA Control / Status register for Channel 31 */
@@ -147,7 +148,7 @@ static inline void pxa2xx_dma_descriptor_fetch(
                 PXA2xxDMAState *s, int ch)
 {
     uint32_t desc[4];
-    hwaddr daddr = s->chan[ch].descr & ~0xf;
+    target_phys_addr_t daddr = s->chan[ch].descr & ~0xf;
     if ((s->chan[ch].descr & DDADR_BREN) && (s->chan[ch].state & DCSR_CMPST))
         daddr += 32;
 
@@ -251,16 +252,10 @@ static void pxa2xx_dma_run(PXA2xxDMAState *s)
     }
 }
 
-static uint64_t pxa2xx_dma_read(void *opaque, hwaddr offset,
-                                unsigned size)
+static uint32_t pxa2xx_dma_read(void *opaque, target_phys_addr_t offset)
 {
     PXA2xxDMAState *s = (PXA2xxDMAState *) opaque;
     unsigned int channel;
-
-    if (size != 4) {
-        hw_error("%s: Bad access width\n", __FUNCTION__);
-        return 5;
-    }
 
     switch (offset) {
     case DRCMR64 ... DRCMR74:
@@ -310,16 +305,11 @@ static uint64_t pxa2xx_dma_read(void *opaque, hwaddr offset,
     return 7;
 }
 
-static void pxa2xx_dma_write(void *opaque, hwaddr offset,
-                             uint64_t value, unsigned size)
+static void pxa2xx_dma_write(void *opaque,
+                 target_phys_addr_t offset, uint32_t value)
 {
     PXA2xxDMAState *s = (PXA2xxDMAState *) opaque;
     unsigned int channel;
-
-    if (size != 4) {
-        hw_error("%s: Bad access width\n", __FUNCTION__);
-        return;
-    }
 
     switch (offset) {
     case DRCMR64 ... DRCMR74:
@@ -331,7 +321,7 @@ static void pxa2xx_dma_write(void *opaque, hwaddr offset,
         if (value & DRCMR_MAPVLD)
             if ((value & DRCMR_CHLNUM) > s->channels)
                 hw_error("%s: Bad DMA channel %i\n",
-                         __FUNCTION__, (unsigned)value & DRCMR_CHLNUM);
+                         __FUNCTION__, value & DRCMR_CHLNUM);
 
         s->req[channel] = value;
         break;
@@ -414,15 +404,128 @@ static void pxa2xx_dma_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps pxa2xx_dma_ops = {
-    .read = pxa2xx_dma_read,
-    .write = pxa2xx_dma_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static uint32_t pxa2xx_dma_readbad(void *opaque, target_phys_addr_t offset)
+{
+    hw_error("%s: Bad access width\n", __FUNCTION__);
+    return 5;
+}
+
+static void pxa2xx_dma_writebad(void *opaque,
+                 target_phys_addr_t offset, uint32_t value)
+{
+    hw_error("%s: Bad access width\n", __FUNCTION__);
+}
+
+static CPUReadMemoryFunc * const pxa2xx_dma_readfn[] = {
+    pxa2xx_dma_readbad,
+    pxa2xx_dma_readbad,
+    pxa2xx_dma_read
 };
 
-static void pxa2xx_dma_request(void *opaque, int req_num, int on)
+static CPUWriteMemoryFunc * const pxa2xx_dma_writefn[] = {
+    pxa2xx_dma_writebad,
+    pxa2xx_dma_writebad,
+    pxa2xx_dma_write
+};
+
+static void pxa2xx_dma_save(QEMUFile *f, void *opaque)
 {
-    PXA2xxDMAState *s = opaque;
+    PXA2xxDMAState *s = (PXA2xxDMAState *) opaque;
+    int i;
+
+    qemu_put_be32(f, s->channels);
+
+    qemu_put_be32s(f, &s->stopintr);
+    qemu_put_be32s(f, &s->eorintr);
+    qemu_put_be32s(f, &s->rasintr);
+    qemu_put_be32s(f, &s->startintr);
+    qemu_put_be32s(f, &s->endintr);
+    qemu_put_be32s(f, &s->align);
+    qemu_put_be32s(f, &s->pio);
+
+    qemu_put_buffer(f, s->req, PXA2XX_DMA_NUM_REQUESTS);
+    for (i = 0; i < s->channels; i ++) {
+        qemu_put_betl(f, s->chan[i].descr);
+        qemu_put_betl(f, s->chan[i].src);
+        qemu_put_betl(f, s->chan[i].dest);
+        qemu_put_be32s(f, &s->chan[i].cmd);
+        qemu_put_be32s(f, &s->chan[i].state);
+        qemu_put_be32(f, s->chan[i].request);
+    };
+}
+
+static int pxa2xx_dma_load(QEMUFile *f, void *opaque, int version_id)
+{
+    PXA2xxDMAState *s = (PXA2xxDMAState *) opaque;
+    int i;
+
+    if (qemu_get_be32(f) != s->channels)
+        return -EINVAL;
+
+    qemu_get_be32s(f, &s->stopintr);
+    qemu_get_be32s(f, &s->eorintr);
+    qemu_get_be32s(f, &s->rasintr);
+    qemu_get_be32s(f, &s->startintr);
+    qemu_get_be32s(f, &s->endintr);
+    qemu_get_be32s(f, &s->align);
+    qemu_get_be32s(f, &s->pio);
+
+    qemu_get_buffer(f, s->req, PXA2XX_DMA_NUM_REQUESTS);
+    for (i = 0; i < s->channels; i ++) {
+        s->chan[i].descr = qemu_get_betl(f);
+        s->chan[i].src = qemu_get_betl(f);
+        s->chan[i].dest = qemu_get_betl(f);
+        qemu_get_be32s(f, &s->chan[i].cmd);
+        qemu_get_be32s(f, &s->chan[i].state);
+        s->chan[i].request = qemu_get_be32(f);
+    };
+
+    return 0;
+}
+
+static PXA2xxDMAState *pxa2xx_dma_init(target_phys_addr_t base,
+                qemu_irq irq, int channels)
+{
+    int i, iomemtype;
+    PXA2xxDMAState *s;
+    s = (PXA2xxDMAState *)
+            qemu_mallocz(sizeof(PXA2xxDMAState));
+
+    s->channels = channels;
+    s->chan = qemu_mallocz(sizeof(PXA2xxDMAChannel) * s->channels);
+    s->irq = irq;
+    s->handler = (pxa2xx_dma_handler_t) pxa2xx_dma_request;
+    s->req = qemu_mallocz(sizeof(uint8_t) * PXA2XX_DMA_NUM_REQUESTS);
+
+    memset(s->chan, 0, sizeof(PXA2xxDMAChannel) * s->channels);
+    for (i = 0; i < s->channels; i ++)
+        s->chan[i].state = DCSR_STOPINTR;
+
+    memset(s->req, 0, sizeof(uint8_t) * PXA2XX_DMA_NUM_REQUESTS);
+
+    iomemtype = cpu_register_io_memory(pxa2xx_dma_readfn,
+                    pxa2xx_dma_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x00010000, iomemtype);
+
+    register_savevm(NULL, "pxa2xx_dma", 0, 0, pxa2xx_dma_save, pxa2xx_dma_load, s);
+
+    return s;
+}
+
+PXA2xxDMAState *pxa27x_dma_init(target_phys_addr_t base,
+                qemu_irq irq)
+{
+    return pxa2xx_dma_init(base, irq, PXA27X_DMA_NUM_CHANNELS);
+}
+
+PXA2xxDMAState *pxa255_dma_init(target_phys_addr_t base,
+                qemu_irq irq)
+{
+    return pxa2xx_dma_init(base, irq, PXA255_DMA_NUM_CHANNELS);
+}
+
+void pxa2xx_dma_request(PXA2xxDMAState *s, int req_num, int on)
+{
     int ch;
     if (req_num < 0 || req_num >= PXA2XX_DMA_NUM_REQUESTS)
         hw_error("%s: Bad DMA request %i\n", __FUNCTION__, req_num);
@@ -444,131 +547,3 @@ static void pxa2xx_dma_request(void *opaque, int req_num, int on)
         pxa2xx_dma_update(s, ch);
     }
 }
-
-static int pxa2xx_dma_init(SysBusDevice *dev)
-{
-    int i;
-    PXA2xxDMAState *s;
-    s = FROM_SYSBUS(PXA2xxDMAState, dev);
-
-    if (s->channels <= 0) {
-        return -1;
-    }
-
-    s->chan = g_malloc0(sizeof(PXA2xxDMAChannel) * s->channels);
-
-    memset(s->chan, 0, sizeof(PXA2xxDMAChannel) * s->channels);
-    for (i = 0; i < s->channels; i ++)
-        s->chan[i].state = DCSR_STOPINTR;
-
-    memset(s->req, 0, sizeof(uint8_t) * PXA2XX_DMA_NUM_REQUESTS);
-
-    qdev_init_gpio_in(&dev->qdev, pxa2xx_dma_request, PXA2XX_DMA_NUM_REQUESTS);
-
-    memory_region_init_io(&s->iomem, &pxa2xx_dma_ops, s,
-                          "pxa2xx.dma", 0x00010000);
-    sysbus_init_mmio(dev, &s->iomem);
-    sysbus_init_irq(dev, &s->irq);
-
-    return 0;
-}
-
-DeviceState *pxa27x_dma_init(hwaddr base, qemu_irq irq)
-{
-    DeviceState *dev;
-
-    dev = qdev_create(NULL, "pxa2xx-dma");
-    qdev_prop_set_int32(dev, "channels", PXA27X_DMA_NUM_CHANNELS);
-    qdev_init_nofail(dev);
-
-    sysbus_mmio_map(sysbus_from_qdev(dev), 0, base);
-    sysbus_connect_irq(sysbus_from_qdev(dev), 0, irq);
-
-    return dev;
-}
-
-DeviceState *pxa255_dma_init(hwaddr base, qemu_irq irq)
-{
-    DeviceState *dev;
-
-    dev = qdev_create(NULL, "pxa2xx-dma");
-    qdev_prop_set_int32(dev, "channels", PXA27X_DMA_NUM_CHANNELS);
-    qdev_init_nofail(dev);
-
-    sysbus_mmio_map(sysbus_from_qdev(dev), 0, base);
-    sysbus_connect_irq(sysbus_from_qdev(dev), 0, irq);
-
-    return dev;
-}
-
-static bool is_version_0(void *opaque, int version_id)
-{
-    return version_id == 0;
-}
-
-static VMStateDescription vmstate_pxa2xx_dma_chan = {
-    .name = "pxa2xx_dma_chan",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT32(descr, PXA2xxDMAChannel),
-        VMSTATE_UINT32(src, PXA2xxDMAChannel),
-        VMSTATE_UINT32(dest, PXA2xxDMAChannel),
-        VMSTATE_UINT32(cmd, PXA2xxDMAChannel),
-        VMSTATE_UINT32(state, PXA2xxDMAChannel),
-        VMSTATE_INT32(request, PXA2xxDMAChannel),
-        VMSTATE_END_OF_LIST(),
-    },
-};
-
-static VMStateDescription vmstate_pxa2xx_dma = {
-    .name = "pxa2xx_dma",
-    .version_id = 1,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields = (VMStateField[]) {
-        VMSTATE_UNUSED_TEST(is_version_0, 4),
-        VMSTATE_UINT32(stopintr, PXA2xxDMAState),
-        VMSTATE_UINT32(eorintr, PXA2xxDMAState),
-        VMSTATE_UINT32(rasintr, PXA2xxDMAState),
-        VMSTATE_UINT32(startintr, PXA2xxDMAState),
-        VMSTATE_UINT32(endintr, PXA2xxDMAState),
-        VMSTATE_UINT32(align, PXA2xxDMAState),
-        VMSTATE_UINT32(pio, PXA2xxDMAState),
-        VMSTATE_BUFFER(req, PXA2xxDMAState),
-        VMSTATE_STRUCT_VARRAY_POINTER_INT32(chan, PXA2xxDMAState, channels,
-                vmstate_pxa2xx_dma_chan, PXA2xxDMAChannel),
-        VMSTATE_END_OF_LIST(),
-    },
-};
-
-static Property pxa2xx_dma_properties[] = {
-    DEFINE_PROP_INT32("channels", PXA2xxDMAState, channels, -1),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void pxa2xx_dma_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = pxa2xx_dma_init;
-    dc->desc = "PXA2xx DMA controller";
-    dc->vmsd = &vmstate_pxa2xx_dma;
-    dc->props = pxa2xx_dma_properties;
-}
-
-static TypeInfo pxa2xx_dma_info = {
-    .name          = "pxa2xx-dma",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(PXA2xxDMAState),
-    .class_init    = pxa2xx_dma_class_init,
-};
-
-static void pxa2xx_dma_register_types(void)
-{
-    type_register_static(&pxa2xx_dma_info);
-}
-
-type_init(pxa2xx_dma_register_types)

@@ -16,6 +16,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "hw.h"
+#include "pxa.h"
 #include "sharpsl.h"
 #include "sysbus.h"
 
@@ -28,7 +29,6 @@ typedef struct ScoopInfo ScoopInfo;
 struct ScoopInfo {
     SysBusDevice busdev;
     qemu_irq handler[16];
-    MemoryRegion iomem;
     uint16_t status;
     uint16_t power;
     uint32_t gpio_level;
@@ -68,8 +68,7 @@ static inline void scoop_gpio_handler_update(ScoopInfo *s) {
     s->prev_level = level;
 }
 
-static uint64_t scoop_read(void *opaque, hwaddr addr,
-                           unsigned size)
+static uint32_t scoop_readb(void *opaque, target_phys_addr_t addr)
 {
     ScoopInfo *s = (ScoopInfo *) opaque;
 
@@ -102,8 +101,7 @@ static uint64_t scoop_read(void *opaque, hwaddr addr,
     return 0;
 }
 
-static void scoop_write(void *opaque, hwaddr addr,
-                        uint64_t value, unsigned size)
+static void scoop_writeb(void *opaque, target_phys_addr_t addr, uint32_t value)
 {
     ScoopInfo *s = (ScoopInfo *) opaque;
     value &= 0xffff;
@@ -146,10 +144,15 @@ static void scoop_write(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps scoop_ops = {
-    .read = scoop_read,
-    .write = scoop_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const scoop_readfn[] = {
+    scoop_readb,
+    scoop_readb,
+    scoop_readb,
+};
+static CPUWriteMemoryFunc * const scoop_writefn[] = {
+    scoop_writeb,
+    scoop_writeb,
+    scoop_writeb,
 };
 
 static void scoop_gpio_set(void *opaque, int line, int level)
@@ -165,30 +168,15 @@ static void scoop_gpio_set(void *opaque, int line, int level)
 static int scoop_init(SysBusDevice *dev)
 {
     ScoopInfo *s = FROM_SYSBUS(ScoopInfo, dev);
+    int iomemtype;
 
     s->status = 0x02;
     qdev_init_gpio_out(&s->busdev.qdev, s->handler, 16);
     qdev_init_gpio_in(&s->busdev.qdev, scoop_gpio_set, 16);
-    memory_region_init_io(&s->iomem, &scoop_ops, s, "scoop", 0x1000);
+    iomemtype = cpu_register_io_memory(scoop_readfn,
+                    scoop_writefn, s, DEVICE_NATIVE_ENDIAN);
 
-    sysbus_init_mmio(dev, &s->iomem);
-
-    return 0;
-}
-
-static int scoop_post_load(void *opaque, int version_id)
-{
-    ScoopInfo *s = (ScoopInfo *) opaque;
-    int i;
-    uint32_t level;
-
-    level = s->gpio_level & s->gpio_dir;
-
-    for (i = 0; i < 16; i++) {
-        qemu_set_irq(s->handler[i], (level >> i) & 1);
-    }
-
-    s->prev_level = level;
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
 
     return 0;
 }
@@ -198,12 +186,12 @@ static bool is_version_0 (void *opaque, int version_id)
     return version_id == 0;
 }
 
+
 static const VMStateDescription vmstate_scoop_regs = {
     .name = "scoop",
     .version_id = 1,
     .minimum_version_id = 0,
     .minimum_version_id_old = 0,
-    .post_load = scoop_post_load,
     .fields = (VMStateField []) {
         VMSTATE_UINT16(status, ScoopInfo),
         VMSTATE_UINT16(power, ScoopInfo),
@@ -221,40 +209,28 @@ static const VMStateDescription vmstate_scoop_regs = {
     },
 };
 
-static Property scoop_sysbus_properties[] = {
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo scoop_sysbus_info = {
+    .init           = scoop_init,
+    .qdev.name      = "scoop",
+    .qdev.desc      = "Scoop2 Sharp custom ASIC",
+    .qdev.size      = sizeof(ScoopInfo),
+    .qdev.vmsd      = &vmstate_scoop_regs,
+    .qdev.props     = (Property[]) {
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void scoop_sysbus_class_init(ObjectClass *klass, void *data)
+static void scoop_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = scoop_init;
-    dc->desc = "Scoop2 Sharp custom ASIC";
-    dc->vmsd = &vmstate_scoop_regs;
-    dc->props = scoop_sysbus_properties;
+    sysbus_register_withprop(&scoop_sysbus_info);
 }
-
-static TypeInfo scoop_sysbus_info = {
-    .name          = "scoop",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(ScoopInfo),
-    .class_init    = scoop_sysbus_class_init,
-};
-
-static void scoop_register_types(void)
-{
-    type_register_static(&scoop_sysbus_info);
-}
-
-type_init(scoop_register_types)
+device_init(scoop_register);
 
 /* Write the bootloader parameters memory area.  */
 
 #define MAGIC_CHG(a, b, c, d)	((d << 24) | (c << 16) | (b << 8) | a)
 
-static struct QEMU_PACKED sl_param_info {
+static struct __attribute__ ((__packed__)) sl_param_info {
     uint32_t comadj_keyword;
     int32_t comadj;
 
@@ -285,7 +261,7 @@ static struct QEMU_PACKED sl_param_info {
     .phadadj		= 0x01,
 };
 
-void sl_bootparam_write(hwaddr ptr)
+void sl_bootparam_write(target_phys_addr_t ptr)
 {
     cpu_physical_memory_write(ptr, (void *)&zaurus_bootparam,
                               sizeof(struct sl_param_info));

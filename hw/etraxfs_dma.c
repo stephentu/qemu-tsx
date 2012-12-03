@@ -24,7 +24,6 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include "hw.h"
-#include "exec-memory.h"
 #include "qemu-common.h"
 #include "sysemu.h"
 
@@ -180,13 +179,13 @@ struct fs_dma_channel
 	struct dma_descr_context current_c;
 	struct dma_descr_data current_d;
 
-	/* Control registers.  */
+	/* Controll registers.  */
 	uint32_t regs[DMA_REG_MAX];
 };
 
 struct fs_dma_ctrl
 {
-	MemoryRegion mmio;
+	int map;
 	int nr_channels;
 	struct fs_dma_channel *channels;
 
@@ -212,7 +211,7 @@ static inline int channel_en(struct fs_dma_ctrl *ctrl, int c)
 		&& ctrl->channels[c].client;
 }
 
-static inline int fs_channel(hwaddr addr)
+static inline int fs_channel(target_phys_addr_t addr)
 {
 	/* Every channel has a 0x2000 ctrl register map.  */
 	return addr >> 13;
@@ -221,7 +220,7 @@ static inline int fs_channel(hwaddr addr)
 #ifdef USE_THIS_DEAD_CODE
 static void channel_load_g(struct fs_dma_ctrl *ctrl, int c)
 {
-	hwaddr addr = channel_reg(ctrl, c, RW_GROUP);
+	target_phys_addr_t addr = channel_reg(ctrl, c, RW_GROUP);
 
 	/* Load and decode. FIXME: handle endianness.  */
 	cpu_physical_memory_read (addr, 
@@ -253,7 +252,7 @@ static void dump_d(int ch, struct dma_descr_data *d)
 
 static void channel_load_c(struct fs_dma_ctrl *ctrl, int c)
 {
-	hwaddr addr = channel_reg(ctrl, c, RW_GROUP_DOWN);
+	target_phys_addr_t addr = channel_reg(ctrl, c, RW_GROUP_DOWN);
 
 	/* Load and decode. FIXME: handle endianness.  */
 	cpu_physical_memory_read (addr, 
@@ -270,7 +269,7 @@ static void channel_load_c(struct fs_dma_ctrl *ctrl, int c)
 
 static void channel_load_d(struct fs_dma_ctrl *ctrl, int c)
 {
-	hwaddr addr = channel_reg(ctrl, c, RW_SAVED_DATA);
+	target_phys_addr_t addr = channel_reg(ctrl, c, RW_SAVED_DATA);
 
 	/* Load and decode. FIXME: handle endianness.  */
 	D(printf("%s ch=%d addr=" TARGET_FMT_plx "\n", __func__, c, addr));
@@ -284,7 +283,7 @@ static void channel_load_d(struct fs_dma_ctrl *ctrl, int c)
 
 static void channel_store_c(struct fs_dma_ctrl *ctrl, int c)
 {
-	hwaddr addr = channel_reg(ctrl, c, RW_GROUP_DOWN);
+	target_phys_addr_t addr = channel_reg(ctrl, c, RW_GROUP_DOWN);
 
 	/* Encode and store. FIXME: handle endianness.  */
 	D(printf("%s ch=%d addr=" TARGET_FMT_plx "\n", __func__, c, addr));
@@ -296,7 +295,7 @@ static void channel_store_c(struct fs_dma_ctrl *ctrl, int c)
 
 static void channel_store_d(struct fs_dma_ctrl *ctrl, int c)
 {
-	hwaddr addr = channel_reg(ctrl, c, RW_SAVED_DATA);
+	target_phys_addr_t addr = channel_reg(ctrl, c, RW_SAVED_DATA);
 
 	/* Encode and store. FIXME: handle endianness.  */
 	D(printf("%s ch=%d addr=" TARGET_FMT_plx "\n", __func__, c, addr));
@@ -401,28 +400,14 @@ static int channel_out_run(struct fs_dma_ctrl *ctrl, int c)
 	uint32_t saved_data_buf;
 	unsigned char buf[2 * 1024];
 
-	struct dma_context_metadata meta;
-	bool send_context = true;
-
 	if (ctrl->channels[c].eol)
 		return 0;
 
 	do {
-		bool out_eop;
 		D(printf("ch=%d buf=%x after=%x\n",
 			 c,
 			 (uint32_t)ctrl->channels[c].current_d.buf,
 			 (uint32_t)ctrl->channels[c].current_d.after));
-
-		if (send_context) {
-			if (ctrl->channels[c].client->client.metadata_push) {
-				meta.metadata = ctrl->channels[c].current_d.md;
-				ctrl->channels[c].client->client.metadata_push(
-					ctrl->channels[c].client->client.opaque,
-					&meta);
-			}
-			send_context = false;
-		}
 
 		channel_load_d(ctrl, c);
 		saved_data_buf = channel_reg(ctrl, c, RW_SAVED_DATA_BUF);
@@ -434,17 +419,13 @@ static int channel_out_run(struct fs_dma_ctrl *ctrl, int c)
 			len = sizeof buf;
 		cpu_physical_memory_read (saved_data_buf, buf, len);
 
-		out_eop = ((saved_data_buf + len) ==
-		           ctrl->channels[c].current_d.after) &&
-			ctrl->channels[c].current_d.out_eop;
-
-		D(printf("channel %d pushes %x %u bytes eop=%u\n", c,
-		         saved_data_buf, len, out_eop));
+		D(printf("channel %d pushes %x %u bytes\n", c, 
+			 saved_data_buf, len));
 
 		if (ctrl->channels[c].client->client.push)
 			ctrl->channels[c].client->client.push(
 				ctrl->channels[c].client->client.opaque,
-				buf, len, out_eop);
+				buf, len);
 		else
 			printf("WARNING: DMA ch%d dataloss,"
 			       " no attached client.\n", c);
@@ -455,9 +436,11 @@ static int channel_out_run(struct fs_dma_ctrl *ctrl, int c)
 				ctrl->channels[c].current_d.after) {
 			/* Done. Step to next.  */
 			if (ctrl->channels[c].current_d.out_eop) {
-				send_context = true;
+				/* TODO: signal eop to the client.  */
+				D(printf("signal eop\n"));
 			}
 			if (ctrl->channels[c].current_d.intr) {
+				/* TODO: signal eop to the client.  */
 				/* data intr.  */
 				D(printf("signal intr %d eol=%d\n",
 					len, ctrl->channels[c].current_d.eol));
@@ -573,22 +556,18 @@ static inline int channel_in_run(struct fs_dma_ctrl *ctrl, int c)
 		return 0;
 }
 
-static uint32_t dma_rinvalid (void *opaque, hwaddr addr)
+static uint32_t dma_rinvalid (void *opaque, target_phys_addr_t addr)
 {
         hw_error("Unsupported short raccess. reg=" TARGET_FMT_plx "\n", addr);
         return 0;
 }
 
-static uint64_t
-dma_read(void *opaque, hwaddr addr, unsigned int size)
+static uint32_t
+dma_readl (void *opaque, target_phys_addr_t addr)
 {
         struct fs_dma_ctrl *ctrl = opaque;
 	int c;
 	uint32_t r = 0;
-
-	if (size != 4) {
-		dma_rinvalid(opaque, addr);
-	}
 
 	/* Make addr relative to this channel and bounded to nr regs.  */
 	c = fs_channel(addr);
@@ -612,7 +591,7 @@ dma_read(void *opaque, hwaddr addr, unsigned int size)
 }
 
 static void
-dma_winvalid (void *opaque, hwaddr addr, uint32_t value)
+dma_winvalid (void *opaque, target_phys_addr_t addr, uint32_t value)
 {
         hw_error("Unsupported short waccess. reg=" TARGET_FMT_plx "\n", addr);
 }
@@ -620,23 +599,19 @@ dma_winvalid (void *opaque, hwaddr addr, uint32_t value)
 static void
 dma_update_state(struct fs_dma_ctrl *ctrl, int c)
 {
-	if (ctrl->channels[c].regs[RW_CFG] & 2)
-		ctrl->channels[c].state = STOPPED;
-	if (!(ctrl->channels[c].regs[RW_CFG] & 1))
-		ctrl->channels[c].state = RST;
+	if ((ctrl->channels[c].regs[RW_CFG] & 1) != 3) {
+		if (ctrl->channels[c].regs[RW_CFG] & 2)
+			ctrl->channels[c].state = STOPPED;
+		if (!(ctrl->channels[c].regs[RW_CFG] & 1))
+			ctrl->channels[c].state = RST;
+	}
 }
 
 static void
-dma_write(void *opaque, hwaddr addr,
-	  uint64_t val64, unsigned int size)
+dma_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
 {
         struct fs_dma_ctrl *ctrl = opaque;
-	uint32_t value = val64;
 	int c;
-
-	if (size != 4) {
-		dma_winvalid(opaque, addr, value);
-	}
 
         /* Make addr relative to this channel and bounded to nr regs.  */
 	c = fs_channel(addr);
@@ -693,14 +668,16 @@ dma_write(void *opaque, hwaddr addr,
         }
 }
 
-static const MemoryRegionOps dma_ops = {
-	.read = dma_read,
-	.write = dma_write,
-	.endianness = DEVICE_NATIVE_ENDIAN,
-	.valid = {
-		.min_access_size = 1,
-		.max_access_size = 4
-	}
+static CPUReadMemoryFunc * const dma_read[] = {
+	&dma_rinvalid,
+	&dma_rinvalid,
+	&dma_readl,
+};
+
+static CPUWriteMemoryFunc * const dma_write[] = {
+	&dma_winvalid,
+	&dma_winvalid,
+	&dma_writel,
 };
 
 static int etraxfs_dmac_run(void *opaque)
@@ -755,27 +732,25 @@ static void DMA_run(void *opaque)
     struct fs_dma_ctrl *etraxfs_dmac = opaque;
     int p = 1;
 
-    if (runstate_is_running())
+    if (vm_running)
         p = etraxfs_dmac_run(etraxfs_dmac);
 
     if (p)
         qemu_bh_schedule_idle(etraxfs_dmac->bh);
 }
 
-void *etraxfs_dmac_init(hwaddr base, int nr_channels)
+void *etraxfs_dmac_init(target_phys_addr_t base, int nr_channels)
 {
 	struct fs_dma_ctrl *ctrl = NULL;
 
-	ctrl = g_malloc0(sizeof *ctrl);
+	ctrl = qemu_mallocz(sizeof *ctrl);
 
         ctrl->bh = qemu_bh_new(DMA_run, ctrl);
 
 	ctrl->nr_channels = nr_channels;
-	ctrl->channels = g_malloc0(sizeof ctrl->channels[0] * nr_channels);
+	ctrl->channels = qemu_mallocz(sizeof ctrl->channels[0] * nr_channels);
 
-	memory_region_init_io(&ctrl->mmio, &dma_ops, ctrl, "etraxfs-dma",
-			      nr_channels * 0x2000);
-	memory_region_add_subregion(get_system_memory(), base, &ctrl->mmio);
-
+	ctrl->map = cpu_register_io_memory(dma_read, dma_write, ctrl, DEVICE_NATIVE_ENDIAN);
+	cpu_register_physical_memory(base, nr_channels * 0x2000, ctrl->map);
 	return ctrl;
 }

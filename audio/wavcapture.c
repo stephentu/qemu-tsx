@@ -3,7 +3,7 @@
 #include "audio.h"
 
 typedef struct {
-    FILE *f;
+    QEMUFile *f;
     int bytes;
     char *path;
     int freq;
@@ -35,50 +35,27 @@ static void wav_destroy (void *opaque)
     uint8_t dlen[4];
     uint32_t datalen = wav->bytes;
     uint32_t rifflen = datalen + 36;
-    Monitor *mon = cur_mon;
 
     if (wav->f) {
         le_store (rlen, rifflen, 4);
         le_store (dlen, datalen, 4);
 
-        if (fseek (wav->f, 4, SEEK_SET)) {
-            monitor_printf (mon, "wav_destroy: rlen fseek failed\nReason: %s\n",
-                            strerror (errno));
-            goto doclose;
-        }
-        if (fwrite (rlen, 4, 1, wav->f) != 1) {
-            monitor_printf (mon, "wav_destroy: rlen fwrite failed\nReason %s\n",
-                            strerror (errno));
-            goto doclose;
-        }
-        if (fseek (wav->f, 32, SEEK_CUR)) {
-            monitor_printf (mon, "wav_destroy: dlen fseek failed\nReason %s\n",
-                            strerror (errno));
-            goto doclose;
-        }
-        if (fwrite (dlen, 1, 4, wav->f) != 4) {
-            monitor_printf (mon, "wav_destroy: dlen fwrite failed\nReason %s\n",
-                            strerror (errno));
-            goto doclose;
-        }
-    doclose:
-        if (fclose (wav->f)) {
-            fprintf (stderr, "wav_destroy: fclose failed: %s",
-                     strerror (errno));
-        }
+        qemu_fseek (wav->f, 4, SEEK_SET);
+        qemu_put_buffer (wav->f, rlen, 4);
+
+        qemu_fseek (wav->f, 32, SEEK_CUR);
+        qemu_put_buffer (wav->f, dlen, 4);
+        qemu_fclose (wav->f);
     }
 
-    g_free (wav->path);
+    qemu_free (wav->path);
 }
 
 static void wav_capture (void *opaque, void *buf, int size)
 {
     WAVState *wav = opaque;
 
-    if (fwrite (buf, size, 1, wav->f) != 1) {
-        monitor_printf (cur_mon, "wav_capture: fwrite error\nReason: %s",
-                        strerror (errno));
-    }
+    qemu_put_buffer (wav->f, buf, size);
     wav->bytes += size;
 }
 
@@ -94,9 +71,9 @@ static void wav_capture_info (void *opaque)
     WAVState *wav = opaque;
     char *path = wav->path;
 
-    monitor_printf (cur_mon, "Capturing audio(%d,%d,%d) to %s: %d bytes\n",
-                    wav->freq, wav->bits, wav->nchannels,
-                    path ? path : "<not available>", wav->bytes);
+    monitor_printf(cur_mon, "Capturing audio(%d,%d,%d) to %s: %d bytes\n",
+                   wav->freq, wav->bits, wav->nchannels,
+                   path ? path : "<not available>", wav->bytes);
 }
 
 static struct capture_ops wav_capture_ops = {
@@ -121,13 +98,13 @@ int wav_start_capture (CaptureState *s, const char *path, int freq,
     CaptureVoiceOut *cap;
 
     if (bits != 8 && bits != 16) {
-        monitor_printf (mon, "incorrect bit count %d, must be 8 or 16\n", bits);
+        monitor_printf(mon, "incorrect bit count %d, must be 8 or 16\n", bits);
         return -1;
     }
 
     if (nchannels != 1 && nchannels != 2) {
-        monitor_printf (mon, "incorrect channel count %d, must be 1 or 2\n",
-                        nchannels);
+        monitor_printf(mon, "incorrect channel count %d, must be 1 or 2\n",
+                       nchannels);
         return -1;
     }
 
@@ -143,7 +120,7 @@ int wav_start_capture (CaptureState *s, const char *path, int freq,
     ops.capture = wav_capture;
     ops.destroy = wav_destroy;
 
-    wav = g_malloc0 (sizeof (*wav));
+    wav = qemu_mallocz (sizeof (*wav));
 
     shift = bits16 + stereo;
     hdr[34] = bits16 ? 0x10 : 0x08;
@@ -153,42 +130,32 @@ int wav_start_capture (CaptureState *s, const char *path, int freq,
     le_store (hdr + 28, freq << shift, 4);
     le_store (hdr + 32, 1 << shift, 2);
 
-    wav->f = fopen (path, "wb");
+    wav->f = qemu_fopen (path, "wb");
     if (!wav->f) {
-        monitor_printf (mon, "Failed to open wave file `%s'\nReason: %s\n",
-                        path, strerror (errno));
-        g_free (wav);
+        monitor_printf(mon, "Failed to open wave file `%s'\nReason: %s\n",
+                       path, strerror (errno));
+        qemu_free (wav);
         return -1;
     }
 
-    wav->path = g_strdup (path);
+    wav->path = qemu_strdup (path);
     wav->bits = bits;
     wav->nchannels = nchannels;
     wav->freq = freq;
 
-    if (fwrite (hdr, sizeof (hdr), 1, wav->f) != 1) {
-        monitor_printf (mon, "Failed to write header\nReason: %s\n",
-                        strerror (errno));
-        goto error_free;
-    }
+    qemu_put_buffer (wav->f, hdr, sizeof (hdr));
 
     cap = AUD_add_capture (&as, &ops, wav);
     if (!cap) {
-        monitor_printf (mon, "Failed to add audio capture\n");
-        goto error_free;
+        monitor_printf(mon, "Failed to add audio capture\n");
+        qemu_free (wav->path);
+        qemu_fclose (wav->f);
+        qemu_free (wav);
+        return -1;
     }
 
     wav->cap = cap;
     s->opaque = wav;
     s->ops = wav_capture_ops;
     return 0;
-
-error_free:
-    g_free (wav->path);
-    if (fclose (wav->f)) {
-        monitor_printf (mon, "Failed to close wave file\nReason: %s\n",
-                        strerror (errno));
-    }
-    g_free (wav);
-    return -1;
 }

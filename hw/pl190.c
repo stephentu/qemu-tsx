@@ -4,7 +4,7 @@
  * Copyright (c) 2006 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "sysbus.h"
@@ -17,7 +17,6 @@
 
 typedef struct {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint32_t level;
     uint32_t soft_level;
     uint32_t irq_enable;
@@ -85,8 +84,7 @@ static void pl190_update_vectors(pl190_state *s)
     pl190_update(s);
 }
 
-static uint64_t pl190_read(void *opaque, hwaddr offset,
-                           unsigned size)
+static uint32_t pl190_read(void *opaque, target_phys_addr_t offset)
 {
     pl190_state *s = (pl190_state *)opaque;
     int i;
@@ -117,18 +115,12 @@ static uint64_t pl190_read(void *opaque, hwaddr offset,
         return s->protected;
     case 12: /* VECTADDR */
         /* Read vector address at the start of an ISR.  Increases the
-         * current priority level to that of the current interrupt.
-         *
-         * Since an enabled interrupt X at priority P causes prio_mask[Y]
-         * to have bit X set for all Y > P, this loop will stop with
-         * i == the priority of the highest priority set interrupt.
-         */
-        for (i = 0; i < s->priority; i++) {
-            if ((s->level | s->soft_level) & s->prio_mask[i + 1]) {
-                break;
-            }
-        }
-
+           current priority level to that of the current interrupt.  */
+        for (i = 0; i < s->priority; i++)
+          {
+            if ((s->level | s->soft_level) & s->prio_mask[i])
+              break;
+          }
         /* Reading this value with no pending interrupts is undefined.
            We return the default address.  */
         if (i == PL190_NUM_PRIO)
@@ -143,14 +135,12 @@ static uint64_t pl190_read(void *opaque, hwaddr offset,
     case 13: /* DEFVECTADDR */
         return s->vect_addr[16];
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "pl190_read: Bad offset %x\n", (int)offset);
+        hw_error("pl190_read: Bad offset %x\n", (int)offset);
         return 0;
     }
 }
 
-static void pl190_write(void *opaque, hwaddr offset,
-                        uint64_t val, unsigned size)
+static void pl190_write(void *opaque, target_phys_addr_t offset, uint32_t val)
 {
     pl190_state *s = (pl190_state *)opaque;
 
@@ -199,21 +189,26 @@ static void pl190_write(void *opaque, hwaddr offset,
         break;
     case 0xc0: /* ITCR */
         if (val) {
-            qemu_log_mask(LOG_UNIMP, "pl190: Test mode not implemented\n");
+            hw_error("pl190: Test mode not implemented\n");
         }
         break;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                     "pl190_write: Bad offset %x\n", (int)offset);
+        hw_error("pl190_write: Bad offset %x\n", (int)offset);
         return;
     }
     pl190_update(s);
 }
 
-static const MemoryRegionOps pl190_ops = {
-    .read = pl190_read,
-    .write = pl190_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pl190_readfn[] = {
+   pl190_read,
+   pl190_read,
+   pl190_read
+};
+
+static CPUWriteMemoryFunc * const pl190_writefn[] = {
+   pl190_write,
+   pl190_write,
+   pl190_write
 };
 
 static void pl190_reset(DeviceState *d)
@@ -235,9 +230,12 @@ static void pl190_reset(DeviceState *d)
 static int pl190_init(SysBusDevice *dev)
 {
     pl190_state *s = FROM_SYSBUS(pl190_state, dev);
+    int iomemtype;
 
-    memory_region_init_io(&s->iomem, &pl190_ops, s, "pl190", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(pl190_readfn,
+                                       pl190_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
     qdev_init_gpio_in(&dev->qdev, pl190_set_irq, 32);
     sysbus_init_irq(dev, &s->irq);
     sysbus_init_irq(dev, &s->fiq);
@@ -263,27 +261,18 @@ static const VMStateDescription vmstate_pl190 = {
     }
 };
 
-static void pl190_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = pl190_init;
-    dc->no_user = 1;
-    dc->reset = pl190_reset;
-    dc->vmsd = &vmstate_pl190;
-}
-
-static TypeInfo pl190_info = {
-    .name          = "pl190",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(pl190_state),
-    .class_init    = pl190_class_init,
+static SysBusDeviceInfo pl190_info = {
+    .init = pl190_init,
+    .qdev.name = "pl190",
+    .qdev.size = sizeof(pl190_state),
+    .qdev.vmsd = &vmstate_pl190,
+    .qdev.reset = pl190_reset,
+    .qdev.no_user = 1,
 };
 
-static void pl190_register_types(void)
+static void pl190_register_devices(void)
 {
-    type_register_static(&pl190_info);
+    sysbus_register_withprop(&pl190_info);
 }
 
-type_init(pl190_register_types)
+device_init(pl190_register_devices)

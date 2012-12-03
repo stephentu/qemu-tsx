@@ -22,6 +22,7 @@
 #include "qemu-char.h"
 #include "qemu-timer.h"
 #include "irq.h"
+#include "sysemu.h"
 #include "net.h"
 #include "bt.h"
 
@@ -87,7 +88,7 @@ static inline void csrhci_fifo_wake(struct csrhci_s *s)
     }
 
     if (s->out_len)
-        qemu_mod_timer(s->out_tm, qemu_get_clock_ns(vm_clock) + s->baud_delay);
+        qemu_mod_timer(s->out_tm, qemu_get_clock(vm_clock) + s->baud_delay);
 }
 
 #define csrhci_out_packetz(s, len) memset(csrhci_out_packet(s, len), 0, len)
@@ -222,7 +223,7 @@ static void csrhci_in_packet(struct csrhci_s *s, uint8_t *pkt)
 
         rpkt = csrhci_out_packet_csr(s, H4_NEG_PKT, 10);
 
-        *rpkt ++ = 0x20;	/* Operational settings negotiation Ok */
+        *rpkt ++ = 0x20;	/* Operational settings negotation Ok */
         memcpy(rpkt, pkt, 7); rpkt += 7;
         *rpkt ++ = 0xff;
         *rpkt = 0xff;
@@ -434,7 +435,7 @@ qemu_irq *csrhci_pins_get(CharDriverState *chr)
 CharDriverState *uart_hci_init(qemu_irq wakeup)
 {
     struct csrhci_s *s = (struct csrhci_s *)
-            g_malloc0(sizeof(struct csrhci_s));
+            qemu_mallocz(sizeof(struct csrhci_s));
 
     s->chr.opaque = s;
     s->chr.chr_write = csrhci_write;
@@ -445,7 +446,7 @@ CharDriverState *uart_hci_init(qemu_irq wakeup)
     s->hci->evt_recv = csrhci_out_hci_packet_event;
     s->hci->acl_recv = csrhci_out_hci_packet_acl;
 
-    s->out_tm = qemu_new_timer_ns(vm_clock, csrhci_out_tick, s);
+    s->out_tm = qemu_new_timer(vm_clock, csrhci_out_tick, s);
     s->pins = qemu_allocate_irqs(csrhci_pins, s, __csrhci_pins);
     csrhci_reset(s);
 

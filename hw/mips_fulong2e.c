@@ -5,9 +5,6 @@
  * Copyright (c) 2009 chenming (chenming@rdc.faw.com.cn)
  * Copyright (c) 2010 Huacai Chen (zltjiangshi@gmail.com)
  * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 /*
@@ -20,7 +17,6 @@
 
 #include "hw.h"
 #include "pc.h"
-#include "serial.h"
 #include "fdc.h"
 #include "net.h"
 #include "boards.h"
@@ -30,6 +26,7 @@
 #include "mips.h"
 #include "mips_cpudevs.h"
 #include "pci.h"
+#include "usb-uhci.h"
 #include "qemu-char.h"
 #include "sysemu.h"
 #include "audio/audio.h"
@@ -40,9 +37,7 @@
 #include "elf.h"
 #include "vt82c686.h"
 #include "mc146818rtc.h"
-#include "i8254.h"
 #include "blockdev.h"
-#include "exec-memory.h"
 
 #define DEBUG_FULONG2E_INIT
 
@@ -72,7 +67,7 @@
 #define FULONG2E_ATI_SLOT        6
 #define FULONG2E_RTL8139_SLOT    7
 
-static ISADevice *pit;
+static PITState *pit;
 
 static struct _loaderparams {
     int ram_size;
@@ -103,7 +98,7 @@ static void GCC_FMT_ATTR(3, 4) prom_set(uint32_t* prom_buf, int index,
     va_end(ap);
 }
 
-static int64_t load_kernel (CPUMIPSState *env)
+static int64_t load_kernel (CPUState *env)
 {
     int64_t kernel_entry, kernel_low, kernel_high;
     int index = 0;
@@ -145,7 +140,7 @@ static int64_t load_kernel (CPUMIPSState *env)
 
     /* Setup prom parameters. */
     prom_size = ENVP_NB_ENTRIES * (sizeof(int32_t) + ENVP_ENTRY_SIZE);
-    prom_buf = g_malloc(prom_size);
+    prom_buf = qemu_malloc(prom_size);
 
     prom_set(prom_buf, index++, "%s", loaderparams.kernel_filename);
     if (initrd_size > 0) {
@@ -169,7 +164,7 @@ static int64_t load_kernel (CPUMIPSState *env)
     return kernel_entry;
 }
 
-static void write_bootloader (CPUMIPSState *env, uint8_t *base, int64_t kernel_addr)
+static void write_bootloader (CPUState *env, uint8_t *base, int64_t kernel_addr)
 {
     uint32_t *p;
 
@@ -199,10 +194,9 @@ static void write_bootloader (CPUMIPSState *env, uint8_t *base, int64_t kernel_a
 
 static void main_cpu_reset(void *opaque)
 {
-    MIPSCPU *cpu = opaque;
-    CPUMIPSState *env = &cpu->env;
+    CPUState *env = opaque;
 
-    cpu_reset(CPU(cpu));
+    cpu_reset(env);
     /* TODO: 2E reset stuff */
     if (loaderparams.kernel_filename) {
         env->CP0_Status &= ~((1 << CP0St_BEV) | (1 << CP0St_ERL));
@@ -250,48 +244,44 @@ static void network_init (void)
 
 static void cpu_request_exit(void *opaque, int irq, int level)
 {
-    CPUMIPSState *env = cpu_single_env;
+    CPUState *env = cpu_single_env;
 
     if (env && level) {
         cpu_exit(env);
     }
 }
 
-static void mips_fulong2e_init(QEMUMachineInitArgs *args)
+static void mips_fulong2e_init(ram_addr_t ram_size, const char *boot_device,
+                        const char *kernel_filename, const char *kernel_cmdline,
+                        const char *initrd_filename, const char *cpu_model)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
     char *filename;
-    MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
-    MemoryRegion *bios = g_new(MemoryRegion, 1);
+    unsigned long ram_offset, bios_offset;
     long bios_size;
     int64_t kernel_entry;
     qemu_irq *i8259;
     qemu_irq *cpu_exit_irq;
+    int via_devfn;
     PCIBus *pci_bus;
-    ISABus *isa_bus;
+    uint8_t *eeprom_buf;
     i2c_bus *smbus;
     int i;
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
-    MIPSCPU *cpu;
-    CPUMIPSState *env;
+    DeviceState *eeprom;
+    CPUState *env;
 
     /* init CPUs */
     if (cpu_model == NULL) {
         cpu_model = "Loongson-2E";
     }
-    cpu = cpu_mips_init(cpu_model);
-    if (cpu == NULL) {
+    env = cpu_init(cpu_model);
+    if (!env) {
         fprintf(stderr, "Unable to find CPU definition\n");
         exit(1);
     }
-    env = &cpu->env;
 
-    qemu_register_reset(main_cpu_reset, cpu);
+    register_savevm(NULL, "cpu", 0, 3, cpu_save, cpu_load, env);
+    qemu_register_reset(main_cpu_reset, env);
 
     /* fulong 2e has 256M ram. */
     ram_size = 256 * 1024 * 1024;
@@ -300,14 +290,12 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
     bios_size = 1024 * 1024;
 
     /* allocate RAM */
-    memory_region_init_ram(ram, "fulong2e.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_init_ram(bios, "fulong2e.bios", bios_size);
-    vmstate_register_ram_global(bios);
-    memory_region_set_readonly(bios, true);
+    ram_offset = qemu_ram_alloc(NULL, "fulong2e.ram", ram_size);
+    bios_offset = qemu_ram_alloc(NULL, "fulong2e.bios", bios_size);
 
-    memory_region_add_subregion(address_space_mem, 0, ram);
-    memory_region_add_subregion(address_space_mem, 0x1fc00000LL, bios);
+    cpu_register_physical_memory(0, ram_size, ram_offset);
+    cpu_register_physical_memory(0x1fc00000LL,
+					   bios_size, bios_offset | IO_MEM_ROM);
 
     /* We do not support flash operation, just loading pmon.bin as raw BIOS.
      * Please use -L to set the BIOS path and -bios to set bios name. */
@@ -318,7 +306,7 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
         loaderparams.kernel_cmdline = kernel_cmdline;
         loaderparams.initrd_filename = initrd_filename;
         kernel_entry = load_kernel (env);
-        write_bootloader(env, memory_region_get_ram_ptr(bios), kernel_entry);
+        write_bootloader(env, qemu_get_ram_ptr(bios_offset), kernel_entry);
     } else {
         if (bios_name == NULL) {
                 bios_name = FULONG_BIOSNAME;
@@ -327,7 +315,7 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
         if (filename) {
             bios_size = load_image_targphys(filename, 0x1fc00000LL,
                                             BIOS_SIZE);
-            g_free(filename);
+            qemu_free(filename);
         } else {
             bios_size = -1;
         }
@@ -342,52 +330,62 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
     cpu_mips_irq_init_cpu(env);
     cpu_mips_clock_init(env);
 
+    /* Interrupt controller */
+    /* The 8259 -> IP5  */
+    i8259 = i8259_init(env->irq[5]);
+
     /* North bridge, Bonito --> IP2 */
     pci_bus = bonito_init((qemu_irq *)&(env->irq[2]));
 
     /* South bridge */
-    ide_drive_get(hd, MAX_IDE_BUS);
-
-    isa_bus = vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 0));
-    if (!isa_bus) {
-        fprintf(stderr, "vt82c686b_init error\n");
+    if (drive_get_max_bus(IF_IDE) >= MAX_IDE_BUS) {
+        fprintf(stderr, "qemu: too many IDE bus\n");
         exit(1);
     }
 
-    /* Interrupt controller */
-    /* The 8259 -> IP5  */
-    i8259 = i8259_init(isa_bus, env->irq[5]);
-    isa_bus_irqs(isa_bus, i8259);
+    for(i = 0; i < MAX_IDE_BUS * MAX_IDE_DEVS; i++) {
+        hd[i] = drive_get(IF_IDE, i / MAX_IDE_DEVS, i % MAX_IDE_DEVS);
+    }
 
+    via_devfn = vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 0));
+    if (via_devfn < 0) {
+        fprintf(stderr, "vt82c686b_init error \n");
+        exit(1);
+    }
+
+    isa_bus_irqs(i8259);
     vt82c686b_ide_init(pci_bus, hd, PCI_DEVFN(FULONG2E_VIA_SLOT, 1));
-    pci_create_simple(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 2),
-                      "vt82c686b-usb-uhci");
-    pci_create_simple(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 3),
-                      "vt82c686b-usb-uhci");
+    usb_uhci_vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 2));
+    usb_uhci_vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 3));
 
     smbus = vt82c686b_pm_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 4),
                               0xeee1, NULL);
+    eeprom_buf = qemu_mallocz(8 * 256); /* XXX: make this persistent */
+    memcpy(eeprom_buf, eeprom_spd, sizeof(eeprom_spd));
     /* TODO: Populate SPD eeprom data.  */
-    smbus_eeprom_init(smbus, 1, eeprom_spd, sizeof(eeprom_spd));
+    eeprom = qdev_create((BusState *)smbus, "smbus-eeprom");
+    qdev_prop_set_uint8(eeprom, "address", 0x50);
+    qdev_prop_set_ptr(eeprom, "data", eeprom_buf);
+    qdev_init_nofail(eeprom);
 
     /* init other devices */
-    pit = pit_init(isa_bus, 0x40, 0, NULL);
+    pit = pit_init(0x40, isa_get_irq(0));
     cpu_exit_irq = qemu_allocate_irqs(cpu_request_exit, NULL, 1);
     DMA_init(0, cpu_exit_irq);
 
     /* Super I/O */
-    isa_create_simple(isa_bus, "i8042");
+    isa_create_simple("i8042");
 
-    rtc_init(isa_bus, 2000, NULL);
+    rtc_init(2000, NULL);
 
     for(i = 0; i < MAX_SERIAL_PORTS; i++) {
         if (serial_hds[i]) {
-            serial_isa_init(isa_bus, i, serial_hds[i]);
+            serial_isa_init(i, serial_hds[i]);
         }
     }
 
     if (parallel_hds[0]) {
-        parallel_init(isa_bus, 0, parallel_hds[0]);
+        parallel_init(0, parallel_hds[0]);
     }
 
     /* Sound card */
@@ -396,7 +394,7 @@ static void mips_fulong2e_init(QEMUMachineInitArgs *args)
     network_init();
 }
 
-static QEMUMachine mips_fulong2e_machine = {
+QEMUMachine mips_fulong2e_machine = {
     .name = "fulong2e",
     .desc = "Fulong 2e mini pc",
     .init = mips_fulong2e_init,

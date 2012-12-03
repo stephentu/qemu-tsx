@@ -5,7 +5,7 @@
  * Based on sh_timer.c and arm_timer.c by Paul Brook
  * Copyright (c) 2005-2006 CodeSourcery.
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "sh_intc.h"
@@ -219,8 +219,7 @@ static void sh_intc_toggle_mask(struct intc_desc *desc, intc_enum id,
 #endif
 }
 
-static uint64_t sh_intc_read(void *opaque, hwaddr offset,
-                             unsigned size)
+static uint32_t sh_intc_read(void *opaque, target_phys_addr_t offset)
 {
     struct intc_desc *desc = opaque;
     intc_enum *enum_ids = NULL;
@@ -238,8 +237,8 @@ static uint64_t sh_intc_read(void *opaque, hwaddr offset,
     return *valuep;
 }
 
-static void sh_intc_write(void *opaque, hwaddr offset,
-                          uint64_t value, unsigned size)
+static void sh_intc_write(void *opaque, target_phys_addr_t offset,
+			  uint32_t value)
 {
     struct intc_desc *desc = opaque;
     intc_enum *enum_ids = NULL;
@@ -283,10 +282,16 @@ static void sh_intc_write(void *opaque, hwaddr offset,
 #endif
 }
 
-static const MemoryRegionOps sh_intc_ops = {
-    .read = sh_intc_read,
-    .write = sh_intc_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const sh_intc_readfn[] = {
+    sh_intc_read,
+    sh_intc_read,
+    sh_intc_read
+};
+
+static CPUWriteMemoryFunc * const sh_intc_writefn[] = {
+    sh_intc_write,
+    sh_intc_write,
+    sh_intc_write
 };
 
 struct intc_source *sh_intc_source(struct intc_desc *desc, intc_enum id)
@@ -297,36 +302,15 @@ struct intc_source *sh_intc_source(struct intc_desc *desc, intc_enum id)
     return NULL;
 }
 
-static unsigned int sh_intc_register(MemoryRegion *sysmem,
-                             struct intc_desc *desc,
-                             const unsigned long address,
-                             const char *type,
-                             const char *action,
-                             const unsigned int index)
+static void sh_intc_register(struct intc_desc *desc, 
+			     unsigned long address)
 {
-    char name[60];
-    MemoryRegion *iomem, *iomem_p4, *iomem_a7;
-
-    if (!address) {
-        return 0;
+    if (address) {
+        cpu_register_physical_memory_offset(P4ADDR(address), 4,
+                                            desc->iomemtype, INTC_A7(address));
+        cpu_register_physical_memory_offset(A7ADDR(address), 4,
+                                            desc->iomemtype, INTC_A7(address));
     }
-
-    iomem = &desc->iomem;
-    iomem_p4 = desc->iomem_aliases + index;
-    iomem_a7 = iomem_p4 + 1;
-
-#define SH_INTC_IOMEM_FORMAT "interrupt-controller-%s-%s-%s"
-    snprintf(name, sizeof(name), SH_INTC_IOMEM_FORMAT, type, action, "p4");
-    memory_region_init_alias(iomem_p4, name, iomem, INTC_A7(address), 4);
-    memory_region_add_subregion(sysmem, P4ADDR(address), iomem_p4);
-
-    snprintf(name, sizeof(name), SH_INTC_IOMEM_FORMAT, type, action, "a7");
-    memory_region_init_alias(iomem_a7, name, iomem, INTC_A7(address), 4);
-    memory_region_add_subregion(sysmem, A7ADDR(address), iomem_a7);
-#undef SH_INTC_IOMEM_FORMAT
-
-    /* used to increment aliases index */
-    return 2;
 }
 
 static void sh_intc_register_source(struct intc_desc *desc,
@@ -398,14 +382,13 @@ void sh_intc_register_sources(struct intc_desc *desc,
 
 	sh_intc_register_source(desc, vect->enum_id, groups, nr_groups);
 	s = sh_intc_source(desc, vect->enum_id);
-        if (s) {
-            s->vect = vect->vect;
+	if (s)
+	    s->vect = vect->vect;
 
 #ifdef DEBUG_INTC_SOURCES
-            printf("sh_intc: registered source %d -> 0x%04x (%d/%d)\n",
-                   vect->enum_id, s->vect, s->enable_count, s->enable_max);
+	printf("sh_intc: registered source %d -> 0x%04x (%d/%d)\n",
+	       vect->enum_id, s->vect, s->enable_count, s->enable_max);
 #endif
-        }
     }
 
     if (groups) {
@@ -431,15 +414,14 @@ void sh_intc_register_sources(struct intc_desc *desc,
     }
 }
 
-int sh_intc_init(MemoryRegion *sysmem,
-         struct intc_desc *desc,
+int sh_intc_init(struct intc_desc *desc,
 		 int nr_sources,
 		 struct intc_mask_reg *mask_regs,
 		 int nr_mask_regs,
 		 struct intc_prio_reg *prio_regs,
 		 int nr_prio_regs)
 {
-    unsigned int i, j;
+    unsigned int i;
 
     desc->pending = 0;
     desc->nr_sources = nr_sources;
@@ -447,14 +429,9 @@ int sh_intc_init(MemoryRegion *sysmem,
     desc->nr_mask_regs = nr_mask_regs;
     desc->prio_regs = prio_regs;
     desc->nr_prio_regs = nr_prio_regs;
-    /* Allocate 4 MemoryRegions per register (2 actions * 2 aliases).
-     **/
-    desc->iomem_aliases = g_new0(MemoryRegion,
-                                 (nr_mask_regs + nr_prio_regs) * 4);
 
-    j = 0;
     i = sizeof(struct intc_source) * nr_sources;
-    desc->sources = g_malloc0(i);
+    desc->sources = qemu_mallocz(i);
 
     for (i = 0; i < desc->nr_sources; i++) {
         struct intc_source *source = desc->sources + i;
@@ -464,19 +441,15 @@ int sh_intc_init(MemoryRegion *sysmem,
 
     desc->irqs = qemu_allocate_irqs(sh_intc_set_irq, desc, nr_sources);
  
-    memory_region_init_io(&desc->iomem, &sh_intc_ops, desc,
-                          "interrupt-controller", 0x100000000ULL);
-
-#define INT_REG_PARAMS(reg_struct, type, action, j) \
-        reg_struct->action##_reg, #type, #action, j
+    desc->iomemtype = cpu_register_io_memory(sh_intc_readfn,
+					     sh_intc_writefn, desc,
+                                             DEVICE_NATIVE_ENDIAN);
     if (desc->mask_regs) {
         for (i = 0; i < desc->nr_mask_regs; i++) {
 	    struct intc_mask_reg *mr = desc->mask_regs + i;
 
-            j += sh_intc_register(sysmem, desc,
-                                  INT_REG_PARAMS(mr, mask, set, j));
-            j += sh_intc_register(sysmem, desc,
-                                  INT_REG_PARAMS(mr, mask, clr, j));
+	    sh_intc_register(desc, mr->set_reg);
+	    sh_intc_register(desc, mr->clr_reg);
 	}
     }
 
@@ -484,13 +457,10 @@ int sh_intc_init(MemoryRegion *sysmem,
         for (i = 0; i < desc->nr_prio_regs; i++) {
 	    struct intc_prio_reg *pr = desc->prio_regs + i;
 
-            j += sh_intc_register(sysmem, desc,
-                                  INT_REG_PARAMS(pr, prio, set, j));
-            j += sh_intc_register(sysmem, desc,
-                                  INT_REG_PARAMS(pr, prio, clr, j));
+	    sh_intc_register(desc, pr->set_reg);
+	    sh_intc_register(desc, pr->clr_reg);
 	}
     }
-#undef INT_REG_PARAMS
 
     return 0;
 }

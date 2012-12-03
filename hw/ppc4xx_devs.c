@@ -24,8 +24,8 @@
 #include "hw.h"
 #include "ppc.h"
 #include "ppc4xx.h"
+#include "sysemu.h"
 #include "qemu-log.h"
-#include "exec-memory.h"
 
 //#define DEBUG_MMIO
 //#define DEBUG_UNASSIGNED
@@ -38,39 +38,29 @@
 #  define LOG_UIC(...) do { } while (0)
 #endif
 
-static void ppc4xx_reset(void *opaque)
-{
-    PowerPCCPU *cpu = opaque;
-
-    cpu_reset(CPU(cpu));
-}
-
 /*****************************************************************************/
-/* Generic PowerPC 4xx processor instantiation */
-CPUPPCState *ppc4xx_init (const char *cpu_model,
+/* Generic PowerPC 4xx processor instanciation */
+CPUState *ppc4xx_init (const char *cpu_model,
                        clk_setup_t *cpu_clk, clk_setup_t *tb_clk,
                        uint32_t sysclk)
 {
-    PowerPCCPU *cpu;
-    CPUPPCState *env;
+    CPUState *env;
 
     /* init CPUs */
-    cpu = cpu_ppc_init(cpu_model);
-    if (cpu == NULL) {
+    env = cpu_init(cpu_model);
+    if (!env) {
         fprintf(stderr, "Unable to find PowerPC %s CPU definition\n",
                 cpu_model);
         exit(1);
     }
-    env = &cpu->env;
-
     cpu_clk->cb = NULL; /* We don't care about CPU clock frequency changes */
     cpu_clk->opaque = env;
     /* Set time-base frequency to sysclk */
-    tb_clk->cb = ppc_40x_timers_init(env, sysclk, PPC_INTERRUPT_PIT);
+    tb_clk->cb = ppc_emb_timers_init(env, sysclk, PPC_INTERRUPT_PIT);
     tb_clk->opaque = env;
     ppc_dcr_init(env, NULL, NULL);
     /* Register qemu callbacks */
-    qemu_register_reset(ppc4xx_reset, cpu);
+    qemu_register_reset((QEMUResetHandler*)&cpu_reset, env);
 
     return env;
 }
@@ -298,13 +288,13 @@ static void ppcuic_reset (void *opaque)
     }
 }
 
-qemu_irq *ppcuic_init (CPUPPCState *env, qemu_irq *irqs,
+qemu_irq *ppcuic_init (CPUState *env, qemu_irq *irqs,
                        uint32_t dcr_base, int has_ssr, int has_vr)
 {
     ppcuic_t *uic;
     int i;
 
-    uic = g_malloc0(sizeof(ppcuic_t));
+    uic = qemu_mallocz(sizeof(ppcuic_t));
     uic->dcr_base = dcr_base;
     uic->irqs = irqs;
     if (has_vr)
@@ -324,10 +314,8 @@ typedef struct ppc4xx_sdram_t ppc4xx_sdram_t;
 struct ppc4xx_sdram_t {
     uint32_t addr;
     int nbanks;
-    MemoryRegion containers[4]; /* used for clipping */
-    MemoryRegion *ram_memories;
-    hwaddr ram_bases[4];
-    hwaddr ram_sizes[4];
+    target_phys_addr_t ram_bases[4];
+    target_phys_addr_t ram_sizes[4];
     uint32_t besr0;
     uint32_t besr1;
     uint32_t bear;
@@ -348,11 +336,11 @@ enum {
 };
 
 /* XXX: TOFIX: some patches have made this code become inconsistent:
- *      there are type inconsistencies, mixing hwaddr, target_ulong
+ *      there are type inconsistencies, mixing target_phys_addr_t, target_ulong
  *      and uint32_t
  */
-static uint32_t sdram_bcr (hwaddr ram_base,
-                           hwaddr ram_size)
+static uint32_t sdram_bcr (target_phys_addr_t ram_base,
+                           target_phys_addr_t ram_size)
 {
     uint32_t bcr;
 
@@ -389,7 +377,7 @@ static uint32_t sdram_bcr (hwaddr ram_base,
     return bcr;
 }
 
-static inline hwaddr sdram_base(uint32_t bcr)
+static inline target_phys_addr_t sdram_base(uint32_t bcr)
 {
     return bcr & 0xFF800000;
 }
@@ -408,22 +396,16 @@ static target_ulong sdram_size (uint32_t bcr)
     return size;
 }
 
-static void sdram_set_bcr(ppc4xx_sdram_t *sdram,
-                          uint32_t *bcrp, uint32_t bcr, int enabled)
+static void sdram_set_bcr (uint32_t *bcrp, uint32_t bcr, int enabled)
 {
-    unsigned n = bcrp - sdram->bcr;
-
     if (*bcrp & 0x00000001) {
         /* Unmap RAM */
 #ifdef DEBUG_SDRAM
         printf("%s: unmap RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
                __func__, sdram_base(*bcrp), sdram_size(*bcrp));
 #endif
-        memory_region_del_subregion(get_system_memory(),
-                                    &sdram->containers[n]);
-        memory_region_del_subregion(&sdram->containers[n],
-                                    &sdram->ram_memories[n]);
-        memory_region_destroy(&sdram->containers[n]);
+        cpu_register_physical_memory(sdram_base(*bcrp), sdram_size(*bcrp),
+                                     IO_MEM_UNASSIGNED);
     }
     *bcrp = bcr & 0xFFDEE001;
     if (enabled && (bcr & 0x00000001)) {
@@ -431,13 +413,8 @@ static void sdram_set_bcr(ppc4xx_sdram_t *sdram,
         printf("%s: Map RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
                __func__, sdram_base(bcr), sdram_size(bcr));
 #endif
-        memory_region_init(&sdram->containers[n], "sdram-containers",
-                           sdram_size(bcr));
-        memory_region_add_subregion(&sdram->containers[n], 0,
-                                    &sdram->ram_memories[n]);
-        memory_region_add_subregion(get_system_memory(),
-                                    sdram_base(bcr),
-                                    &sdram->containers[n]);
+        cpu_register_physical_memory(sdram_base(bcr), sdram_size(bcr),
+                                     sdram_base(bcr) | IO_MEM_RAM);
     }
 }
 
@@ -447,12 +424,11 @@ static void sdram_map_bcr (ppc4xx_sdram_t *sdram)
 
     for (i = 0; i < sdram->nbanks; i++) {
         if (sdram->ram_sizes[i] != 0) {
-            sdram_set_bcr(sdram,
-                          &sdram->bcr[i],
+            sdram_set_bcr(&sdram->bcr[i],
                           sdram_bcr(sdram->ram_bases[i], sdram->ram_sizes[i]),
                           1);
         } else {
-            sdram_set_bcr(sdram, &sdram->bcr[i], 0x00000000, 0);
+            sdram_set_bcr(&sdram->bcr[i], 0x00000000, 0);
         }
     }
 }
@@ -466,8 +442,9 @@ static void sdram_unmap_bcr (ppc4xx_sdram_t *sdram)
         printf("%s: Unmap RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
                __func__, sdram_base(sdram->bcr[i]), sdram_size(sdram->bcr[i]));
 #endif
-        memory_region_del_subregion(get_system_memory(),
-                                    &sdram->ram_memories[i]);
+        cpu_register_physical_memory(sdram_base(sdram->bcr[i]),
+                                     sdram_size(sdram->bcr[i]),
+                                     IO_MEM_UNASSIGNED);
     }
 }
 
@@ -592,16 +569,16 @@ static void dcr_write_sdram (void *opaque, int dcrn, uint32_t val)
             sdram->pmit = (val & 0xF8000000) | 0x07C00000;
             break;
         case 0x40: /* SDRAM_B0CR */
-            sdram_set_bcr(sdram, &sdram->bcr[0], val, sdram->cfg & 0x80000000);
+            sdram_set_bcr(&sdram->bcr[0], val, sdram->cfg & 0x80000000);
             break;
         case 0x44: /* SDRAM_B1CR */
-            sdram_set_bcr(sdram, &sdram->bcr[1], val, sdram->cfg & 0x80000000);
+            sdram_set_bcr(&sdram->bcr[1], val, sdram->cfg & 0x80000000);
             break;
         case 0x48: /* SDRAM_B2CR */
-            sdram_set_bcr(sdram, &sdram->bcr[2], val, sdram->cfg & 0x80000000);
+            sdram_set_bcr(&sdram->bcr[2], val, sdram->cfg & 0x80000000);
             break;
         case 0x4C: /* SDRAM_B3CR */
-            sdram_set_bcr(sdram, &sdram->bcr[3], val, sdram->cfg & 0x80000000);
+            sdram_set_bcr(&sdram->bcr[3], val, sdram->cfg & 0x80000000);
             break;
         case 0x80: /* SDRAM_TR */
             sdram->tr = val & 0x018FC01F;
@@ -644,24 +621,22 @@ static void sdram_reset (void *opaque)
     sdram->cfg = 0x00800000;
 }
 
-void ppc4xx_sdram_init (CPUPPCState *env, qemu_irq irq, int nbanks,
-                        MemoryRegion *ram_memories,
-                        hwaddr *ram_bases,
-                        hwaddr *ram_sizes,
+void ppc4xx_sdram_init (CPUState *env, qemu_irq irq, int nbanks,
+                        target_phys_addr_t *ram_bases,
+                        target_phys_addr_t *ram_sizes,
                         int do_init)
 {
     ppc4xx_sdram_t *sdram;
 
-    sdram = g_malloc0(sizeof(ppc4xx_sdram_t));
+    sdram = qemu_mallocz(sizeof(ppc4xx_sdram_t));
     sdram->irq = irq;
     sdram->nbanks = nbanks;
-    sdram->ram_memories = ram_memories;
-    memset(sdram->ram_bases, 0, 4 * sizeof(hwaddr));
+    memset(sdram->ram_bases, 0, 4 * sizeof(target_phys_addr_t));
     memcpy(sdram->ram_bases, ram_bases,
-           nbanks * sizeof(hwaddr));
-    memset(sdram->ram_sizes, 0, 4 * sizeof(hwaddr));
+           nbanks * sizeof(target_phys_addr_t));
+    memset(sdram->ram_sizes, 0, 4 * sizeof(target_phys_addr_t));
     memcpy(sdram->ram_sizes, ram_sizes,
-           nbanks * sizeof(hwaddr));
+           nbanks * sizeof(target_phys_addr_t));
     qemu_register_reset(&sdram_reset, sdram);
     ppc_dcr_register(env, SDRAM0_CFGADDR,
                      sdram, &dcr_read_sdram, &dcr_write_sdram);
@@ -679,13 +654,11 @@ void ppc4xx_sdram_init (CPUPPCState *env, qemu_irq irq, int nbanks,
  * must be one of a small set of sizes. The number of banks and the supported
  * sizes varies by SoC. */
 ram_addr_t ppc4xx_sdram_adjust(ram_addr_t ram_size, int nr_banks,
-                               MemoryRegion ram_memories[],
-                               hwaddr ram_bases[],
-                               hwaddr ram_sizes[],
+                               target_phys_addr_t ram_bases[],
+                               target_phys_addr_t ram_sizes[],
                                const unsigned int sdram_bank_sizes[])
 {
     ram_addr_t size_left = ram_size;
-    ram_addr_t base = 0;
     int i;
     int j;
 
@@ -696,11 +669,8 @@ ram_addr_t ppc4xx_sdram_adjust(ram_addr_t ram_size, int nr_banks,
             if (bank_size <= size_left) {
                 char name[32];
                 snprintf(name, sizeof(name), "ppc4xx.sdram%d", i);
-                memory_region_init_ram(&ram_memories[i], name, bank_size);
-                vmstate_register_ram_global(&ram_memories[i]);
-                ram_bases[i] = base;
+                ram_bases[i] = qemu_ram_alloc(NULL, name, bank_size);
                 ram_sizes[i] = bank_size;
-                base += ram_size;
                 size_left -= bank_size;
                 break;
             }

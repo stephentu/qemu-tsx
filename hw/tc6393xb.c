@@ -6,16 +6,13 @@
  * Most features are currently unsupported!!!
  *
  * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 #include "hw.h"
+#include "pxa.h"
 #include "devices.h"
 #include "flash.h"
 #include "console.h"
 #include "pixel_ops.h"
-#include "blockdev.h"
 
 #define IRQ_TC6393_NAND		0
 #define IRQ_TC6393_MMC		1
@@ -82,7 +79,6 @@
 #define NAND_MODE_ECC_RST   0x60
 
 struct TC6393xbState {
-    MemoryRegion iomem;
     qemu_irq irq;
     qemu_irq *sub_irqs;
     struct {
@@ -122,11 +118,11 @@ struct TC6393xbState {
     } nand;
     int nand_enable;
     uint32_t nand_phys;
-    DeviceState *flash;
+    NANDFlashState *flash;
     ECCState ecc;
 
     DisplayState *ds;
-    MemoryRegion vram;
+    ram_addr_t vram_addr;
     uint16_t *vram_ptr;
     uint32_t scr_width, scr_height; /* in pixels */
     qemu_irq l3v;
@@ -215,7 +211,7 @@ static void tc6393xb_sub_irq(void *opaque, int line, int level) {
     case SCR_ ##N(1): return s->scr.N[1];       \
     case SCR_ ##N(2): return s->scr.N[2]
 
-static uint32_t tc6393xb_scr_readb(TC6393xbState *s, hwaddr addr)
+static uint32_t tc6393xb_scr_readb(TC6393xbState *s, target_phys_addr_t addr)
 {
     switch (addr) {
         case SCR_REVID:
@@ -276,7 +272,7 @@ static uint32_t tc6393xb_scr_readb(TC6393xbState *s, hwaddr addr)
     case SCR_ ##N(1): s->scr.N[1] = value; return;   \
     case SCR_ ##N(2): s->scr.N[2] = value; return
 
-static void tc6393xb_scr_writeb(TC6393xbState *s, hwaddr addr, uint32_t value)
+static void tc6393xb_scr_writeb(TC6393xbState *s, target_phys_addr_t addr, uint32_t value)
 {
     switch (addr) {
         SCR_REG_B(ISR);
@@ -327,7 +323,7 @@ static void tc6393xb_nand_irq(TC6393xbState *s) {
             (s->nand.imr & 0x80) && (s->nand.imr & s->nand.isr));
 }
 
-static uint32_t tc6393xb_nand_cfg_readb(TC6393xbState *s, hwaddr addr) {
+static uint32_t tc6393xb_nand_cfg_readb(TC6393xbState *s, target_phys_addr_t addr) {
     switch (addr) {
         case NAND_CFG_COMMAND:
             return s->nand_enable ? 2 : 0;
@@ -340,7 +336,7 @@ static uint32_t tc6393xb_nand_cfg_readb(TC6393xbState *s, hwaddr addr) {
     fprintf(stderr, "tc6393xb_nand_cfg: unhandled read at %08x\n", (uint32_t) addr);
     return 0;
 }
-static void tc6393xb_nand_cfg_writeb(TC6393xbState *s, hwaddr addr, uint32_t value) {
+static void tc6393xb_nand_cfg_writeb(TC6393xbState *s, target_phys_addr_t addr, uint32_t value) {
     switch (addr) {
         case NAND_CFG_COMMAND:
             s->nand_enable = (value & 0x2);
@@ -357,7 +353,7 @@ static void tc6393xb_nand_cfg_writeb(TC6393xbState *s, hwaddr addr, uint32_t val
 					(uint32_t) addr, value & 0xff);
 }
 
-static uint32_t tc6393xb_nand_readb(TC6393xbState *s, hwaddr addr) {
+static uint32_t tc6393xb_nand_readb(TC6393xbState *s, target_phys_addr_t addr) {
     switch (addr) {
         case NAND_DATA + 0:
         case NAND_DATA + 1:
@@ -376,7 +372,7 @@ static uint32_t tc6393xb_nand_readb(TC6393xbState *s, hwaddr addr) {
     fprintf(stderr, "tc6393xb_nand: unhandled read at %08x\n", (uint32_t) addr);
     return 0;
 }
-static void tc6393xb_nand_writeb(TC6393xbState *s, hwaddr addr, uint32_t value) {
+static void tc6393xb_nand_writeb(TC6393xbState *s, target_phys_addr_t addr, uint32_t value) {
 //    fprintf(stderr, "tc6393xb_nand: write at %08x: %02x\n",
 //					(uint32_t) addr, value & 0xff);
     switch (addr) {
@@ -385,7 +381,7 @@ static void tc6393xb_nand_writeb(TC6393xbState *s, hwaddr addr, uint32_t value) 
         case NAND_DATA + 2:
         case NAND_DATA + 3:
             nand_setio(s->flash, value);
-            s->nand.isr |= 1;
+            s->nand.isr &= 1;
             tc6393xb_nand_irq(s);
             return;
         case NAND_MODE:
@@ -454,7 +450,7 @@ static void tc6393xb_draw_graphic(TC6393xbState *s, int full_update)
             return;
     }
 
-    dpy_gfx_update(s->ds, 0, 0, s->scr_width, s->scr_height);
+    dpy_update(s->ds, 0, 0, s->scr_width, s->scr_height);
 }
 
 static void tc6393xb_draw_blank(TC6393xbState *s, int full_update)
@@ -472,7 +468,7 @@ static void tc6393xb_draw_blank(TC6393xbState *s, int full_update)
         d += ds_get_linesize(s->ds);
     }
 
-    dpy_gfx_update(s->ds, 0, 0, s->scr_width, s->scr_height);
+    dpy_update(s->ds, 0, 0, s->scr_width, s->scr_height);
 }
 
 static void tc6393xb_update_display(void *opaque)
@@ -499,9 +495,7 @@ static void tc6393xb_update_display(void *opaque)
 }
 
 
-static uint64_t tc6393xb_readb(void *opaque, hwaddr addr,
-                               unsigned size)
-{
+static uint32_t tc6393xb_readb(void *opaque, target_phys_addr_t addr) {
     TC6393xbState *s = opaque;
 
     switch (addr >> 8) {
@@ -522,8 +516,7 @@ static uint64_t tc6393xb_readb(void *opaque, hwaddr addr,
     return 0;
 }
 
-static void tc6393xb_writeb(void *opaque, hwaddr addr,
-                            uint64_t value, unsigned size) {
+static void tc6393xb_writeb(void *opaque, target_phys_addr_t addr, uint32_t value) {
     TC6393xbState *s = opaque;
 
     switch (addr >> 8) {
@@ -539,24 +532,53 @@ static void tc6393xb_writeb(void *opaque, hwaddr addr,
         tc6393xb_nand_writeb(s, addr & 0xff, value);
     else
         fprintf(stderr, "tc6393xb: unhandled write at %08x: %02x\n",
-                (uint32_t) addr, (int)value & 0xff);
+					(uint32_t) addr, value & 0xff);
 }
 
-TC6393xbState *tc6393xb_init(MemoryRegion *sysmem, uint32_t base, qemu_irq irq)
+static uint32_t tc6393xb_readw(void *opaque, target_phys_addr_t addr)
 {
+    return (tc6393xb_readb(opaque, addr) & 0xff) |
+        (tc6393xb_readb(opaque, addr + 1) << 8);
+}
+
+static uint32_t tc6393xb_readl(void *opaque, target_phys_addr_t addr)
+{
+    return (tc6393xb_readb(opaque, addr) & 0xff) |
+        ((tc6393xb_readb(opaque, addr + 1) & 0xff) << 8) |
+        ((tc6393xb_readb(opaque, addr + 2) & 0xff) << 16) |
+        ((tc6393xb_readb(opaque, addr + 3) & 0xff) << 24);
+}
+
+static void tc6393xb_writew(void *opaque, target_phys_addr_t addr, uint32_t value)
+{
+    tc6393xb_writeb(opaque, addr, value);
+    tc6393xb_writeb(opaque, addr + 1, value >> 8);
+}
+
+static void tc6393xb_writel(void *opaque, target_phys_addr_t addr, uint32_t value)
+{
+    tc6393xb_writeb(opaque, addr, value);
+    tc6393xb_writeb(opaque, addr + 1, value >> 8);
+    tc6393xb_writeb(opaque, addr + 2, value >> 16);
+    tc6393xb_writeb(opaque, addr + 3, value >> 24);
+}
+
+TC6393xbState *tc6393xb_init(uint32_t base, qemu_irq irq)
+{
+    int iomemtype;
     TC6393xbState *s;
-    DriveInfo *nand;
-    static const MemoryRegionOps tc6393xb_ops = {
-        .read = tc6393xb_readb,
-        .write = tc6393xb_writeb,
-        .endianness = DEVICE_NATIVE_ENDIAN,
-        .impl = {
-            .min_access_size = 1,
-            .max_access_size = 1,
-        },
+    CPUReadMemoryFunc * const tc6393xb_readfn[] = {
+        tc6393xb_readb,
+        tc6393xb_readw,
+        tc6393xb_readl,
+    };
+    CPUWriteMemoryFunc * const tc6393xb_writefn[] = {
+        tc6393xb_writeb,
+        tc6393xb_writew,
+        tc6393xb_writel,
     };
 
-    s = (TC6393xbState *) g_malloc0(sizeof(TC6393xbState));
+    s = (TC6393xbState *) qemu_mallocz(sizeof(TC6393xbState));
     s->irq = irq;
     s->gpio_in = qemu_allocate_irqs(tc6393xb_gpio_set, s, TC6393XB_GPIOS);
 
@@ -565,16 +587,15 @@ TC6393xbState *tc6393xb_init(MemoryRegion *sysmem, uint32_t base, qemu_irq irq)
 
     s->sub_irqs = qemu_allocate_irqs(tc6393xb_sub_irq, s, TC6393XB_NR_IRQS);
 
-    nand = drive_get(IF_MTD, 0, 0);
-    s->flash = nand_init(nand ? nand->bdrv : NULL, NAND_MFR_TOSHIBA, 0x76);
+    s->flash = nand_init(NAND_MFR_TOSHIBA, 0x76);
 
-    memory_region_init_io(&s->iomem, &tc6393xb_ops, s, "tc6393xb", 0x10000);
-    memory_region_add_subregion(sysmem, base, &s->iomem);
+    iomemtype = cpu_register_io_memory(tc6393xb_readfn,
+                    tc6393xb_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x10000, iomemtype);
 
-    memory_region_init_ram(&s->vram, "tc6393xb.vram", 0x100000);
-    vmstate_register_ram_global(&s->vram);
-    s->vram_ptr = memory_region_get_ram_ptr(&s->vram);
-    memory_region_add_subregion(sysmem, base + 0x100000, &s->vram);
+    s->vram_addr = qemu_ram_alloc(NULL, "tc6393xb.vram", 0x100000);
+    s->vram_ptr = qemu_get_ram_ptr(s->vram_addr);
+    cpu_register_physical_memory(base + 0x100000, 0x100000, s->vram_addr);
     s->scr_width = 480;
     s->scr_height = 640;
     s->ds = graphic_console_init(tc6393xb_update_display,

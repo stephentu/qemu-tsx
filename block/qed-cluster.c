@@ -23,8 +23,7 @@
  * @n:              Maximum number of clusters
  * @offset:         Set to first cluster offset
  *
- * This function scans tables for contiguous clusters.  A contiguous run of
- * clusters may be allocated, unallocated, or zero.
+ * This function scans tables for contiguous allocated or free clusters.
  */
 static unsigned int qed_count_contiguous_clusters(BDRVQEDState *s,
                                                   QEDTable *table,
@@ -39,14 +38,9 @@ static unsigned int qed_count_contiguous_clusters(BDRVQEDState *s,
     *offset = last;
 
     for (i = index + 1; i < end; i++) {
-        if (qed_offset_is_unalloc_cluster(last)) {
-            /* Counting unallocated clusters */
-            if (!qed_offset_is_unalloc_cluster(table->offsets[i])) {
-                break;
-            }
-        } else if (qed_offset_is_zero_cluster(last)) {
-            /* Counting zero clusters */
-            if (!qed_offset_is_zero_cluster(table->offsets[i])) {
+        if (last == 0) {
+            /* Counting free clusters */
+            if (table->offsets[i] != 0) {
                 break;
             }
         } else {
@@ -93,22 +87,17 @@ static void qed_find_cluster_cb(void *opaque, int ret)
     n = qed_count_contiguous_clusters(s, request->l2_table->table,
                                       index, n, &offset);
 
-    if (qed_offset_is_unalloc_cluster(offset)) {
-        ret = QED_CLUSTER_L2;
-    } else if (qed_offset_is_zero_cluster(offset)) {
-        ret = QED_CLUSTER_ZERO;
-    } else if (qed_check_cluster_offset(s, offset)) {
-        ret = QED_CLUSTER_FOUND;
-    } else {
-        ret = -EINVAL;
-    }
-
+    ret = offset ? QED_CLUSTER_FOUND : QED_CLUSTER_L2;
     len = MIN(find_cluster_cb->len, n * s->header.cluster_size -
               qed_offset_into_cluster(s, find_cluster_cb->pos));
 
+    if (offset && !qed_check_cluster_offset(s, offset)) {
+        ret = -EINVAL;
+    }
+
 out:
     find_cluster_cb->cb(find_cluster_cb->opaque, ret, offset, len);
-    g_free(find_cluster_cb);
+    qemu_free(find_cluster_cb);
 }
 
 /**
@@ -143,7 +132,7 @@ void qed_find_cluster(BDRVQEDState *s, QEDRequest *request, uint64_t pos,
     len = MIN(len, (((pos >> s->l1_shift) + 1) << s->l1_shift) - pos);
 
     l2_offset = s->l1_table->offsets[qed_l1_index(s, pos)];
-    if (qed_offset_is_unalloc_cluster(l2_offset)) {
+    if (!l2_offset) {
         cb(opaque, QED_CLUSTER_L1, 0, len);
         return;
     }
@@ -152,7 +141,7 @@ void qed_find_cluster(BDRVQEDState *s, QEDRequest *request, uint64_t pos,
         return;
     }
 
-    find_cluster_cb = g_malloc(sizeof(*find_cluster_cb));
+    find_cluster_cb = qemu_malloc(sizeof(*find_cluster_cb));
     find_cluster_cb->s = s;
     find_cluster_cb->pos = pos;
     find_cluster_cb->len = len;

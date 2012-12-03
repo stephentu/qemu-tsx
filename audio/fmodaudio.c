@@ -343,7 +343,7 @@ static void fmod_fini_out (HWVoiceOut *hw)
 
 static int fmod_init_out (HWVoiceOut *hw, struct audsettings *as)
 {
-    int mode, channel;
+    int bits16, mode, channel;
     FMODVoiceOut *fmd = (FMODVoiceOut *) hw;
     struct audsettings obt_as = *as;
 
@@ -374,6 +374,7 @@ static int fmod_init_out (HWVoiceOut *hw, struct audsettings *as)
     /* FMOD always operates on little endian frames? */
     obt_as.endianness = 0;
     audio_pcm_init_info (&hw->info, &obt_as);
+    bits16 = (mode & FSOUND_16BITS) != 0;
     hw->samples = conf.nb_samples;
     return 0;
 }
@@ -404,7 +405,7 @@ static int fmod_ctl_out (HWVoiceOut *hw, int cmd, ...)
 
 static int fmod_init_in (HWVoiceIn *hw, struct audsettings *as)
 {
-    int mode;
+    int bits16, mode;
     FMODVoiceIn *fmd = (FMODVoiceIn *) hw;
     struct audsettings obt_as = *as;
 
@@ -431,6 +432,7 @@ static int fmod_init_in (HWVoiceIn *hw, struct audsettings *as)
     /* FMOD always operates on little endian frames? */
     obt_as.endianness = 0;
     audio_pcm_init_info (&hw->info, &obt_as);
+    bits16 = (mode & FSOUND_16BITS) != 0;
     hw->samples = conf.nb_samples;
     return 0;
 }

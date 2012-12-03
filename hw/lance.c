@@ -55,8 +55,8 @@ static void parent_lance_reset(void *opaque, int irq, int level)
         pcnet_h_reset(&d->state);
 }
 
-static void lance_mem_write(void *opaque, hwaddr addr,
-                            uint64_t val, unsigned size)
+static void lance_mem_writew(void *opaque, target_phys_addr_t addr,
+                             uint32_t val)
 {
     SysBusPCNetState *d = opaque;
 
@@ -64,8 +64,7 @@ static void lance_mem_write(void *opaque, hwaddr addr,
     pcnet_ioport_writew(&d->state, addr, val & 0xffff);
 }
 
-static uint64_t lance_mem_read(void *opaque, hwaddr addr,
-                               unsigned size)
+static uint32_t lance_mem_readw(void *opaque, target_phys_addr_t addr)
 {
     SysBusPCNetState *d = opaque;
     uint32_t val;
@@ -75,17 +74,19 @@ static uint64_t lance_mem_read(void *opaque, hwaddr addr,
     return val & 0xffff;
 }
 
-static const MemoryRegionOps lance_mem_ops = {
-    .read = lance_mem_read,
-    .write = lance_mem_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 2,
-        .max_access_size = 2,
-    },
+static CPUReadMemoryFunc * const lance_mem_read[3] = {
+    NULL,
+    lance_mem_readw,
+    NULL,
 };
 
-static void lance_cleanup(NetClientState *nc)
+static CPUWriteMemoryFunc * const lance_mem_write[3] = {
+    NULL,
+    lance_mem_writew,
+    NULL,
+};
+
+static void lance_cleanup(VLANClientState *nc)
 {
     PCNetState *d = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -93,11 +94,10 @@ static void lance_cleanup(NetClientState *nc)
 }
 
 static NetClientInfo net_lance_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_TYPE_NIC,
     .size = sizeof(NICState),
     .can_receive = pcnet_can_receive,
     .receive = pcnet_receive,
-    .link_status_changed = pcnet_set_link_status,
     .cleanup = lance_cleanup,
 };
 
@@ -117,11 +117,13 @@ static int lance_init(SysBusDevice *dev)
     SysBusPCNetState *d = FROM_SYSBUS(SysBusPCNetState, dev);
     PCNetState *s = &d->state;
 
-    memory_region_init_io(&s->mmio, &lance_mem_ops, d, "lance-mmio", 4);
+    s->mmio_index =
+        cpu_register_io_memory(lance_mem_read, lance_mem_write, d,
+                               DEVICE_NATIVE_ENDIAN);
 
     qdev_init_gpio_in(&dev->qdev, parent_lance_reset, 1);
 
-    sysbus_init_mmio(dev, &s->mmio);
+    sysbus_init_mmio(dev, 4, s->mmio_index);
 
     sysbus_init_irq(dev, &s->irq);
 
@@ -137,34 +139,22 @@ static void lance_reset(DeviceState *dev)
     pcnet_h_reset(&d->state);
 }
 
-static Property lance_properties[] = {
-    DEFINE_PROP_PTR("dma", SysBusPCNetState, state.dma_opaque),
-    DEFINE_NIC_PROPERTIES(SysBusPCNetState, state.conf),
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo lance_info = {
+    .init       = lance_init,
+    .qdev.name  = "lance",
+    .qdev.fw_name  = "ethernet",
+    .qdev.size  = sizeof(SysBusPCNetState),
+    .qdev.reset = lance_reset,
+    .qdev.vmsd  = &vmstate_lance,
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_PTR("dma", SysBusPCNetState, state.dma_opaque),
+        DEFINE_NIC_PROPERTIES(SysBusPCNetState, state.conf),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void lance_class_init(ObjectClass *klass, void *data)
+static void lance_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = lance_init;
-    dc->fw_name = "ethernet";
-    dc->reset = lance_reset;
-    dc->vmsd = &vmstate_lance;
-    dc->props = lance_properties;
+    sysbus_register_withprop(&lance_info);
 }
-
-static TypeInfo lance_info = {
-    .name          = "lance",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(SysBusPCNetState),
-    .class_init    = lance_class_init,
-};
-
-static void lance_register_types(void)
-{
-    type_register_static(&lance_info);
-}
-
-type_init(lance_register_types)
+device_init(lance_register_devices)

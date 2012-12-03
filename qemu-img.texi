@@ -4,16 +4,6 @@ usage: qemu-img command [command options]
 @c man end
 @end example
 
-@c man begin DESCRIPTION
-qemu-img allows you to create, convert and modify images offline. It can handle
-all image formats supported by QEMU.
-
-@b{Warning:} Never use qemu-img to modify images in use by a running virtual
-machine or any other process; this may destroy the image. Also, be aware that
-querying an image that is being modified by another process may encounter
-inconsistent state.
-@c man end
-
 @c man begin OPTIONS
 
 The following commands are supported:
@@ -27,10 +17,6 @@ Command parameters:
 @item fmt
 is the disk image format. It is guessed automatically in most cases. See below
 for a description of the supported disk formats.
-
-@item --backing-chain
-will enumerate information about backing files in a disk image chain. Refer
-below for further description.
 
 @item size
 is the disk image size in bytes. Optional suffixes @code{k} or @code{K}
@@ -52,17 +38,6 @@ by the used format or see the format descriptions below for details.
 indicates that target image must be compressed (qcow format only)
 @item -h
 with or without a command shows help and lists the supported formats
-@item -p
-display progress bar (convert and rebase commands only)
-@item -S @var{size}
-indicates the consecutive number of bytes that must contain only zeros
-for qemu-img to create a sparse image during conversion. This value is rounded
-down to the nearest 512 bytes. You may use the common size suffixes like
-@code{k} for kilobytes.
-@item -t @var{cache}
-specifies the cache mode that should be used with the (destination) file. See
-the documentation of the emulator's @code{-drive cache=...} option for allowed
-values.
 @end table
 
 Parameters to snapshot subcommand:
@@ -84,14 +59,9 @@ lists all snapshots in the given image
 Command description:
 
 @table @option
-@item check [-f @var{fmt}] [-r [leaks | all]] @var{filename}
+@item check [-f @var{fmt}] @var{filename}
 
 Perform a consistency check on the disk image @var{filename}.
-
-If @code{-r} is specified, qemu-img tries to repair any inconsistencies found
-during the check. @code{-r leaks} repairs only cluster leaks, whereas
-@code{-r all} fixes all kinds of errors, with a higher risk of choosing the
-wrong fix or hiding corruption that has already occurred.
 
 Only the formats @code{qcow2}, @code{qed} and @code{vdi} support
 consistency checks.
@@ -110,11 +80,11 @@ this case. @var{backing_file} will never be modified unless you use the
 The size can also be specified using the @var{size} option with @code{-o},
 it doesn't need to be specified separately in this case.
 
-@item commit [-f @var{fmt}] [-t @var{cache}] @var{filename}
+@item commit [-f @var{fmt}] @var{filename}
 
 Commit the changes recorded in @var{filename} in its base image.
 
-@item convert [-c] [-p] [-f @var{fmt}] [-t @var{cache}] [-O @var{output_fmt}] [-o @var{options}] [-s @var{snapshot_name}] [-S @var{sparse_size}] @var{filename} [@var{filename2} [...]] @var{output_filename}
+@item convert [-c] [-f @var{fmt}] [-O @var{output_fmt}] [-o @var{options}] [-s @var{snapshot_name}] @var{filename} [@var{filename2} [...]] @var{output_filename}
 
 Convert the disk image @var{filename} or a snapshot @var{snapshot_name} to disk image @var{output_filename}
 using format @var{output_fmt}. It can be optionally compressed (@code{-c}
@@ -133,43 +103,25 @@ created as a copy on write image of the specified base image; the
 @var{backing_file} should have the same content as the input's base image,
 however the path, image format, etc may differ.
 
-@item info [-f @var{fmt}] [--output=@var{ofmt}] [--backing-chain] @var{filename}
+@item info [-f @var{fmt}] @var{filename}
 
 Give information about the disk image @var{filename}. Use it in
 particular to know the size reserved on disk which can be different
 from the displayed size. If VM snapshots are stored in the disk image,
-they are displayed too. The command can output in the format @var{ofmt}
-which is either @code{human} or @code{json}.
-
-If a disk image has a backing file chain, information about each disk image in
-the chain can be recursively enumerated by using the option @code{--backing-chain}.
-
-For instance, if you have an image chain like:
-
-@example
-base.qcow2 <- snap1.qcow2 <- snap2.qcow2
-@end example
-
-To enumerate information about each disk image in the above chain, starting from top to base, do:
-
-@example
-qemu-img info --backing-chain snap2.qcow2
-@end example
+they are displayed too.
 
 @item snapshot [-l | -a @var{snapshot} | -c @var{snapshot} | -d @var{snapshot} ] @var{filename}
 
 List, apply, create or delete snapshots in image @var{filename}.
 
-@item rebase [-f @var{fmt}] [-t @var{cache}] [-p] [-u] -b @var{backing_file} [-F @var{backing_fmt}] @var{filename}
+@item rebase [-f @var{fmt}] [-u] -b @var{backing_file} [-F @var{backing_fmt}] @var{filename}
 
 Changes the backing file of an image. Only the formats @code{qcow2} and
 @code{qed} support changing the backing file.
 
 The backing file is changed to @var{backing_file} and (if the image format of
 @var{filename} supports this) the backing file format is changed to
-@var{backing_fmt}. If @var{backing_file} is specified as ``'' (the empty
-string), then the image is rebased onto no backing file (i.e. it will exist
-independently of any backing file).
+@var{backing_fmt}.
 
 There are two different modes in which @code{rebase} can operate:
 @table @option
@@ -196,24 +148,6 @@ It can be used without an accessible old backing file, i.e. you can use it to
 fix an image whose backing file has already been moved/renamed.
 @end table
 
-You can use @code{rebase} to perform a ``diff'' operation on two
-disk images.  This can be useful when you have copied or cloned
-a guest, and you want to get back to a thin image on top of a
-template or base image.
-
-Say that @code{base.img} has been cloned as @code{modified.img} by
-copying it, and that the @code{modified.img} guest has run so there
-are now some changes compared to @code{base.img}.  To construct a thin
-image called @code{diff.qcow2} that contains just the differences, do:
-
-@example
-qemu-img create -f qcow2 -b modified.img diff.qcow2
-qemu-img rebase -b base.img diff.qcow2
-@end example
-
-At this point, @code{modified.img} can be discarded, since
-@code{base.img + diff.qcow2} contains the same information.
-
 @item resize @var{filename} [+ | -]@var{size}
 
 Change the disk image as if it had been created with @var{size}.
@@ -238,6 +172,12 @@ file system supports @emph{holes} (for example in ext2 or ext3 on
 Linux or NTFS on Windows), then only the written sectors will reserve
 space. Use @code{qemu-img info} to know the real size used by the
 image or @code{ls -ls} on Unix/Linux.
+
+@item host_device
+
+Host device format. This format should be used instead of raw when
+converting to block devices or other devices where "holes" are not
+supported.
 
 @item qcow2
 QEMU image format, the most versatile format. Use it to have smaller
@@ -269,29 +209,6 @@ to grow.
 
 @end table
 
-@item qed
-Image format with support for backing files and compact image files (when your
-filesystem or transport medium does not support holes).  Good performance due
-to less metadata than the more featureful qcow2 format, especially with
-cache=writethrough or cache=directsync.  Consider using qcow2 which will soon
-have a similar optimization and is most actively developed.
-
-Supported options:
-@table @code
-@item backing_file
-File name of a base image (see @option{create} subcommand).
-@item backing_fmt
-Image file format of backing file (optional).  Useful if the format cannot be
-autodetected because it has no header, like some vhd/vpc files.
-@item cluster_size
-Changes the cluster size (must be power-of-2 between 4K and 64K). Smaller
-cluster sizes can improve the image file size whereas larger cluster sizes
-generally provide better performance.
-@item table_size
-Changes the number of clusters per L1/L2 table (must be power-of-2 between 1
-and 16).  There is normally no need to change this value but this option can be
-used for performance benchmarking.
-@end table
 
 @item qcow
 Old QEMU image format. Left for compatibility.

@@ -55,7 +55,7 @@ int select_watchdog(const char *p)
     QemuOpts *opts;
 
     /* -watchdog ? lists available devices and exits cleanly. */
-    if (is_help_option(p)) {
+    if (strcmp(p, "?") == 0) {
         QLIST_FOREACH(model, &watchdog_list, entry) {
             fprintf(stderr, "\t%s\t%s\n",
                      model->wdt_name, model->wdt_description);
@@ -66,7 +66,7 @@ int select_watchdog(const char *p)
     QLIST_FOREACH(model, &watchdog_list, entry) {
         if (strcasecmp(model->wdt_name, p) == 0) {
             /* add the device */
-            opts = qemu_opts_create(qemu_find_opts("device"), NULL, 0, NULL);
+            opts = qemu_opts_create(qemu_find_opts("device"), NULL, 0);
             qemu_opt_set(opts, "driver", p);
             return 0;
         }
@@ -132,7 +132,7 @@ void watchdog_perform_action(void)
 
     case WDT_PAUSE:             /* same as 'stop' command in monitor */
         watchdog_mon_event("pause");
-        vm_stop(RUN_STATE_WATCHDOG);
+        vm_stop(0);
         break;
 
     case WDT_DEBUG:

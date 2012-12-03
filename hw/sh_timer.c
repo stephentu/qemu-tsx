@@ -5,14 +5,12 @@
  * Based on arm_timer.c by Paul Brook
  * Copyright (c) 2005-2006 CodeSourcery.
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "hw.h"
 #include "sh.h"
 #include "qemu-timer.h"
-#include "exec-memory.h"
-#include "ptimer.h"
 
 //#define DEBUG_TIMER
 
@@ -59,7 +57,7 @@ static void sh_timer_update(sh_timer_state *s)
     s->int_level = new_level;
 }
 
-static uint32_t sh_timer_read(void *opaque, hwaddr offset)
+static uint32_t sh_timer_read(void *opaque, target_phys_addr_t offset)
 {
     sh_timer_state *s = (sh_timer_state *)opaque;
 
@@ -79,7 +77,7 @@ static uint32_t sh_timer_read(void *opaque, hwaddr offset)
     }
 }
 
-static void sh_timer_write(void *opaque, hwaddr offset,
+static void sh_timer_write(void *opaque, target_phys_addr_t offset,
                             uint32_t value)
 {
     sh_timer_state *s = (sh_timer_state *)opaque;
@@ -190,7 +188,7 @@ static void *sh_timer_init(uint32_t freq, int feat, qemu_irq irq)
     sh_timer_state *s;
     QEMUBH *bh;
 
-    s = (sh_timer_state *)g_malloc0(sizeof(sh_timer_state));
+    s = (sh_timer_state *)qemu_mallocz(sizeof(sh_timer_state));
     s->freq = freq;
     s->feat = feat;
     s->tcor = 0xffffffff;
@@ -212,9 +210,6 @@ static void *sh_timer_init(uint32_t freq, int feat, qemu_irq irq)
 }
 
 typedef struct {
-    MemoryRegion iomem;
-    MemoryRegion iomem_p4;
-    MemoryRegion iomem_a7;
     void *timer[3];
     int level[3];
     uint32_t tocr;
@@ -222,8 +217,7 @@ typedef struct {
     int feat;
 } tmu012_state;
 
-static uint64_t tmu012_read(void *opaque, hwaddr offset,
-                            unsigned size)
+static uint32_t tmu012_read(void *opaque, target_phys_addr_t offset)
 {
     tmu012_state *s = (tmu012_state *)opaque;
 
@@ -253,8 +247,8 @@ static uint64_t tmu012_read(void *opaque, hwaddr offset,
     return 0;
 }
 
-static void tmu012_write(void *opaque, hwaddr offset,
-                        uint64_t value, unsigned size)
+static void tmu012_write(void *opaque, target_phys_addr_t offset,
+                        uint32_t value)
 {
     tmu012_state *s = (tmu012_state *)opaque;
 
@@ -297,37 +291,37 @@ static void tmu012_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps tmu012_ops = {
-    .read = tmu012_read,
-    .write = tmu012_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const tmu012_readfn[] = {
+    tmu012_read,
+    tmu012_read,
+    tmu012_read
 };
 
-void tmu012_init(MemoryRegion *sysmem, hwaddr base,
-                 int feat, uint32_t freq,
+static CPUWriteMemoryFunc * const tmu012_writefn[] = {
+    tmu012_write,
+    tmu012_write,
+    tmu012_write
+};
+
+void tmu012_init(target_phys_addr_t base, int feat, uint32_t freq,
 		 qemu_irq ch0_irq, qemu_irq ch1_irq,
 		 qemu_irq ch2_irq0, qemu_irq ch2_irq1)
 {
+    int iomemtype;
     tmu012_state *s;
     int timer_feat = (feat & TMU012_FEAT_EXTCLK) ? TIMER_FEAT_EXTCLK : 0;
 
-    s = (tmu012_state *)g_malloc0(sizeof(tmu012_state));
+    s = (tmu012_state *)qemu_mallocz(sizeof(tmu012_state));
     s->feat = feat;
     s->timer[0] = sh_timer_init(freq, timer_feat, ch0_irq);
     s->timer[1] = sh_timer_init(freq, timer_feat, ch1_irq);
     if (feat & TMU012_FEAT_3CHAN)
         s->timer[2] = sh_timer_init(freq, timer_feat | TIMER_FEAT_CAPT,
 				    ch2_irq0); /* ch2_irq1 not supported */
-
-    memory_region_init_io(&s->iomem, &tmu012_ops, s,
-                          "timer", 0x100000000ULL);
-
-    memory_region_init_alias(&s->iomem_p4, "timer-p4",
-                             &s->iomem, 0, 0x1000);
-    memory_region_add_subregion(sysmem, P4ADDR(base), &s->iomem_p4);
-
-    memory_region_init_alias(&s->iomem_a7, "timer-a7",
-                             &s->iomem, 0, 0x1000);
-    memory_region_add_subregion(sysmem, A7ADDR(base), &s->iomem_a7);
+    iomemtype = cpu_register_io_memory(tmu012_readfn,
+                                       tmu012_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(P4ADDR(base), 0x00001000, iomemtype);
+    cpu_register_physical_memory(A7ADDR(base), 0x00001000, iomemtype);
     /* ??? Save/restore.  */
 }

@@ -150,6 +150,30 @@ static void ne2000_update_irq(NE2000State *s)
     qemu_set_irq(s->irq, (isr != 0));
 }
 
+#define POLYNOMIAL 0x04c11db6
+
+/* From FreeBSD */
+/* XXX: optimize */
+static int compute_mcast_idx(const uint8_t *ep)
+{
+    uint32_t crc;
+    int carry, i, j;
+    uint8_t b;
+
+    crc = 0xffffffff;
+    for (i = 0; i < 6; i++) {
+        b = *ep++;
+        for (j = 0; j < 8; j++) {
+            carry = ((crc & 0x80000000L) ? 1 : 0) ^ (b & 0x01);
+            crc <<= 1;
+            b >>= 1;
+            if (carry)
+                crc = ((crc ^ POLYNOMIAL) | carry);
+        }
+    }
+    return (crc >> 26);
+}
+
 static int ne2000_buffer_full(NE2000State *s)
 {
     int avail, index, boundary;
@@ -165,7 +189,7 @@ static int ne2000_buffer_full(NE2000State *s)
     return 0;
 }
 
-int ne2000_can_receive(NetClientState *nc)
+int ne2000_can_receive(VLANClientState *nc)
 {
     NE2000State *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -176,7 +200,7 @@ int ne2000_can_receive(NetClientState *nc)
 
 #define MIN_BUF_SIZE 60
 
-ssize_t ne2000_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
+ssize_t ne2000_receive(VLANClientState *nc, const uint8_t *buf, size_t size_)
 {
     NE2000State *s = DO_UPCAST(NICState, nc, nc)->opaque;
     int size = size_;
@@ -273,7 +297,7 @@ ssize_t ne2000_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
     return size_;
 }
 
-static void ne2000_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+void ne2000_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     NE2000State *s = opaque;
     int offset, page, index;
@@ -370,7 +394,7 @@ static void ne2000_ioport_write(void *opaque, uint32_t addr, uint32_t val)
     }
 }
 
-static uint32_t ne2000_ioport_read(void *opaque, uint32_t addr)
+uint32_t ne2000_ioport_read(void *opaque, uint32_t addr)
 {
     NE2000State *s = opaque;
     int offset, page, ret;
@@ -520,7 +544,7 @@ static inline void ne2000_dma_update(NE2000State *s, int len)
     }
 }
 
-static void ne2000_asic_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+void ne2000_asic_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     NE2000State *s = opaque;
 
@@ -540,7 +564,7 @@ static void ne2000_asic_ioport_write(void *opaque, uint32_t addr, uint32_t val)
     }
 }
 
-static uint32_t ne2000_asic_ioport_read(void *opaque, uint32_t addr)
+uint32_t ne2000_asic_ioport_read(void *opaque, uint32_t addr)
 {
     NE2000State *s = opaque;
     int ret;
@@ -588,12 +612,12 @@ static uint32_t ne2000_asic_ioport_readl(void *opaque, uint32_t addr)
     return ret;
 }
 
-static void ne2000_reset_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+void ne2000_reset_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     /* nothing to do (end of reset pulse) */
 }
 
-static uint32_t ne2000_reset_ioport_read(void *opaque, uint32_t addr)
+uint32_t ne2000_reset_ioport_read(void *opaque, uint32_t addr)
 {
     NE2000State *s = opaque;
     ne2000_reset(s);
@@ -652,58 +676,30 @@ static const VMStateDescription vmstate_pci_ne2000 = {
     }
 };
 
-static uint64_t ne2000_read(void *opaque, hwaddr addr,
-                            unsigned size)
-{
-    NE2000State *s = opaque;
-
-    if (addr < 0x10 && size == 1) {
-        return ne2000_ioport_read(s, addr);
-    } else if (addr == 0x10) {
-        if (size <= 2) {
-            return ne2000_asic_ioport_read(s, addr);
-        } else {
-            return ne2000_asic_ioport_readl(s, addr);
-        }
-    } else if (addr == 0x1f && size == 1) {
-        return ne2000_reset_ioport_read(s, addr);
-    }
-    return ((uint64_t)1 << (size * 8)) - 1;
-}
-
-static void ne2000_write(void *opaque, hwaddr addr,
-                         uint64_t data, unsigned size)
-{
-    NE2000State *s = opaque;
-
-    if (addr < 0x10 && size == 1) {
-        ne2000_ioport_write(s, addr, data);
-    } else if (addr == 0x10) {
-        if (size <= 2) {
-            ne2000_asic_ioport_write(s, addr, data);
-        } else {
-            ne2000_asic_ioport_writel(s, addr, data);
-        }
-    } else if (addr == 0x1f && size == 1) {
-        ne2000_reset_ioport_write(s, addr, data);
-    }
-}
-
-static const MemoryRegionOps ne2000_ops = {
-    .read = ne2000_read,
-    .write = ne2000_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-};
-
 /***********************************************************/
 /* PCI NE2000 definitions */
 
-void ne2000_setup_io(NE2000State *s, unsigned size)
+static void ne2000_map(PCIDevice *pci_dev, int region_num,
+                       pcibus_t addr, pcibus_t size, int type)
 {
-    memory_region_init_io(&s->io, &ne2000_ops, s, "ne2000", size);
+    PCINE2000State *d = DO_UPCAST(PCINE2000State, dev, pci_dev);
+    NE2000State *s = &d->ne2000;
+
+    register_ioport_write(addr, 16, 1, ne2000_ioport_write, s);
+    register_ioport_read(addr, 16, 1, ne2000_ioport_read, s);
+
+    register_ioport_write(addr + 0x10, 1, 1, ne2000_asic_ioport_write, s);
+    register_ioport_read(addr + 0x10, 1, 1, ne2000_asic_ioport_read, s);
+    register_ioport_write(addr + 0x10, 2, 2, ne2000_asic_ioport_write, s);
+    register_ioport_read(addr + 0x10, 2, 2, ne2000_asic_ioport_read, s);
+    register_ioport_write(addr + 0x10, 4, 4, ne2000_asic_ioport_writel, s);
+    register_ioport_read(addr + 0x10, 4, 4, ne2000_asic_ioport_readl, s);
+
+    register_ioport_write(addr + 0x1f, 1, 1, ne2000_reset_ioport_write, s);
+    register_ioport_read(addr + 0x1f, 1, 1, ne2000_reset_ioport_read, s);
 }
 
-static void ne2000_cleanup(NetClientState *nc)
+static void ne2000_cleanup(VLANClientState *nc)
 {
     NE2000State *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -711,7 +707,7 @@ static void ne2000_cleanup(NetClientState *nc)
 }
 
 static NetClientInfo net_ne2000_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_TYPE_NIC,
     .size = sizeof(NICState),
     .can_receive = ne2000_can_receive,
     .receive = ne2000_receive,
@@ -725,64 +721,61 @@ static int pci_ne2000_init(PCIDevice *pci_dev)
     uint8_t *pci_conf;
 
     pci_conf = d->dev.config;
-    pci_conf[PCI_INTERRUPT_PIN] = 1; /* interrupt pin A */
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REALTEK);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REALTEK_8029);
+    pci_config_set_class(pci_conf, PCI_CLASS_NETWORK_ETHERNET);
+    /* TODO: RST# value should be 0. PCI spec 6.2.4 */
+    pci_conf[PCI_INTERRUPT_PIN] = 1; // interrupt pin 0
 
+    pci_register_bar(&d->dev, 0, 0x100,
+                           PCI_BASE_ADDRESS_SPACE_IO, ne2000_map);
     s = &d->ne2000;
-    ne2000_setup_io(s, 0x100);
-    pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
     s->irq = d->dev.irq[0];
 
     qemu_macaddr_default_if_unset(&s->c.macaddr);
     ne2000_reset(s);
 
     s->nic = qemu_new_nic(&net_ne2000_info, &s->c,
-                          object_get_typename(OBJECT(pci_dev)), pci_dev->qdev.id, s);
+                          pci_dev->qdev.info->name, pci_dev->qdev.id, s);
     qemu_format_nic_info_str(&s->nic->nc, s->c.macaddr.a);
+
+    if (!pci_dev->qdev.hotplugged) {
+        static int loaded = 0;
+        if (!loaded) {
+            rom_add_option("pxe-ne2k_pci.bin", -1);
+            loaded = 1;
+        }
+    }
 
     add_boot_device_path(s->c.bootindex, &pci_dev->qdev, "/ethernet-phy@0");
 
     return 0;
 }
 
-static void pci_ne2000_exit(PCIDevice *pci_dev)
+static int pci_ne2000_exit(PCIDevice *pci_dev)
 {
     PCINE2000State *d = DO_UPCAST(PCINE2000State, dev, pci_dev);
     NE2000State *s = &d->ne2000;
 
-    memory_region_destroy(&s->io);
-    qemu_del_net_client(&s->nic->nc);
+    qemu_del_vlan_client(&s->nic->nc);
+    return 0;
 }
 
-static Property ne2000_properties[] = {
-    DEFINE_NIC_PROPERTIES(PCINE2000State, ne2000.c),
-    DEFINE_PROP_END_OF_LIST(),
+static PCIDeviceInfo ne2000_info = {
+    .qdev.name  = "ne2k_pci",
+    .qdev.size  = sizeof(PCINE2000State),
+    .qdev.vmsd  = &vmstate_pci_ne2000,
+    .init       = pci_ne2000_init,
+    .exit       = pci_ne2000_exit,
+    .qdev.props = (Property[]) {
+        DEFINE_NIC_PROPERTIES(PCINE2000State, ne2000.c),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void ne2000_class_init(ObjectClass *klass, void *data)
+static void ne2000_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = pci_ne2000_init;
-    k->exit = pci_ne2000_exit;
-    k->romfile = "pxe-ne2k_pci.rom",
-    k->vendor_id = PCI_VENDOR_ID_REALTEK;
-    k->device_id = PCI_DEVICE_ID_REALTEK_8029;
-    k->class_id = PCI_CLASS_NETWORK_ETHERNET;
-    dc->vmsd = &vmstate_pci_ne2000;
-    dc->props = ne2000_properties;
+    pci_qdev_register(&ne2000_info);
 }
 
-static TypeInfo ne2000_info = {
-    .name          = "ne2k_pci",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PCINE2000State),
-    .class_init    = ne2000_class_init,
-};
-
-static void ne2000_register_types(void)
-{
-    type_register_static(&ne2000_info);
-}
-
-type_init(ne2000_register_types)
+device_init(ne2000_register_devices)

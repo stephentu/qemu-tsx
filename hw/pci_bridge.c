@@ -135,81 +135,6 @@ pcibus_t pci_bridge_get_limit(const PCIDevice *bridge, uint8_t type)
     return limit;
 }
 
-static void pci_bridge_init_alias(PCIBridge *bridge, MemoryRegion *alias,
-                                  uint8_t type, const char *name,
-                                  MemoryRegion *space,
-                                  MemoryRegion *parent_space,
-                                  bool enabled)
-{
-    pcibus_t base = pci_bridge_get_base(&bridge->dev, type);
-    pcibus_t limit = pci_bridge_get_limit(&bridge->dev, type);
-    /* TODO: this doesn't handle base = 0 limit = 2^64 - 1 correctly.
-     * Apparently no way to do this with existing memory APIs. */
-    pcibus_t size = enabled && limit >= base ? limit + 1 - base : 0;
-
-    memory_region_init_alias(alias, name, space, base, size);
-    memory_region_add_subregion_overlap(parent_space, base, alias, 1);
-}
-
-static PCIBridgeWindows *pci_bridge_region_init(PCIBridge *br)
-{
-    PCIBus *parent = br->dev.bus;
-    PCIBridgeWindows *w = g_new(PCIBridgeWindows, 1);
-    uint16_t cmd = pci_get_word(br->dev.config + PCI_COMMAND);
-
-    pci_bridge_init_alias(br, &w->alias_pref_mem,
-                          PCI_BASE_ADDRESS_MEM_PREFETCH,
-                          "pci_bridge_pref_mem",
-                          &br->address_space_mem,
-                          parent->address_space_mem,
-                          cmd & PCI_COMMAND_MEMORY);
-    pci_bridge_init_alias(br, &w->alias_mem,
-                          PCI_BASE_ADDRESS_SPACE_MEMORY,
-                          "pci_bridge_mem",
-                          &br->address_space_mem,
-                          parent->address_space_mem,
-                          cmd & PCI_COMMAND_MEMORY);
-    pci_bridge_init_alias(br, &w->alias_io,
-                          PCI_BASE_ADDRESS_SPACE_IO,
-                          "pci_bridge_io",
-                          &br->address_space_io,
-                          parent->address_space_io,
-                          cmd & PCI_COMMAND_IO);
-   /* TODO: optinal VGA and VGA palette snooping support. */
-
-    return w;
-}
-
-static void pci_bridge_region_del(PCIBridge *br, PCIBridgeWindows *w)
-{
-    PCIBus *parent = br->dev.bus;
-
-    memory_region_del_subregion(parent->address_space_io, &w->alias_io);
-    memory_region_del_subregion(parent->address_space_mem, &w->alias_mem);
-    memory_region_del_subregion(parent->address_space_mem, &w->alias_pref_mem);
-}
-
-static void pci_bridge_region_cleanup(PCIBridge *br, PCIBridgeWindows *w)
-{
-    memory_region_destroy(&w->alias_io);
-    memory_region_destroy(&w->alias_mem);
-    memory_region_destroy(&w->alias_pref_mem);
-    g_free(w);
-}
-
-static void pci_bridge_update_mappings(PCIBridge *br)
-{
-    PCIBridgeWindows *w = br->windows;
-
-    /* Make updates atomic to: handle the case of one VCPU updating the bridge
-     * while another accesses an unaffected region. */
-    memory_region_transaction_begin();
-    pci_bridge_region_del(br, br->windows);
-    br->windows = pci_bridge_region_init(br);
-    memory_region_transaction_commit();
-    pci_bridge_region_cleanup(br, w);
-}
-
 /* default write_config function for PCI-to-PCI bridge */
 void pci_bridge_write_config(PCIDevice *d,
                              uint32_t address, uint32_t val, int len)
@@ -220,15 +145,13 @@ void pci_bridge_write_config(PCIDevice *d,
 
     pci_default_write_config(d, address, val, len);
 
-    if (ranges_overlap(address, len, PCI_COMMAND, 2) ||
-
-        /* io base/limit */
+    if (/* io base/limit */
         ranges_overlap(address, len, PCI_IO_BASE, 2) ||
 
         /* memory base/limit, prefetchable base/limit and
            io base/limit upper 16 */
         ranges_overlap(address, len, PCI_MEMORY_BASE, 20)) {
-        pci_bridge_update_mappings(s);
+        pci_bridge_update_mappings(&s->sec_bus);
     }
 
     newctl = pci_get_word(d->config + PCI_BRIDGE_CONTROL);
@@ -254,14 +177,13 @@ void pci_bridge_disable_base_limit(PCIDevice *dev)
                                PCI_PREF_RANGE_MASK & 0xffff);
     pci_word_test_and_clear_mask(conf + PCI_PREF_MEMORY_LIMIT,
                                  PCI_PREF_RANGE_MASK & 0xffff);
-    pci_set_long(conf + PCI_PREF_BASE_UPPER32, 0);
-    pci_set_long(conf + PCI_PREF_LIMIT_UPPER32, 0);
+    pci_set_word(conf + PCI_PREF_BASE_UPPER32, 0);
+    pci_set_word(conf + PCI_PREF_LIMIT_UPPER32, 0);
 }
 
 /* reset bridge specific configuration registers */
-void pci_bridge_reset(DeviceState *qdev)
+void pci_bridge_reset_reg(PCIDevice *dev)
 {
-    PCIDevice *dev = PCI_DEVICE(qdev);
     uint8_t *conf = dev->config;
 
     conf[PCI_PRIMARY_BUS] = 0;
@@ -291,10 +213,17 @@ void pci_bridge_reset(DeviceState *qdev)
                                  PCI_PREF_RANGE_MASK & 0xffff);
     pci_word_test_and_clear_mask(conf + PCI_PREF_MEMORY_LIMIT,
                                  PCI_PREF_RANGE_MASK & 0xffff);
-    pci_set_long(conf + PCI_PREF_BASE_UPPER32, 0);
-    pci_set_long(conf + PCI_PREF_LIMIT_UPPER32, 0);
+    pci_set_word(conf + PCI_PREF_BASE_UPPER32, 0);
+    pci_set_word(conf + PCI_PREF_LIMIT_UPPER32, 0);
 
     pci_set_word(conf + PCI_BRIDGE_CONTROL, 0);
+}
+
+/* default reset function for PCI-to-PCI bridge */
+void pci_bridge_reset(DeviceState *qdev)
+{
+    PCIDevice *dev = DO_UPCAST(PCIDevice, qdev, qdev);
+    pci_bridge_reset_reg(dev);
 }
 
 /* default qdev initialization function for PCI-to-PCI bridge */
@@ -304,8 +233,8 @@ int pci_bridge_initfn(PCIDevice *dev)
     PCIBridge *br = DO_UPCAST(PCIBridge, dev, dev);
     PCIBus *sec_bus = &br->sec_bus;
 
-    pci_word_test_and_set_mask(dev->config + PCI_STATUS,
-                               PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK);
+    pci_set_word(dev->config + PCI_STATUS,
+                 PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK);
     pci_config_set_class(dev->config, PCI_CLASS_BRIDGE_PCI);
     dev->config[PCI_HEADER_TYPE] =
         (dev->config[PCI_HEADER_TYPE] & PCI_HEADER_TYPE_MULTI_FUNCTION) |
@@ -313,41 +242,24 @@ int pci_bridge_initfn(PCIDevice *dev)
     pci_set_word(dev->config + PCI_SEC_STATUS,
                  PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK);
 
-    /*
-     * If we don't specify the name, the bus will be addressed as <id>.0, where
-     * id is the device id.
-     * Since PCI Bridge devices have a single bus each, we don't need the index:
-     * let users address the bus using the device name.
-     */
-    if (!br->bus_name && dev->qdev.id && *dev->qdev.id) {
-	    br->bus_name = dev->qdev.id;
-    }
-
-    qbus_create_inplace(&sec_bus->qbus, TYPE_PCI_BUS, &dev->qdev,
+    qbus_create_inplace(&sec_bus->qbus, &pci_bus_info, &dev->qdev,
                         br->bus_name);
     sec_bus->parent_dev = dev;
     sec_bus->map_irq = br->map_irq;
-    sec_bus->address_space_mem = &br->address_space_mem;
-    memory_region_init(&br->address_space_mem, "pci_bridge_pci", INT64_MAX);
-    sec_bus->address_space_io = &br->address_space_io;
-    memory_region_init(&br->address_space_io, "pci_bridge_io", 65536);
-    br->windows = pci_bridge_region_init(br);
+
     QLIST_INIT(&sec_bus->child);
     QLIST_INSERT_HEAD(&parent->child, sec_bus, sibling);
     return 0;
 }
 
 /* default qdev clean up function for PCI-to-PCI bridge */
-void pci_bridge_exitfn(PCIDevice *pci_dev)
+int pci_bridge_exitfn(PCIDevice *pci_dev)
 {
     PCIBridge *s = DO_UPCAST(PCIBridge, dev, pci_dev);
     assert(QLIST_EMPTY(&s->sec_bus.child));
     QLIST_REMOVE(&s->sec_bus, sibling);
-    pci_bridge_region_del(s, s->windows);
-    pci_bridge_region_cleanup(s, s->windows);
-    memory_region_destroy(&s->address_space_mem);
-    memory_region_destroy(&s->address_space_io);
     /* qbus_free() is called automatically by qdev_free() */
+    return 0;
 }
 
 /*

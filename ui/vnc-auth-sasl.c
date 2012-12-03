@@ -31,13 +31,11 @@
 void vnc_sasl_client_cleanup(VncState *vs)
 {
     if (vs->sasl.conn) {
-        vs->sasl.runSSF = false;
-        vs->sasl.wantSSF = false;
-        vs->sasl.waitWriteSSF = 0;
+        vs->sasl.runSSF = vs->sasl.waitWriteSSF = vs->sasl.wantSSF = 0;
         vs->sasl.encodedLength = vs->sasl.encodedOffset = 0;
         vs->sasl.encoded = NULL;
-        g_free(vs->sasl.username);
-        g_free(vs->sasl.mechlist);
+        free(vs->sasl.username);
+        free(vs->sasl.mechlist);
         vs->sasl.username = vs->sasl.mechlist = NULL;
         sasl_dispose(&vs->sasl.conn);
         vs->sasl.conn = NULL;
@@ -137,7 +135,7 @@ static int vnc_auth_sasl_check_access(VncState *vs)
     }
     VNC_DEBUG("SASL client username %s\n", (const char *)val);
 
-    vs->sasl.username = g_strdup((const char*)val);
+    vs->sasl.username = qemu_strdup((const char*)val);
 
     if (vs->vd->sasl.acl == NULL) {
         VNC_DEBUG("no ACL activated, allowing access\n");
@@ -432,7 +430,13 @@ static int protocol_client_auth_sasl_start_len(VncState *vs, uint8_t *data, size
 
 static int protocol_client_auth_sasl_mechname(VncState *vs, uint8_t *data, size_t len)
 {
-    char *mechname = g_strndup((const char *) data, len);
+    char *mechname = malloc(len + 1);
+    if (!mechname) {
+        VNC_DEBUG("Out of memory reading mechname\n");
+        vnc_client_error(vs);
+    }
+    strncpy(mechname, (char*)data, len);
+    mechname[len] = '\0';
     VNC_DEBUG("Got client mechname '%s' check against '%s'\n",
               mechname, vs->sasl.mechlist);
 
@@ -456,7 +460,7 @@ static int protocol_client_auth_sasl_mechname(VncState *vs, uint8_t *data, size_
         }
     }
 
-    g_free(vs->sasl.mechlist);
+    free(vs->sasl.mechlist);
     vs->sasl.mechlist = mechname;
 
     VNC_DEBUG("Validated mechname '%s'\n", mechname);
@@ -465,7 +469,7 @@ static int protocol_client_auth_sasl_mechname(VncState *vs, uint8_t *data, size_
 
  fail:
     vnc_client_error(vs);
-    g_free(mechname);
+    free(mechname);
     return -1;
 }
 
@@ -487,6 +491,13 @@ static int protocol_client_auth_sasl_mechname_len(VncState *vs, uint8_t *data, s
     return 0;
 }
 
+#define USES_X509_AUTH(vs)                              \
+    ((vs)->subauth == VNC_AUTH_VENCRYPT_X509NONE ||   \
+     (vs)->subauth == VNC_AUTH_VENCRYPT_X509VNC ||    \
+     (vs)->subauth == VNC_AUTH_VENCRYPT_X509PLAIN ||  \
+     (vs)->subauth == VNC_AUTH_VENCRYPT_X509SASL)
+
+
 void start_auth_sasl(VncState *vs)
 {
     const char *mechlist = NULL;
@@ -502,7 +513,7 @@ void start_auth_sasl(VncState *vs)
         goto authabort;
 
     if (!(remoteAddr = vnc_socket_remote_addr("%s;%s", vs->csock))) {
-        g_free(localAddr);
+        free(localAddr);
         goto authabort;
     }
 
@@ -514,8 +525,8 @@ void start_auth_sasl(VncState *vs)
                           NULL, /* Callbacks, not needed */
                           SASL_SUCCESS_DATA,
                           &vs->sasl.conn);
-    g_free(localAddr);
-    g_free(remoteAddr);
+    free(localAddr);
+    free(remoteAddr);
     localAddr = remoteAddr = NULL;
 
     if (err != SASL_OK) {
@@ -527,8 +538,8 @@ void start_auth_sasl(VncState *vs)
 
 #ifdef CONFIG_VNC_TLS
     /* Inform SASL that we've got an external SSF layer from TLS/x509 */
-    if (vs->auth == VNC_AUTH_VENCRYPT &&
-        vs->subauth == VNC_AUTH_VENCRYPT_X509SASL) {
+    if (vs->vd->auth == VNC_AUTH_VENCRYPT &&
+        vs->vd->subauth == VNC_AUTH_VENCRYPT_X509SASL) {
         gnutls_cipher_algorithm_t cipher;
         sasl_ssf_t ssf;
 
@@ -559,8 +570,8 @@ void start_auth_sasl(VncState *vs)
 #ifdef CONFIG_VNC_TLS
         /* Disable SSF, if using TLS+x509+SASL only. TLS without x509
            is not sufficiently strong */
-        || (vs->auth == VNC_AUTH_VENCRYPT &&
-            vs->subauth == VNC_AUTH_VENCRYPT_X509SASL)
+        || (vs->vd->auth == VNC_AUTH_VENCRYPT &&
+            vs->vd->subauth == VNC_AUTH_VENCRYPT_X509SASL)
 #endif /* CONFIG_VNC_TLS */
         ) {
         /* If we've got TLS or UNIX domain sock, we don't care about SSF */
@@ -604,7 +615,12 @@ void start_auth_sasl(VncState *vs)
     }
     VNC_DEBUG("Available mechanisms for client: '%s'\n", mechlist);
 
-    vs->sasl.mechlist = g_strdup(mechlist);
+    if (!(vs->sasl.mechlist = strdup(mechlist))) {
+        VNC_DEBUG("Out of memory");
+        sasl_dispose(&vs->sasl.conn);
+        vs->sasl.conn = NULL;
+        goto authabort;
+    }
     mechlistlen = strlen(mechlist);
     vnc_write_u32(vs, mechlistlen);
     vnc_write(vs, mechlist, mechlistlen);
@@ -617,6 +633,7 @@ void start_auth_sasl(VncState *vs)
 
  authabort:
     vnc_client_error(vs);
+    return;
 }
 
 

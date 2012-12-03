@@ -24,43 +24,124 @@
 
 #include "qemu-common.h"
 #include "qemu-aio.h"
-#include "main-loop.h"
+
+/*
+ * An AsyncContext protects the callbacks of AIO requests and Bottom Halves
+ * against interfering with each other. A typical example is qcow2 that accepts
+ * asynchronous requests, but relies for manipulation of its metadata on
+ * synchronous bdrv_read/write that doesn't trigger any callbacks.
+ *
+ * However, these functions are often emulated using AIO which means that AIO
+ * callbacks must be run - but at the same time we must not run callbacks of
+ * other requests as they might start to modify metadata and corrupt the
+ * internal state of the caller of bdrv_read/write.
+ *
+ * To achieve the desired semantics we switch into a new AsyncContext.
+ * Callbacks must only be run if they belong to the current AsyncContext.
+ * Otherwise they need to be queued until their own context is active again.
+ * This is how you can make qemu_aio_wait() wait only for your own callbacks.
+ *
+ * The AsyncContexts form a stack. When you leave a AsyncContexts, you always
+ * return to the old ("parent") context.
+ */
+struct AsyncContext {
+    /* Consecutive number of the AsyncContext (position in the stack) */
+    int id;
+
+    /* Anchor of the list of Bottom Halves belonging to the context */
+    struct QEMUBH *first_bh;
+
+    /* Link to parent context */
+    struct AsyncContext *parent;
+};
+
+/* The currently active AsyncContext */
+static struct AsyncContext *async_context = &(struct AsyncContext) { 0 };
+
+/*
+ * Enter a new AsyncContext. Already scheduled Bottom Halves and AIO callbacks
+ * won't be called until this context is left again.
+ */
+void async_context_push(void)
+{
+    struct AsyncContext *new = qemu_mallocz(sizeof(*new));
+    new->parent = async_context;
+    new->id = async_context->id + 1;
+    async_context = new;
+}
+
+/* Run queued AIO completions and destroy Bottom Half */
+static void bh_run_aio_completions(void *opaque)
+{
+    QEMUBH **bh = opaque;
+    qemu_bh_delete(*bh);
+    qemu_free(bh);
+    qemu_aio_process_queue();
+}
+/*
+ * Leave the currently active AsyncContext. All Bottom Halves belonging to the
+ * old context are executed before changing the context.
+ */
+void async_context_pop(void)
+{
+    struct AsyncContext *old = async_context;
+    QEMUBH **bh;
+
+    /* Flush the bottom halves, we don't want to lose them */
+    while (qemu_bh_poll());
+
+    /* Switch back to the parent context */
+    async_context = async_context->parent;
+    qemu_free(old);
+
+    if (async_context == NULL) {
+        abort();
+    }
+
+    /* Schedule BH to run any queued AIO completions as soon as possible */
+    bh = qemu_malloc(sizeof(*bh));
+    *bh = qemu_bh_new(bh_run_aio_completions, bh);
+    qemu_bh_schedule(*bh);
+}
+
+/*
+ * Returns the ID of the currently active AsyncContext
+ */
+int get_async_context_id(void)
+{
+    return async_context->id;
+}
 
 /***********************************************************/
 /* bottom halves (can be seen as timers which expire ASAP) */
 
 struct QEMUBH {
-    AioContext *ctx;
     QEMUBHFunc *cb;
     void *opaque;
+    int scheduled;
+    int idle;
+    int deleted;
     QEMUBH *next;
-    bool scheduled;
-    bool idle;
-    bool deleted;
 };
 
-QEMUBH *aio_bh_new(AioContext *ctx, QEMUBHFunc *cb, void *opaque)
+QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque)
 {
     QEMUBH *bh;
-    bh = g_malloc0(sizeof(QEMUBH));
-    bh->ctx = ctx;
+    bh = qemu_mallocz(sizeof(QEMUBH));
     bh->cb = cb;
     bh->opaque = opaque;
-    bh->next = ctx->first_bh;
-    ctx->first_bh = bh;
+    bh->next = async_context->first_bh;
+    async_context->first_bh = bh;
     return bh;
 }
 
-int aio_bh_poll(AioContext *ctx)
+int qemu_bh_poll(void)
 {
-    QEMUBH *bh, **bhp, *next;
+    QEMUBH *bh, **bhp;
     int ret;
 
-    ctx->walking_bh++;
-
     ret = 0;
-    for (bh = ctx->first_bh; bh; bh = next) {
-        next = bh->next;
+    for (bh = async_context->first_bh; bh; bh = bh->next) {
         if (!bh->deleted && bh->scheduled) {
             bh->scheduled = 0;
             if (!bh->idle)
@@ -70,20 +151,15 @@ int aio_bh_poll(AioContext *ctx)
         }
     }
 
-    ctx->walking_bh--;
-
     /* remove deleted bhs */
-    if (!ctx->walking_bh) {
-        bhp = &ctx->first_bh;
-        while (*bhp) {
-            bh = *bhp;
-            if (bh->deleted) {
-                *bhp = bh->next;
-                g_free(bh);
-            } else {
-                bhp = &bh->next;
-            }
-        }
+    bhp = &async_context->first_bh;
+    while (*bhp) {
+        bh = *bhp;
+        if (bh->deleted) {
+            *bhp = bh->next;
+            qemu_free(bh);
+        } else
+            bhp = &bh->next;
     }
 
     return ret;
@@ -103,7 +179,8 @@ void qemu_bh_schedule(QEMUBH *bh)
         return;
     bh->scheduled = 1;
     bh->idle = 0;
-    aio_notify(bh->ctx);
+    /* stop the currently executing CPU to execute the BH ASAP */
+    qemu_notify_event();
 }
 
 void qemu_bh_cancel(QEMUBH *bh)
@@ -117,20 +194,16 @@ void qemu_bh_delete(QEMUBH *bh)
     bh->deleted = 1;
 }
 
-static gboolean
-aio_ctx_prepare(GSource *source, gint    *timeout)
+void qemu_bh_update_timeout(int *timeout)
 {
-    AioContext *ctx = (AioContext *) source;
     QEMUBH *bh;
-    bool scheduled = false;
 
-    for (bh = ctx->first_bh; bh; bh = bh->next) {
+    for (bh = async_context->first_bh; bh; bh = bh->next) {
         if (!bh->deleted && bh->scheduled) {
-            scheduled = true;
             if (bh->idle) {
                 /* idle bottom halves will be polled at least
                  * every 10ms */
-                *timeout = 10;
+                *timeout = MIN(10, *timeout);
             } else {
                 /* non-idle bottom halves will be executed
                  * immediately */
@@ -139,86 +212,5 @@ aio_ctx_prepare(GSource *source, gint    *timeout)
             }
         }
     }
-
-    return scheduled;
 }
 
-static gboolean
-aio_ctx_check(GSource *source)
-{
-    AioContext *ctx = (AioContext *) source;
-    QEMUBH *bh;
-
-    for (bh = ctx->first_bh; bh; bh = bh->next) {
-        if (!bh->deleted && bh->scheduled) {
-            return true;
-	}
-    }
-    return aio_pending(ctx);
-}
-
-static gboolean
-aio_ctx_dispatch(GSource     *source,
-                 GSourceFunc  callback,
-                 gpointer     user_data)
-{
-    AioContext *ctx = (AioContext *) source;
-
-    assert(callback == NULL);
-    aio_poll(ctx, false);
-    return true;
-}
-
-static void
-aio_ctx_finalize(GSource     *source)
-{
-    AioContext *ctx = (AioContext *) source;
-
-    aio_set_event_notifier(ctx, &ctx->notifier, NULL, NULL);
-    event_notifier_cleanup(&ctx->notifier);
-}
-
-static GSourceFuncs aio_source_funcs = {
-    aio_ctx_prepare,
-    aio_ctx_check,
-    aio_ctx_dispatch,
-    aio_ctx_finalize
-};
-
-GSource *aio_get_g_source(AioContext *ctx)
-{
-    g_source_ref(&ctx->source);
-    return &ctx->source;
-}
-
-void aio_notify(AioContext *ctx)
-{
-    event_notifier_set(&ctx->notifier);
-}
-
-AioContext *aio_context_new(void)
-{
-    AioContext *ctx;
-    ctx = (AioContext *) g_source_new(&aio_source_funcs, sizeof(AioContext));
-    event_notifier_init(&ctx->notifier, false);
-    aio_set_event_notifier(ctx, &ctx->notifier, 
-                           (EventNotifierHandler *)
-                           event_notifier_test_and_clear, NULL);
-
-    return ctx;
-}
-
-void aio_context_ref(AioContext *ctx)
-{
-    g_source_ref(&ctx->source);
-}
-
-void aio_context_unref(AioContext *ctx)
-{
-    g_source_unref(&ctx->source);
-}
-
-void aio_flush(AioContext *ctx)
-{
-    while (aio_poll(ctx, true));
-}

@@ -6,7 +6,6 @@
  */
 
 #include <slirp.h>
-#include <main-loop.h>
 
 static void sbappendsb(struct sbuf *sb, struct mbuf *m);
 
@@ -19,8 +18,6 @@ sbfree(struct sbuf *sb)
 void
 sbdrop(struct sbuf *sb, int num)
 {
-    int limit = sb->sb_datalen / 2;
-
 	/*
 	 * We can only drop how much we have
 	 * This should never succeed
@@ -32,9 +29,6 @@ sbdrop(struct sbuf *sb, int num)
 	if(sb->sb_rptr >= sb->sb_data + sb->sb_datalen)
 		sb->sb_rptr -= sb->sb_datalen;
 
-    if (sb->sb_cc < limit && sb->sb_cc + num >= limit) {
-        qemu_notify_event();
-    }
 }
 
 void

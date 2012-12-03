@@ -40,7 +40,6 @@
 struct xlx_pic
 {
     SysBusDevice busdev;
-    MemoryRegion mmio;
     qemu_irq parent_irq;
 
     /* Configuration reg chosen at synthesis-time. QEMU populates
@@ -73,8 +72,7 @@ static void update_irq(struct xlx_pic *p)
     }
 }
 
-static uint64_t
-pic_read(void *opaque, hwaddr addr, unsigned int size)
+static uint32_t pic_readl (void *opaque, target_phys_addr_t addr)
 {
     struct xlx_pic *p = opaque;
     uint32_t r = 0;
@@ -93,11 +91,9 @@ pic_read(void *opaque, hwaddr addr, unsigned int size)
 }
 
 static void
-pic_write(void *opaque, hwaddr addr,
-          uint64_t val64, unsigned int size)
+pic_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
 {
     struct xlx_pic *p = opaque;
-    uint32_t value = val64;
 
     addr >>= 2;
     D(qemu_log("%s addr=%x val=%x\n", __func__, addr * 4, value));
@@ -120,14 +116,14 @@ pic_write(void *opaque, hwaddr addr,
     update_irq(p);
 }
 
-static const MemoryRegionOps pic_ops = {
-    .read = pic_read,
-    .write = pic_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4
-    }
+static CPUReadMemoryFunc * const pic_read[] = {
+    NULL, NULL,
+    &pic_readl,
+};
+
+static CPUWriteMemoryFunc * const pic_write[] = {
+    NULL, NULL,
+    &pic_writel,
 };
 
 static void irq_handler(void *opaque, int irq, int level)
@@ -152,39 +148,29 @@ static void irq_handler(void *opaque, int irq, int level)
 static int xilinx_intc_init(SysBusDevice *dev)
 {
     struct xlx_pic *p = FROM_SYSBUS(typeof (*p), dev);
+    int pic_regs;
 
     qdev_init_gpio_in(&dev->qdev, irq_handler, 32);
     sysbus_init_irq(dev, &p->parent_irq);
 
-    memory_region_init_io(&p->mmio, &pic_ops, p, "xlnx.xps-intc", R_MAX * 4);
-    sysbus_init_mmio(dev, &p->mmio);
+    pic_regs = cpu_register_io_memory(pic_read, pic_write, p, DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, R_MAX * 4, pic_regs);
     return 0;
 }
 
-static Property xilinx_intc_properties[] = {
-    DEFINE_PROP_UINT32("kind-of-intr", struct xlx_pic, c_kind_of_intr, 0),
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo xilinx_intc_info = {
+    .init = xilinx_intc_init,
+    .qdev.name  = "xilinx,intc",
+    .qdev.size  = sizeof(struct xlx_pic),
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_UINT32("kind-of-intr", struct xlx_pic, c_kind_of_intr, 0),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void xilinx_intc_class_init(ObjectClass *klass, void *data)
+static void xilinx_intc_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = xilinx_intc_init;
-    dc->props = xilinx_intc_properties;
+    sysbus_register_withprop(&xilinx_intc_info);
 }
 
-static TypeInfo xilinx_intc_info = {
-    .name          = "xlnx.xps-intc",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(struct xlx_pic),
-    .class_init    = xilinx_intc_class_init,
-};
-
-static void xilinx_intc_register_types(void)
-{
-    type_register_static(&xilinx_intc_info);
-}
-
-type_init(xilinx_intc_register_types)
+device_init(xilinx_intc_register)

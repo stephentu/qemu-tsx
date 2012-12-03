@@ -6,14 +6,12 @@
  *
  * Code based on spitz platform by Andrzej Zaborowski <balrog@zabor.org>
  * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "hw.h"
 #include "pxa.h"
 #include "arm-misc.h"
+#include "sysemu.h"
 #include "devices.h"
 #include "sharpsl.h"
 #include "pcmcia.h"
@@ -23,12 +21,10 @@
 #include "ssi.h"
 #include "blockdev.h"
 #include "sysbus.h"
-#include "exec-memory.h"
 
 #define TOSA_RAM    0x04000000
 #define TOSA_ROM	0x00800000
 
-#define TOSA_GPIO_USB_IN		(5)
 #define TOSA_GPIO_nSD_DETECT	(9)
 #define TOSA_GPIO_ON_RESET		(19)
 #define TOSA_GPIO_CF_IRQ		(21)	/* CF slot0 Ready */
@@ -55,13 +51,17 @@
 static void tosa_microdrive_attach(PXA2xxState *cpu)
 {
     PCMCIACardState *md;
+    BlockDriverState *bs;
     DriveInfo *dinfo;
 
     dinfo = drive_get(IF_IDE, 0, 0);
-    if (!dinfo || dinfo->media_cd)
+    if (!dinfo)
         return;
-    md = dscm1xxxx_init(dinfo);
-    pxa2xx_pcmcia_attach(cpu->pcmcia[0], md);
+    bs = dinfo->bdrv;
+    if (bdrv_is_inserted(bs) && !bdrv_is_removable(bs)) {
+        md = dscm1xxxx_init(dinfo);
+        pxa2xx_pcmcia_attach(cpu->pcmcia[0], md);
+    }
 }
 
 static void tosa_out_switch(void *opaque, int line, int level)
@@ -115,9 +115,6 @@ static void tosa_gpio_setup(PXA2xxState *cpu,
     qdev_connect_gpio_out(scp1, TOSA_GPIO_WLAN_LED, outsignals[3]);
 
     qdev_connect_gpio_out(scp1, TOSA_GPIO_TC6393XB_L3V_ON, tc6393xb_l3v_get(tmio));
-
-    /* UDC Vbus */
-    qemu_irq_raise(qdev_get_gpio_in(cpu->gpio, TOSA_GPIO_USB_IN));
 }
 
 static uint32_t tosa_ssp_tansfer(SSISlave *dev, uint32_t value)
@@ -133,12 +130,12 @@ static int tosa_ssp_init(SSISlave *dev)
 }
 
 typedef struct {
-    I2CSlave i2c;
+    i2c_slave i2c;
     int len;
     char buf[3];
 } TosaDACState;
 
-static int tosa_dac_send(I2CSlave *i2c, uint8_t data)
+static int tosa_dac_send(i2c_slave *i2c, uint8_t data)
 {
     TosaDACState *s = FROM_I2C_SLAVE(TosaDACState, i2c);
     s->buf[s->len] = data;
@@ -157,7 +154,7 @@ static int tosa_dac_send(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-static void tosa_dac_event(I2CSlave *i2c, enum i2c_event event)
+static void tosa_dac_event(i2c_slave *i2c, enum i2c_event event)
 {
     TosaDACState *s = FROM_I2C_SLAVE(TosaDACState, i2c);
     s->len = 0;
@@ -180,13 +177,13 @@ static void tosa_dac_event(I2CSlave *i2c, enum i2c_event event)
     }
 }
 
-static int tosa_dac_recv(I2CSlave *s)
+static int tosa_dac_recv(i2c_slave *s)
 {
     printf("%s: recv not supported!!!\n", __FUNCTION__);
     return -1;
 }
 
-static int tosa_dac_init(I2CSlave *i2c)
+static int tosa_dac_init(i2c_slave *i2c)
 {
     /* Nothing to do.  */
     return 0;
@@ -205,45 +202,40 @@ static struct arm_boot_info tosa_binfo = {
     .ram_size = 0x04000000,
 };
 
-static void tosa_init(QEMUMachineInitArgs *args)
+static void tosa_init(ram_addr_t ram_size,
+                const char *boot_device,
+                const char *kernel_filename, const char *kernel_cmdline,
+                const char *initrd_filename, const char *cpu_model)
 {
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *rom = g_new(MemoryRegion, 1);
-    PXA2xxState *mpu;
+    PXA2xxState *cpu;
     TC6393xbState *tmio;
     DeviceState *scp0, *scp1;
 
     if (!cpu_model)
         cpu_model = "pxa255";
 
-    mpu = pxa255_init(address_space_mem, tosa_binfo.ram_size);
+    cpu = pxa255_init(tosa_binfo.ram_size);
 
-    memory_region_init_ram(rom, "tosa.rom", TOSA_ROM);
-    vmstate_register_ram_global(rom);
-    memory_region_set_readonly(rom, true);
-    memory_region_add_subregion(address_space_mem, 0, rom);
+    cpu_register_physical_memory(0, TOSA_ROM,
+                    qemu_ram_alloc(NULL, "tosa.rom", TOSA_ROM) | IO_MEM_ROM);
 
-    tmio = tc6393xb_init(address_space_mem, 0x10000000,
-            qdev_get_gpio_in(mpu->gpio, TOSA_GPIO_TC6393XB_INT));
+    tmio = tc6393xb_init(0x10000000,
+            qdev_get_gpio_in(cpu->gpio, TOSA_GPIO_TC6393XB_INT));
 
     scp0 = sysbus_create_simple("scoop", 0x08800000, NULL);
     scp1 = sysbus_create_simple("scoop", 0x14800040, NULL);
 
-    tosa_gpio_setup(mpu, scp0, scp1, tmio);
+    tosa_gpio_setup(cpu, scp0, scp1, tmio);
 
-    tosa_microdrive_attach(mpu);
+    tosa_microdrive_attach(cpu);
 
-    tosa_tg_init(mpu);
+    tosa_tg_init(cpu);
 
     tosa_binfo.kernel_filename = kernel_filename;
     tosa_binfo.kernel_cmdline = kernel_cmdline;
     tosa_binfo.initrd_filename = initrd_filename;
     tosa_binfo.board_id = 0x208;
-    arm_load_kernel(mpu->cpu, &tosa_binfo);
+    arm_load_kernel(cpu->env, &tosa_binfo);
     sl_bootparam_write(SL_PXA_PARAM_BASE);
 }
 
@@ -260,42 +252,26 @@ static void tosapda_machine_init(void)
 
 machine_init(tosapda_machine_init);
 
-static void tosa_dac_class_init(ObjectClass *klass, void *data)
-{
-    I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
-
-    k->init = tosa_dac_init;
-    k->event = tosa_dac_event;
-    k->recv = tosa_dac_recv;
-    k->send = tosa_dac_send;
-}
-
-static TypeInfo tosa_dac_info = {
-    .name          = "tosa_dac",
-    .parent        = TYPE_I2C_SLAVE,
-    .instance_size = sizeof(TosaDACState),
-    .class_init    = tosa_dac_class_init,
+static I2CSlaveInfo tosa_dac_info = {
+    .qdev.name = "tosa_dac",
+    .qdev.size = sizeof(TosaDACState),
+    .init = tosa_dac_init,
+    .event = tosa_dac_event,
+    .recv = tosa_dac_recv,
+    .send = tosa_dac_send
 };
 
-static void tosa_ssp_class_init(ObjectClass *klass, void *data)
-{
-    SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
-
-    k->init = tosa_ssp_init;
-    k->transfer = tosa_ssp_tansfer;
-}
-
-static TypeInfo tosa_ssp_info = {
-    .name          = "tosa-ssp",
-    .parent        = TYPE_SSI_SLAVE,
-    .instance_size = sizeof(SSISlave),
-    .class_init    = tosa_ssp_class_init,
+static SSISlaveInfo tosa_ssp_info = {
+    .qdev.name = "tosa-ssp",
+    .qdev.size = sizeof(SSISlave),
+    .init = tosa_ssp_init,
+    .transfer = tosa_ssp_tansfer
 };
 
-static void tosa_register_types(void)
+static void tosa_register_devices(void)
 {
-    type_register_static(&tosa_dac_info);
-    type_register_static(&tosa_ssp_info);
+    i2c_register_slave(&tosa_dac_info);
+    ssi_register_slave(&tosa_ssp_info);
 }
 
-type_init(tosa_register_types)
+device_init(tosa_register_devices)

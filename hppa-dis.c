@@ -564,7 +564,7 @@ If not, see <http://www.gnu.org/licenses/>. */
  */
 
 /* There are two kinds of delay slot nullification: normal which is
- * controlled by the nullification bit, and conditional, which depends
+ * controled by the nullification bit, and conditional, which depends
  * on the direction of the branch and its success or failure.
  *
  * NONE is unfortunately #defined in the hiux system include files.
@@ -1645,7 +1645,7 @@ static const char *const fp_reg_names[] =
 
 typedef unsigned int CORE_ADDR;
 
-/* Get at various relevant fields of an instruction word.  */
+/* Get at various relevent fields of an instruction word.  */
 
 #define MASK_5  0x1f
 #define MASK_10 0x3ff
@@ -1771,13 +1771,13 @@ static const char *const add_compl_names[] = { 0, "", ",l", ",tsv" };
 static void
 fput_reg (unsigned reg, disassemble_info *info)
 {
-  (*info->fprintf_func) (info->stream, "%s", reg ? reg_names[reg] : "r0");
+  (*info->fprintf_func) (info->stream, reg ? reg_names[reg] : "r0");
 }
 
 static void
 fput_fp_reg (unsigned reg, disassemble_info *info)
 {
-  (*info->fprintf_func) (info->stream, "%s", reg ? fp_reg_names[reg] : "fr0");
+  (*info->fprintf_func) (info->stream, reg ? fp_reg_names[reg] : "fr0");
 }
 
 static void
@@ -1794,7 +1794,7 @@ fput_fp_reg_r (unsigned reg, disassemble_info *info)
 static void
 fput_creg (unsigned reg, disassemble_info *info)
 {
-  (*info->fprintf_func) (info->stream, "%s", control_reg[reg]);
+  (*info->fprintf_func) (info->stream, control_reg[reg]);
 }
 
 /* Print constants with sign.  */

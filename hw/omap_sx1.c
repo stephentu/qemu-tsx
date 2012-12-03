@@ -26,13 +26,13 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "hw.h"
+#include "sysemu.h"
 #include "console.h"
 #include "omap.h"
 #include "boards.h"
 #include "arm-misc.h"
 #include "flash.h"
 #include "blockdev.h"
-#include "exec-memory.h"
 
 /*****************************************************************************/
 /* Siemens SX1 Cellphone V1 */
@@ -59,28 +59,46 @@
  * - 1 RTC
  */
 
-static uint64_t static_read(void *opaque, hwaddr offset,
-                            unsigned size)
+static uint32_t static_readb(void *opaque, target_phys_addr_t offset)
 {
     uint32_t *val = (uint32_t *) opaque;
-    uint32_t mask = (4 / size) - 1;
 
-    return *val >> ((offset & mask) << 3);
+    return *val >> ((offset & 3) << 3);
 }
 
-static void static_write(void *opaque, hwaddr offset,
-                         uint64_t value, unsigned size)
+static uint32_t static_readh(void *opaque, target_phys_addr_t offset)
+{
+    uint32_t *val = (uint32_t *) opaque;
+
+    return *val >> ((offset & 1) << 3);
+}
+
+static uint32_t static_readw(void *opaque, target_phys_addr_t offset)
+{
+    uint32_t *val = (uint32_t *) opaque;
+
+    return *val >> ((offset & 0) << 3);
+}
+
+static void static_write(void *opaque, target_phys_addr_t offset,
+                uint32_t value)
 {
 #ifdef SPY
-    printf("%s: value %" PRIx64 " %u bytes written at 0x%x\n",
-                    __func__, value, size, (int)offset);
+    printf("%s: value %08lx written at " PA_FMT "\n",
+                    __FUNCTION__, value, offset);
 #endif
 }
 
-static const MemoryRegionOps static_ops = {
-    .read = static_read,
-    .write = static_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const static_readfn[] = {
+    static_readb,
+    static_readh,
+    static_readw,
+};
+
+static CPUWriteMemoryFunc * const static_writefn[] = {
+    static_write,
+    static_write,
+    static_write,
 };
 
 #define sdram_size	0x02000000
@@ -97,13 +115,14 @@ static struct arm_boot_info sx1_binfo = {
     .board_id = 0x265,
 };
 
-static void sx1_init(QEMUMachineInitArgs *args, const int version)
+static void sx1_init(ram_addr_t ram_size,
+                const char *boot_device,
+                const char *kernel_filename, const char *kernel_cmdline,
+                const char *initrd_filename, const char *cpu_model,
+                const int version)
 {
-    struct omap_mpu_state_s *mpu;
-    MemoryRegion *address_space = get_system_memory();
-    MemoryRegion *flash = g_new(MemoryRegion, 1);
-    MemoryRegion *flash_1 = g_new(MemoryRegion, 1);
-    MemoryRegion *cs = g_new(MemoryRegion, 4);
+    struct omap_mpu_state_s *cpu;
+    int io;
     static uint32_t cs0val = 0x00213090;
     static uint32_t cs1val = 0x00215070;
     static uint32_t cs2val = 0x00001139;
@@ -117,29 +136,23 @@ static void sx1_init(QEMUMachineInitArgs *args, const int version)
         flash_size = flash2_size;
     }
 
-    mpu = omap310_mpu_init(address_space, sx1_binfo.ram_size, args->cpu_model);
+    cpu = omap310_mpu_init(sx1_binfo.ram_size, cpu_model);
 
     /* External Flash (EMIFS) */
-    memory_region_init_ram(flash, "omap_sx1.flash0-0", flash_size);
-    vmstate_register_ram_global(flash);
-    memory_region_set_readonly(flash, true);
-    memory_region_add_subregion(address_space, OMAP_CS0_BASE, flash);
+    cpu_register_physical_memory(OMAP_CS0_BASE, flash_size,
+                                 qemu_ram_alloc(NULL, "omap_sx1.flash0-0",
+                                                flash_size) | IO_MEM_ROM);
 
-    memory_region_init_io(&cs[0], &static_ops, &cs0val,
-                          "sx1.cs0", OMAP_CS0_SIZE - flash_size);
-    memory_region_add_subregion(address_space,
-                                OMAP_CS0_BASE + flash_size, &cs[0]);
-
-
-    memory_region_init_io(&cs[2], &static_ops, &cs2val,
-                          "sx1.cs2", OMAP_CS2_SIZE);
-    memory_region_add_subregion(address_space,
-                                OMAP_CS2_BASE, &cs[2]);
-
-    memory_region_init_io(&cs[3], &static_ops, &cs3val,
-                          "sx1.cs3", OMAP_CS3_SIZE);
-    memory_region_add_subregion(address_space,
-                                OMAP_CS2_BASE, &cs[3]);
+    io = cpu_register_io_memory(static_readfn, static_writefn, &cs0val,
+                                DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(OMAP_CS0_BASE + flash_size,
+                    OMAP_CS0_SIZE - flash_size, io);
+    io = cpu_register_io_memory(static_readfn, static_writefn, &cs2val,
+                                DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(OMAP_CS2_BASE, OMAP_CS2_SIZE, io);
+    io = cpu_register_io_memory(static_readfn, static_writefn, &cs3val,
+                                DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(OMAP_CS3_BASE, OMAP_CS3_SIZE, io);
 
     fl_idx = 0;
 #ifdef TARGET_WORDS_BIGENDIAN
@@ -149,8 +162,8 @@ static void sx1_init(QEMUMachineInitArgs *args, const int version)
 #endif
 
     if ((dinfo = drive_get(IF_PFLASH, 0, fl_idx)) != NULL) {
-        if (!pflash_cfi01_register(OMAP_CS0_BASE, NULL,
-                                   "omap_sx1.flash0-1", flash_size,
+        if (!pflash_cfi01_register(OMAP_CS0_BASE, qemu_ram_alloc(NULL,
+                                   "omap_sx1.flash0-1", flash_size),
                                    dinfo->bdrv, sector_size,
                                    flash_size / sector_size,
                                    4, 0, 0, 0, 0, be)) {
@@ -162,18 +175,16 @@ static void sx1_init(QEMUMachineInitArgs *args, const int version)
 
     if ((version == 1) &&
             (dinfo = drive_get(IF_PFLASH, 0, fl_idx)) != NULL) {
-        memory_region_init_ram(flash_1, "omap_sx1.flash1-0", flash1_size);
-        vmstate_register_ram_global(flash_1);
-        memory_region_set_readonly(flash_1, true);
-        memory_region_add_subregion(address_space, OMAP_CS1_BASE, flash_1);
+        cpu_register_physical_memory(OMAP_CS1_BASE, flash1_size,
+                                     qemu_ram_alloc(NULL, "omap_sx1.flash1-0",
+                                                    flash1_size) | IO_MEM_ROM);
+        io = cpu_register_io_memory(static_readfn, static_writefn, &cs1val,
+                                    DEVICE_NATIVE_ENDIAN);
+        cpu_register_physical_memory(OMAP_CS1_BASE + flash1_size,
+                        OMAP_CS1_SIZE - flash1_size, io);
 
-        memory_region_init_io(&cs[1], &static_ops, &cs1val,
-                              "sx1.cs1", OMAP_CS1_SIZE - flash1_size);
-        memory_region_add_subregion(address_space,
-                                OMAP_CS1_BASE + flash1_size, &cs[1]);
-
-        if (!pflash_cfi01_register(OMAP_CS1_BASE, NULL,
-                                   "omap_sx1.flash1-1", flash1_size,
+        if (!pflash_cfi01_register(OMAP_CS1_BASE, qemu_ram_alloc(NULL,
+                                   "omap_sx1.flash1-1", flash1_size),
                                    dinfo->bdrv, sector_size,
                                    flash1_size / sector_size,
                                    4, 0, 0, 0, 0, be)) {
@@ -182,37 +193,44 @@ static void sx1_init(QEMUMachineInitArgs *args, const int version)
         }
         fl_idx++;
     } else {
-        memory_region_init_io(&cs[1], &static_ops, &cs1val,
-                              "sx1.cs1", OMAP_CS1_SIZE);
-        memory_region_add_subregion(address_space,
-                                OMAP_CS1_BASE, &cs[1]);
+        io = cpu_register_io_memory(static_readfn, static_writefn, &cs1val,
+                                    DEVICE_NATIVE_ENDIAN);
+        cpu_register_physical_memory(OMAP_CS1_BASE, OMAP_CS1_SIZE, io);
     }
 
-    if (!args->kernel_filename && !fl_idx) {
+    if (!kernel_filename && !fl_idx) {
         fprintf(stderr, "Kernel or Flash image must be specified\n");
         exit(1);
     }
 
     /* Load the kernel.  */
-    if (args->kernel_filename) {
-        sx1_binfo.kernel_filename = args->kernel_filename;
-        sx1_binfo.kernel_cmdline = args->kernel_cmdline;
-        sx1_binfo.initrd_filename = args->initrd_filename;
-        arm_load_kernel(mpu->cpu, &sx1_binfo);
+    if (kernel_filename) {
+        sx1_binfo.kernel_filename = kernel_filename;
+        sx1_binfo.kernel_cmdline = kernel_cmdline;
+        sx1_binfo.initrd_filename = initrd_filename;
+        arm_load_kernel(cpu->env, &sx1_binfo);
     }
 
     /* TODO: fix next line */
     //~ qemu_console_resize(ds, 640, 480);
 }
 
-static void sx1_init_v1(QEMUMachineInitArgs *args)
+static void sx1_init_v1(ram_addr_t ram_size,
+                const char *boot_device,
+                const char *kernel_filename, const char *kernel_cmdline,
+                const char *initrd_filename, const char *cpu_model)
 {
-    sx1_init(args, 1);
+    sx1_init(ram_size, boot_device, kernel_filename,
+                kernel_cmdline, initrd_filename, cpu_model, 1);
 }
 
-static void sx1_init_v2(QEMUMachineInitArgs *args)
+static void sx1_init_v2(ram_addr_t ram_size,
+                const char *boot_device,
+                const char *kernel_filename, const char *kernel_cmdline,
+                const char *initrd_filename, const char *cpu_model)
 {
-    sx1_init(args, 2);
+    sx1_init(ram_size, boot_device, kernel_filename,
+                kernel_cmdline, initrd_filename, cpu_model, 2);
 }
 
 static QEMUMachine sx1_machine_v2 = {

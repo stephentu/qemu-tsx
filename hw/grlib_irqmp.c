@@ -49,7 +49,6 @@ typedef struct IRQMPState IRQMPState;
 
 typedef struct IRQMP {
     SysBusDevice busdev;
-    MemoryRegion iomem;
 
     void *set_pil_in;
     void *set_pil_in_opaque;
@@ -162,8 +161,7 @@ void grlib_irqmp_set_irq(void *opaque, int irq, int level)
     }
 }
 
-static uint64_t grlib_irqmp_read(void *opaque, hwaddr addr,
-                                 unsigned size)
+static uint32_t grlib_irqmp_readl(void *opaque, target_phys_addr_t addr)
 {
     IRQMP      *irqmp = opaque;
     IRQMPState *state;
@@ -222,12 +220,12 @@ static uint64_t grlib_irqmp_read(void *opaque, hwaddr addr,
         return state->extended[cpu];
     }
 
-    trace_grlib_irqmp_readl_unknown(addr);
+    trace_grlib_irqmp_unknown_register("read", addr);
     return 0;
 }
 
-static void grlib_irqmp_write(void *opaque, hwaddr addr,
-                              uint64_t value, unsigned size)
+static void
+grlib_irqmp_writel(void *opaque, target_phys_addr_t addr, uint32_t value)
 {
     IRQMP      *irqmp = opaque;
     IRQMPState *state;
@@ -310,17 +308,15 @@ static void grlib_irqmp_write(void *opaque, hwaddr addr,
         return;
     }
 
-    trace_grlib_irqmp_writel_unknown(addr, value);
+    trace_grlib_irqmp_unknown_register("write", addr);
 }
 
-static const MemoryRegionOps grlib_irqmp_ops = {
-    .read = grlib_irqmp_read,
-    .write = grlib_irqmp_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
+static CPUReadMemoryFunc * const grlib_irqmp_read[] = {
+    NULL, NULL, &grlib_irqmp_readl,
+};
+
+static CPUWriteMemoryFunc * const grlib_irqmp_write[] = {
+    NULL, NULL, &grlib_irqmp_writel,
 };
 
 static void grlib_irqmp_reset(DeviceState *d)
@@ -336,6 +332,7 @@ static void grlib_irqmp_reset(DeviceState *d)
 static int grlib_irqmp_init(SysBusDevice *dev)
 {
     IRQMP *irqmp = FROM_SYSBUS(typeof(*irqmp), dev);
+    int    irqmp_regs;
 
     assert(irqmp != NULL);
 
@@ -344,42 +341,36 @@ static int grlib_irqmp_init(SysBusDevice *dev)
         return -1;
     }
 
-    memory_region_init_io(&irqmp->iomem, &grlib_irqmp_ops, irqmp,
-                          "irqmp", IRQMP_REG_SIZE);
+    irqmp_regs = cpu_register_io_memory(grlib_irqmp_read,
+                                        grlib_irqmp_write,
+                                        irqmp, DEVICE_NATIVE_ENDIAN);
 
-    irqmp->state = g_malloc0(sizeof *irqmp->state);
+    irqmp->state = qemu_mallocz(sizeof *irqmp->state);
 
-    sysbus_init_mmio(dev, &irqmp->iomem);
+    if (irqmp_regs < 0) {
+        return -1;
+    }
+
+    sysbus_init_mmio(dev, IRQMP_REG_SIZE, irqmp_regs);
 
     return 0;
 }
 
-static Property grlib_irqmp_properties[] = {
-    DEFINE_PROP_PTR("set_pil_in", IRQMP, set_pil_in),
-    DEFINE_PROP_PTR("set_pil_in_opaque", IRQMP, set_pil_in_opaque),
-    DEFINE_PROP_END_OF_LIST(),
+static SysBusDeviceInfo grlib_irqmp_info = {
+    .init = grlib_irqmp_init,
+    .qdev.name  = "grlib,irqmp",
+    .qdev.reset = grlib_irqmp_reset,
+    .qdev.size  = sizeof(IRQMP),
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_PTR("set_pil_in", IRQMP, set_pil_in),
+        DEFINE_PROP_PTR("set_pil_in_opaque", IRQMP, set_pil_in_opaque),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void grlib_irqmp_class_init(ObjectClass *klass, void *data)
+static void grlib_irqmp_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = grlib_irqmp_init;
-    dc->reset = grlib_irqmp_reset;
-    dc->props = grlib_irqmp_properties;
+    sysbus_register_withprop(&grlib_irqmp_info);
 }
 
-static TypeInfo grlib_irqmp_info = {
-    .name          = "grlib,irqmp",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IRQMP),
-    .class_init    = grlib_irqmp_class_init,
-};
-
-static void grlib_irqmp_register_types(void)
-{
-    type_register_static(&grlib_irqmp_info);
-}
-
-type_init(grlib_irqmp_register_types)
+device_init(grlib_irqmp_register)

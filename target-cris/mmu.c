@@ -20,8 +20,14 @@
 
 #ifndef CONFIG_USER_ONLY
 
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include "config.h"
 #include "cpu.h"
 #include "mmu.h"
+#include "exec-all.h"
 
 #ifdef DEBUG
 #define D(x) x
@@ -31,7 +37,7 @@
 #define D_LOG(...) do { } while (0)
 #endif
 
-void cris_mmu_init(CPUCRISState *env)
+void cris_mmu_init(CPUState *env)
 {
 	env->mmu_rand_lfsr = 0xcccc;
 }
@@ -49,7 +55,7 @@ static inline unsigned int compute_polynom(unsigned int sr)
 	return f;
 }
 
-static void cris_mmu_update_rand_lfsr(CPUCRISState *env)
+static void cris_mmu_update_rand_lfsr(CPUState *env)
 {
 	unsigned int f;
 
@@ -70,7 +76,7 @@ static inline int cris_mmu_segmented_addr(int seg, uint32_t rw_mm_cfg)
 	return (1 << seg) & rw_mm_cfg;
 }
 
-static uint32_t cris_mmu_translate_seg(CPUCRISState *env, int seg)
+static uint32_t cris_mmu_translate_seg(CPUState *env, int seg)
 {
 	uint32_t base;
 	int i;
@@ -106,7 +112,7 @@ static inline void set_field(uint32_t *dst, unsigned int val,
 }
 
 #ifdef DEBUG
-static void dump_tlb(CPUCRISState *env, int mmu)
+static void dump_tlb(CPUState *env, int mmu)
 {
 	int set;
 	int idx;
@@ -128,7 +134,7 @@ static void dump_tlb(CPUCRISState *env, int mmu)
 
 /* rw 0 = read, 1 = write, 2 = exec.  */
 static int cris_mmu_translate_page(struct cris_mmu_result *res,
-				   CPUCRISState *env, uint32_t vaddr,
+				   CPUState *env, uint32_t vaddr,
 				   int rw, int usermode, int debug)
 {
 	unsigned int vpage;
@@ -288,7 +294,7 @@ static int cris_mmu_translate_page(struct cris_mmu_result *res,
 	return !match;
 }
 
-void cris_mmu_flush_pid(CPUCRISState *env, uint32_t pid)
+void cris_mmu_flush_pid(CPUState *env, uint32_t pid)
 {
 	target_ulong vaddr;
 	unsigned int idx;
@@ -323,7 +329,7 @@ void cris_mmu_flush_pid(CPUCRISState *env, uint32_t pid)
 }
 
 int cris_mmu_translate(struct cris_mmu_result *res,
-		       CPUCRISState *env, uint32_t vaddr,
+		       CPUState *env, uint32_t vaddr,
 		       int rw, int mmu_idx, int debug)
 {
 	int seg;

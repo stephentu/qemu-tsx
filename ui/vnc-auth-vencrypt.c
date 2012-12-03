@@ -29,7 +29,7 @@
 
 static void start_auth_vencrypt_subauth(VncState *vs)
 {
-    switch (vs->subauth) {
+    switch (vs->vd->subauth) {
     case VNC_AUTH_VENCRYPT_TLSNONE:
     case VNC_AUTH_VENCRYPT_X509NONE:
        VNC_DEBUG("Accept TLS auth none\n");
@@ -47,12 +47,11 @@ static void start_auth_vencrypt_subauth(VncState *vs)
     case VNC_AUTH_VENCRYPT_TLSSASL:
     case VNC_AUTH_VENCRYPT_X509SASL:
       VNC_DEBUG("Start TLS auth SASL\n");
-      start_auth_sasl(vs);
-      break;
+      return start_auth_sasl(vs);
 #endif /* CONFIG_VNC_SASL */
 
     default: /* Should not be possible, but just in case */
-       VNC_DEBUG("Reject subauth %d server bug\n", vs->auth);
+       VNC_DEBUG("Reject subauth %d server bug\n", vs->vd->auth);
        vnc_write_u8(vs, 1);
        if (vs->minor >= 8) {
            static const char err[] = "Unsupported authentication type";
@@ -111,17 +110,17 @@ static void vnc_tls_handshake_io(void *opaque) {
 
 
 #define NEED_X509_AUTH(vs)                              \
-    ((vs)->subauth == VNC_AUTH_VENCRYPT_X509NONE ||   \
-     (vs)->subauth == VNC_AUTH_VENCRYPT_X509VNC ||    \
-     (vs)->subauth == VNC_AUTH_VENCRYPT_X509PLAIN ||  \
-     (vs)->subauth == VNC_AUTH_VENCRYPT_X509SASL)
+    ((vs)->vd->subauth == VNC_AUTH_VENCRYPT_X509NONE ||   \
+     (vs)->vd->subauth == VNC_AUTH_VENCRYPT_X509VNC ||    \
+     (vs)->vd->subauth == VNC_AUTH_VENCRYPT_X509PLAIN ||  \
+     (vs)->vd->subauth == VNC_AUTH_VENCRYPT_X509SASL)
 
 
 static int protocol_client_vencrypt_auth(VncState *vs, uint8_t *data, size_t len)
 {
     int auth = read_u32(data, 0);
 
-    if (auth != vs->subauth) {
+    if (auth != vs->vd->subauth) {
         VNC_DEBUG("Rejecting auth %d\n", auth);
         vnc_write_u8(vs, 0); /* Reject auth */
         vnc_flush(vs);
@@ -154,10 +153,10 @@ static int protocol_client_vencrypt_init(VncState *vs, uint8_t *data, size_t len
         vnc_flush(vs);
         vnc_client_error(vs);
     } else {
-        VNC_DEBUG("Sending allowed auth %d\n", vs->subauth);
+        VNC_DEBUG("Sending allowed auth %d\n", vs->vd->subauth);
         vnc_write_u8(vs, 0); /* Accept version */
         vnc_write_u8(vs, 1); /* Number of sub-auths */
-        vnc_write_u32(vs, vs->subauth); /* The supported auth */
+        vnc_write_u32(vs, vs->vd->subauth); /* The supported auth */
         vnc_flush(vs);
         vnc_read_when(vs, protocol_client_vencrypt_auth, 4);
     }

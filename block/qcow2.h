@@ -26,13 +26,13 @@
 #define BLOCK_QCOW2_H
 
 #include "aes.h"
-#include "qemu-coroutine.h"
 
 //#define DEBUG_ALLOC
 //#define DEBUG_ALLOC2
 //#define DEBUG_EXT
 
 #define QCOW_MAGIC (('Q' << 24) | ('F' << 16) | ('I' << 8) | 0xfb)
+#define QCOW_VERSION 2
 
 #define QCOW_CRYPT_NONE 0
 #define QCOW_CRYPT_AES  1
@@ -43,8 +43,6 @@
 #define QCOW_OFLAG_COPIED     (1LL << 63)
 /* indicate that the cluster is compressed (they never have the copied flag) */
 #define QCOW_OFLAG_COMPRESSED (1LL << 62)
-/* The cluster reads as all zeros */
-#define QCOW_OFLAG_ZERO (1LL << 0)
 
 #define REFCOUNT_SHIFT 1 /* refcount size is 2 bytes */
 
@@ -55,8 +53,6 @@
 
 /* Must be at least 4 to cover all cases of refcount table growth */
 #define REFCOUNT_CACHE_SIZE 4
-
-#define DEFAULT_CLUSTER_SIZE 65536
 
 typedef struct QCowHeader {
     uint32_t magic;
@@ -72,14 +68,6 @@ typedef struct QCowHeader {
     uint32_t refcount_table_clusters;
     uint32_t nb_snapshots;
     uint64_t snapshots_offset;
-
-    /* The following fields are only valid for version >= 3 */
-    uint64_t incompatible_features;
-    uint64_t compatible_features;
-    uint64_t autoclear_features;
-
-    uint32_t refcount_order;
-    uint32_t header_length;
 } QCowHeader;
 
 typedef struct QCowSnapshot {
@@ -87,8 +75,7 @@ typedef struct QCowSnapshot {
     uint32_t l1_size;
     char *id_str;
     char *name;
-    uint64_t disk_size;
-    uint64_t vm_state_size;
+    uint32_t vm_state_size;
     uint32_t date_sec;
     uint32_t date_nsec;
     uint64_t vm_clock_nsec;
@@ -96,41 +83,6 @@ typedef struct QCowSnapshot {
 
 struct Qcow2Cache;
 typedef struct Qcow2Cache Qcow2Cache;
-
-typedef struct Qcow2UnknownHeaderExtension {
-    uint32_t magic;
-    uint32_t len;
-    QLIST_ENTRY(Qcow2UnknownHeaderExtension) next;
-    uint8_t data[];
-} Qcow2UnknownHeaderExtension;
-
-enum {
-    QCOW2_FEAT_TYPE_INCOMPATIBLE    = 0,
-    QCOW2_FEAT_TYPE_COMPATIBLE      = 1,
-    QCOW2_FEAT_TYPE_AUTOCLEAR       = 2,
-};
-
-/* Incompatible feature bits */
-enum {
-    QCOW2_INCOMPAT_DIRTY_BITNR   = 0,
-    QCOW2_INCOMPAT_DIRTY         = 1 << QCOW2_INCOMPAT_DIRTY_BITNR,
-
-    QCOW2_INCOMPAT_MASK          = QCOW2_INCOMPAT_DIRTY,
-};
-
-/* Compatible feature bits */
-enum {
-    QCOW2_COMPAT_LAZY_REFCOUNTS_BITNR = 0,
-    QCOW2_COMPAT_LAZY_REFCOUNTS       = 1 << QCOW2_COMPAT_LAZY_REFCOUNTS_BITNR,
-
-    QCOW2_COMPAT_FEAT_MASK            = QCOW2_COMPAT_LAZY_REFCOUNTS,
-};
-
-typedef struct Qcow2Feature {
-    uint8_t type;
-    uint8_t bit;
-    char    name[46];
-} QEMU_PACKED Qcow2Feature;
 
 typedef struct BDRVQcowState {
     int cluster_bits;
@@ -160,8 +112,6 @@ typedef struct BDRVQcowState {
     int64_t free_cluster_index;
     int64_t free_byte_offset;
 
-    CoMutex lock;
-
     uint32_t crypt_method; /* current crypt method, 0 if no key yet */
     uint32_t crypt_method_header;
     AES_KEY aes_encrypt_key;
@@ -170,17 +120,6 @@ typedef struct BDRVQcowState {
     int snapshots_size;
     int nb_snapshots;
     QCowSnapshot *snapshots;
-
-    int flags;
-    int qcow_version;
-
-    uint64_t incompatible_features;
-    uint64_t compatible_features;
-    uint64_t autoclear_features;
-
-    size_t unknown_header_fields_size;
-    void* unknown_header_fields;
-    QLIST_HEAD(, Qcow2UnknownHeaderExtension) unknown_header_ext;
 } BDRVQcowState;
 
 /* XXX: use std qcow open function ? */
@@ -201,27 +140,14 @@ typedef struct QCowL2Meta
 {
     uint64_t offset;
     uint64_t cluster_offset;
-    uint64_t alloc_offset;
     int n_start;
     int nb_available;
     int nb_clusters;
-    CoQueue dependent_requests;
+    struct QCowL2Meta *depends_on;
+    QLIST_HEAD(QCowAioDependencies, QCowAIOCB) dependent_requests;
 
     QLIST_ENTRY(QCowL2Meta) next_in_flight;
 } QCowL2Meta;
-
-enum {
-    QCOW2_CLUSTER_UNALLOCATED,
-    QCOW2_CLUSTER_NORMAL,
-    QCOW2_CLUSTER_COMPRESSED,
-    QCOW2_CLUSTER_ZERO
-};
-
-#define L1E_OFFSET_MASK 0x00ffffffffffff00ULL
-#define L2E_OFFSET_MASK 0x00ffffffffffff00ULL
-#define L2E_COMPRESSED_OFFSET_SIZE_MASK 0x3fffffffffffffffULL
-
-#define REFT_OFFSET_MASK 0xffffffffffffff00ULL
 
 static inline int size_to_clusters(BDRVQcowState *s, int64_t size)
 {
@@ -240,50 +166,30 @@ static inline int64_t align_offset(int64_t offset, int n)
     return offset;
 }
 
-static inline int qcow2_get_cluster_type(uint64_t l2_entry)
-{
-    if (l2_entry & QCOW_OFLAG_COMPRESSED) {
-        return QCOW2_CLUSTER_COMPRESSED;
-    } else if (l2_entry & QCOW_OFLAG_ZERO) {
-        return QCOW2_CLUSTER_ZERO;
-    } else if (!(l2_entry & L2E_OFFSET_MASK)) {
-        return QCOW2_CLUSTER_UNALLOCATED;
-    } else {
-        return QCOW2_CLUSTER_NORMAL;
-    }
-}
-
-/* Check whether refcounts are eager or lazy */
-static inline bool qcow2_need_accurate_refcounts(BDRVQcowState *s)
-{
-    return !(s->incompatible_features & QCOW2_INCOMPAT_DIRTY);
-}
 
 // FIXME Need qcow2_ prefix to global functions
 
 /* qcow2.c functions */
 int qcow2_backing_read1(BlockDriverState *bs, QEMUIOVector *qiov,
                   int64_t sector_num, int nb_sectors);
-int qcow2_update_header(BlockDriverState *bs);
 
 /* qcow2-refcount.c functions */
 int qcow2_refcount_init(BlockDriverState *bs);
 void qcow2_refcount_close(BlockDriverState *bs);
 
 int64_t qcow2_alloc_clusters(BlockDriverState *bs, int64_t size);
-int qcow2_alloc_clusters_at(BlockDriverState *bs, uint64_t offset,
-    int nb_clusters);
 int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size);
 void qcow2_free_clusters(BlockDriverState *bs,
     int64_t offset, int64_t size);
 void qcow2_free_any_clusters(BlockDriverState *bs,
     uint64_t cluster_offset, int nb_clusters);
 
+void qcow2_create_refcount_update(QCowCreateState *s, int64_t offset,
+    int64_t size);
 int qcow2_update_snapshot_refcount(BlockDriverState *bs,
     int64_t l1_table_offset, int l1_size, int addend);
 
-int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
-                          BdrvCheckMode fix);
+int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res);
 
 /* qcow2-cluster.c functions */
 int qcow2_grow_l1_table(BlockDriverState *bs, int min_size, bool exact_size);
@@ -305,7 +211,6 @@ uint64_t qcow2_alloc_compressed_cluster_offset(BlockDriverState *bs,
 int qcow2_alloc_cluster_link_l2(BlockDriverState *bs, QCowL2Meta *m);
 int qcow2_discard_clusters(BlockDriverState *bs, uint64_t offset,
     int nb_sectors);
-int qcow2_zero_clusters(BlockDriverState *bs, uint64_t offset, int nb_sectors);
 
 /* qcow2-snapshot.c functions */
 int qcow2_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info);
@@ -318,7 +223,8 @@ void qcow2_free_snapshots(BlockDriverState *bs);
 int qcow2_read_snapshots(BlockDriverState *bs);
 
 /* qcow2-cache.c functions */
-Qcow2Cache *qcow2_cache_create(BlockDriverState *bs, int num_tables);
+Qcow2Cache *qcow2_cache_create(BlockDriverState *bs, int num_tables,
+    bool writethrough);
 int qcow2_cache_destroy(BlockDriverState* bs, Qcow2Cache *c);
 
 void qcow2_cache_entry_mark_dirty(Qcow2Cache *c, void *table);

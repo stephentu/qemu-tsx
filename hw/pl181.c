@@ -4,7 +4,7 @@
  * Copyright (c) 2007 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "blockdev.h"
@@ -24,7 +24,6 @@ do { printf("pl181: " fmt , ## __VA_ARGS__); } while (0)
 
 typedef struct {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     SDState *card;
     uint32_t clock;
     uint32_t power;
@@ -38,44 +37,17 @@ typedef struct {
     uint32_t datacnt;
     uint32_t status;
     uint32_t mask[2];
-    int32_t fifo_pos;
-    int32_t fifo_len;
+    int fifo_pos;
+    int fifo_len;
     /* The linux 2.6.21 driver is buggy, and misbehaves if new data arrives
        while it is reading the FIFO.  We hack around this be defering
        subsequent transfers until after the driver polls the status word.
        http://www.arm.linux.org.uk/developer/patches/viewpatch.php?id=4446/1
      */
-    int32_t linux_hack;
+    int linux_hack;
     uint32_t fifo[PL181_FIFO_LEN];
     qemu_irq irq[2];
-    /* GPIO outputs for 'card is readonly' and 'card inserted' */
-    qemu_irq cardstatus[2];
 } pl181_state;
-
-static const VMStateDescription vmstate_pl181 = {
-    .name = "pl181",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT32(clock, pl181_state),
-        VMSTATE_UINT32(power, pl181_state),
-        VMSTATE_UINT32(cmdarg, pl181_state),
-        VMSTATE_UINT32(cmd, pl181_state),
-        VMSTATE_UINT32(datatimer, pl181_state),
-        VMSTATE_UINT32(datalength, pl181_state),
-        VMSTATE_UINT32(respcmd, pl181_state),
-        VMSTATE_UINT32_ARRAY(response, pl181_state, 4),
-        VMSTATE_UINT32(datactrl, pl181_state),
-        VMSTATE_UINT32(datacnt, pl181_state),
-        VMSTATE_UINT32(status, pl181_state),
-        VMSTATE_UINT32_ARRAY(mask, pl181_state, 2),
-        VMSTATE_INT32(fifo_pos, pl181_state),
-        VMSTATE_INT32(fifo_len, pl181_state),
-        VMSTATE_INT32(linux_hack, pl181_state),
-        VMSTATE_UINT32_ARRAY(fifo, pl181_state, PL181_FIFO_LEN),
-        VMSTATE_END_OF_LIST()
-    }
-};
 
 #define PL181_CMD_INDEX     0x3f
 #define PL181_CMD_RESPONSE  (1 << 6)
@@ -285,8 +257,7 @@ static void pl181_fifo_run(pl181_state *s)
     }
 }
 
-static uint64_t pl181_read(void *opaque, hwaddr offset,
-                           unsigned size)
+static uint32_t pl181_read(void *opaque, target_phys_addr_t offset)
 {
     pl181_state *s = (pl181_state *)opaque;
     uint32_t tmp;
@@ -336,9 +307,9 @@ static uint64_t pl181_read(void *opaque, hwaddr offset,
     case 0x48: /* FifoCnt */
         /* The documentation is somewhat vague about exactly what FifoCnt
            does.  On real hardware it appears to be when decrememnted
-           when a word is transferred between the FIFO and the serial
+           when a word is transfered between the FIFO and the serial
            data engine.  DataCnt is decremented after each byte is
-           transferred between the serial engine and the card.
+           transfered between the serial engine and the card.
            We don't emulate this level of detail, so both can be the same.  */
         tmp = (s->datacnt + 3) >> 2;
         if (s->linux_hack) {
@@ -352,7 +323,7 @@ static uint64_t pl181_read(void *opaque, hwaddr offset,
     case 0xa0: case 0xa4: case 0xa8: case 0xac:
     case 0xb0: case 0xb4: case 0xb8: case 0xbc:
         if (s->fifo_len == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR, "pl181: Unexpected FIFO read\n");
+            fprintf(stderr, "pl181: Unexpected FIFO read\n");
             return 0;
         } else {
             uint32_t value;
@@ -363,14 +334,13 @@ static uint64_t pl181_read(void *opaque, hwaddr offset,
             return value;
         }
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "pl181_read: Bad offset %x\n", (int)offset);
+        hw_error("pl181_read: Bad offset %x\n", (int)offset);
         return 0;
     }
 }
 
-static void pl181_write(void *opaque, hwaddr offset,
-                        uint64_t value, unsigned size)
+static void pl181_write(void *opaque, target_phys_addr_t offset,
+                          uint32_t value)
 {
     pl181_state *s = (pl181_state *)opaque;
 
@@ -388,11 +358,11 @@ static void pl181_write(void *opaque, hwaddr offset,
         s->cmd = value;
         if (s->cmd & PL181_CMD_ENABLE) {
             if (s->cmd & PL181_CMD_INTERRUPT) {
-                qemu_log_mask(LOG_UNIMP,
-                              "pl181: Interrupt mode not implemented\n");
+                fprintf(stderr, "pl181: Interrupt mode not implemented\n");
+                abort();
             } if (s->cmd & PL181_CMD_PENDING) {
-                qemu_log_mask(LOG_UNIMP,
-                              "pl181: Pending commands not implemented\n");
+                fprintf(stderr, "pl181: Pending commands not implemented\n");
+                abort();
             } else {
                 pl181_send_command(s);
                 pl181_fifo_run(s);
@@ -428,28 +398,33 @@ static void pl181_write(void *opaque, hwaddr offset,
     case 0xa0: case 0xa4: case 0xa8: case 0xac:
     case 0xb0: case 0xb4: case 0xb8: case 0xbc:
         if (s->datacnt == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR, "pl181: Unexpected FIFO write\n");
+            fprintf(stderr, "pl181: Unexpected FIFO write\n");
         } else {
             pl181_fifo_push(s, value);
             pl181_fifo_run(s);
         }
         break;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "pl181_write: Bad offset %x\n", (int)offset);
+        hw_error("pl181_write: Bad offset %x\n", (int)offset);
     }
     pl181_update(s);
 }
 
-static const MemoryRegionOps pl181_ops = {
-    .read = pl181_read,
-    .write = pl181_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pl181_readfn[] = {
+   pl181_read,
+   pl181_read,
+   pl181_read
 };
 
-static void pl181_reset(DeviceState *d)
+static CPUWriteMemoryFunc * const pl181_writefn[] = {
+   pl181_write,
+   pl181_write,
+   pl181_write
+};
+
+static void pl181_reset(void *opaque)
 {
-    pl181_state *s = DO_UPCAST(pl181_state, busdev.qdev, d);
+    pl181_state *s = (pl181_state *)opaque;
 
     s->power = 0;
     s->cmdarg = 0;
@@ -469,47 +444,30 @@ static void pl181_reset(DeviceState *d)
     s->linux_hack = 0;
     s->mask[0] = 0;
     s->mask[1] = 0;
-
-    /* We can assume our GPIO outputs have been wired up now */
-    sd_set_cb(s->card, s->cardstatus[0], s->cardstatus[1]);
 }
 
 static int pl181_init(SysBusDevice *dev)
 {
+    int iomemtype;
     pl181_state *s = FROM_SYSBUS(pl181_state, dev);
     DriveInfo *dinfo;
 
-    memory_region_init_io(&s->iomem, &pl181_ops, s, "pl181", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(pl181_readfn, pl181_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
     sysbus_init_irq(dev, &s->irq[0]);
     sysbus_init_irq(dev, &s->irq[1]);
-    qdev_init_gpio_out(&s->busdev.qdev, s->cardstatus, 2);
     dinfo = drive_get_next(IF_SD);
     s->card = sd_init(dinfo ? dinfo->bdrv : NULL, 0);
+    qemu_register_reset(pl181_reset, s);
+    pl181_reset(s);
+    /* ??? Save/restore.  */
     return 0;
 }
 
-static void pl181_class_init(ObjectClass *klass, void *data)
+static void pl181_register_devices(void)
 {
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
-    DeviceClass *k = DEVICE_CLASS(klass);
-
-    sdc->init = pl181_init;
-    k->vmsd = &vmstate_pl181;
-    k->reset = pl181_reset;
-    k->no_user = 1;
+    sysbus_register_dev("pl181", sizeof(pl181_state), pl181_init);
 }
 
-static TypeInfo pl181_info = {
-    .name          = "pl181",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(pl181_state),
-    .class_init    = pl181_class_init,
-};
-
-static void pl181_register_types(void)
-{
-    type_register_static(&pl181_info);
-}
-
-type_init(pl181_register_types)
+device_init(pl181_register_devices)

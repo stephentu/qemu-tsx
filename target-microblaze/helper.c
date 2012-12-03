@@ -2,7 +2,6 @@
  *  MicroBlaze helper routines.
  *
  *  Copyright (c) 2009 Edgar E. Iglesias <edgar.iglesias@gmail.com>
- *  Copyright (c) 2009-2012 PetaLogix Qld Pty Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,7 +17,13 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+#include "config.h"
 #include "cpu.h"
+#include "exec-all.h"
 #include "host-utils.h"
 
 #define D(x)
@@ -26,15 +31,14 @@
 
 #if defined(CONFIG_USER_ONLY)
 
-void do_interrupt (CPUMBState *env)
+void do_interrupt (CPUState *env)
 {
     env->exception_index = -1;
-    env->res_addr = RES_ADDR_NONE;
     env->regs[14] = env->sregs[SR_PC];
 }
 
-int cpu_mb_handle_mmu_fault(CPUMBState * env, target_ulong address, int rw,
-                            int mmu_idx)
+int cpu_mb_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
+                             int mmu_idx, int is_softmmu)
 {
     env->exception_index = 0xaa;
     cpu_dump_state(env, stderr, fprintf, 0);
@@ -43,8 +47,8 @@ int cpu_mb_handle_mmu_fault(CPUMBState * env, target_ulong address, int rw,
 
 #else /* !CONFIG_USER_ONLY */
 
-int cpu_mb_handle_mmu_fault (CPUMBState *env, target_ulong address, int rw,
-                             int mmu_idx)
+int cpu_mb_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
+                               int mmu_idx, int is_softmmu)
 {
     unsigned int hit;
     unsigned int mmu_available;
@@ -109,15 +113,14 @@ int cpu_mb_handle_mmu_fault (CPUMBState *env, target_ulong address, int rw,
     return r;
 }
 
-void do_interrupt(CPUMBState *env)
+void do_interrupt(CPUState *env)
 {
     uint32_t t;
 
-    /* IMM flag cannot propagate across a branch and into the dslot.  */
+    /* IMM flag cannot propagate accross a branch and into the dslot.  */
     assert(!((env->iflags & D_FLAG) && (env->iflags & IMM_FLAG)));
     assert(!(env->iflags & (DRTI_FLAG | DRTE_FLAG | DRTB_FLAG)));
 /*    assert(env->sregs[SR_MSR] & (MSR_EE)); Only for HW exceptions.  */
-    env->res_addr = RES_ADDR_NONE;
     switch (env->exception_index) {
         case EXCP_HW_EXCP:
             if (!(env->pvr.regs[0] & PVR0_USE_EXC_MASK)) {
@@ -258,7 +261,7 @@ void do_interrupt(CPUMBState *env)
     }
 }
 
-hwaddr cpu_get_phys_page_debug(CPUMBState * env, target_ulong addr)
+target_phys_addr_t cpu_get_phys_page_debug(CPUState * env, target_ulong addr)
 {
     target_ulong vaddr, paddr = 0;
     struct microblaze_mmu_lookup lu;

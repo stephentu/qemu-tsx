@@ -4,14 +4,13 @@
  * Copyright (c) 2006 Openedhand Ltd.
  * Copyright (c) 2006 Thorsten Zitterell
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "hw.h"
 #include "qemu-timer.h"
 #include "sysemu.h"
 #include "pxa.h"
-#include "sysbus.h"
 
 #define OSMR0	0x00
 #define OSMR1	0x04
@@ -60,14 +59,13 @@ static int pxa2xx_timer4_freq[8] = {
     [5 ... 7] = 0,
 };
 
-typedef struct PXA2xxTimerInfo PXA2xxTimerInfo;
-
 typedef struct {
     uint32_t value;
+    int level;
     qemu_irq irq;
     QEMUTimer *qtimer;
     int num;
-    PXA2xxTimerInfo *info;
+    void *info;
 } PXA2xxTimer0;
 
 typedef struct {
@@ -79,35 +77,22 @@ typedef struct {
     uint32_t control;
 } PXA2xxTimer4;
 
-struct PXA2xxTimerInfo {
-    SysBusDevice busdev;
-    MemoryRegion iomem;
-    uint32_t flags;
-
+typedef struct {
     int32_t clock;
     int32_t oldclock;
     uint64_t lastload;
     uint32_t freq;
     PXA2xxTimer0 timer[4];
+    PXA2xxTimer4 *tm4;
     uint32_t events;
     uint32_t irq_enabled;
     uint32_t reset3;
     uint32_t snapshot;
-
-    qemu_irq irq4;
-    PXA2xxTimer4 tm4[8];
-};
-
-#define PXA2XX_TIMER_HAVE_TM4	0
-
-static inline int pxa2xx_timer_has_tm4(PXA2xxTimerInfo *s)
-{
-    return s->flags & (1 << PXA2XX_TIMER_HAVE_TM4);
-}
+} pxa2xx_timer_info;
 
 static void pxa2xx_timer_update(void *opaque, uint64_t now_qemu)
 {
-    PXA2xxTimerInfo *s = (PXA2xxTimerInfo *) opaque;
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
     int i;
     uint32_t now_vm;
     uint64_t new_qemu;
@@ -124,7 +109,7 @@ static void pxa2xx_timer_update(void *opaque, uint64_t now_qemu)
 
 static void pxa2xx_timer_update4(void *opaque, uint64_t now_qemu, int n)
 {
-    PXA2xxTimerInfo *s = (PXA2xxTimerInfo *) opaque;
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
     uint32_t now_vm;
     uint64_t new_qemu;
     static const int counters[8] = { 0, 0, 0, 0, 4, 4, 6, 6 };
@@ -149,10 +134,9 @@ static void pxa2xx_timer_update4(void *opaque, uint64_t now_qemu, int n)
     qemu_mod_timer(s->tm4[n].tm.qtimer, new_qemu);
 }
 
-static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
-                                  unsigned size)
+static uint32_t pxa2xx_timer_read(void *opaque, target_phys_addr_t offset)
 {
-    PXA2xxTimerInfo *s = (PXA2xxTimerInfo *) opaque;
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
     int tm = 0;
 
     switch (offset) {
@@ -169,11 +153,11 @@ static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
     case OSMR6:  tm ++;
     case OSMR5:  tm ++;
     case OSMR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         return s->tm4[tm].tm.value;
     case OSCR:
-        return s->clock + muldiv64(qemu_get_clock_ns(vm_clock) -
+        return s->clock + muldiv64(qemu_get_clock(vm_clock) -
                         s->lastload, s->freq, get_ticks_per_sec());
     case OSCR11: tm ++;
     case OSCR10: tm ++;
@@ -183,13 +167,13 @@ static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
     case OSCR6:  tm ++;
     case OSCR5:  tm ++;
     case OSCR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
 
         if ((tm == 9 - 4 || tm == 11 - 4) && (s->tm4[tm].control & (1 << 9))) {
             if (s->tm4[tm - 1].freq)
                 s->snapshot = s->tm4[tm - 1].clock + muldiv64(
-                                qemu_get_clock_ns(vm_clock) -
+                                qemu_get_clock(vm_clock) -
                                 s->tm4[tm - 1].lastload,
                                 s->tm4[tm - 1].freq, get_ticks_per_sec());
             else
@@ -198,7 +182,7 @@ static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
 
         if (!s->tm4[tm].freq)
             return s->tm4[tm].clock;
-        return s->tm4[tm].clock + muldiv64(qemu_get_clock_ns(vm_clock) -
+        return s->tm4[tm].clock + muldiv64(qemu_get_clock(vm_clock) -
                         s->tm4[tm].lastload, s->tm4[tm].freq, get_ticks_per_sec());
     case OIER:
         return s->irq_enabled;
@@ -214,7 +198,7 @@ static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
     case OMCR6:  tm ++;
     case OMCR5:  tm ++;
     case OMCR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         return s->tm4[tm].control;
     case OSNR:
@@ -227,11 +211,11 @@ static uint64_t pxa2xx_timer_read(void *opaque, hwaddr offset,
     return 0;
 }
 
-static void pxa2xx_timer_write(void *opaque, hwaddr offset,
-                               uint64_t value, unsigned size)
+static void pxa2xx_timer_write(void *opaque, target_phys_addr_t offset,
+                uint32_t value)
 {
     int i, tm = 0;
-    PXA2xxTimerInfo *s = (PXA2xxTimerInfo *) opaque;
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
 
     switch (offset) {
     case OSMR3:  tm ++;
@@ -239,7 +223,7 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
     case OSMR1:  tm ++;
     case OSMR0:
         s->timer[tm].value = value;
-        pxa2xx_timer_update(s, qemu_get_clock_ns(vm_clock));
+        pxa2xx_timer_update(s, qemu_get_clock(vm_clock));
         break;
     case OSMR11: tm ++;
     case OSMR10: tm ++;
@@ -249,14 +233,14 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
     case OSMR6:  tm ++;
     case OSMR5:  tm ++;
     case OSMR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         s->tm4[tm].tm.value = value;
-        pxa2xx_timer_update4(s, qemu_get_clock_ns(vm_clock), tm);
+        pxa2xx_timer_update4(s, qemu_get_clock(vm_clock), tm);
         break;
     case OSCR:
         s->oldclock = s->clock;
-        s->lastload = qemu_get_clock_ns(vm_clock);
+        s->lastload = qemu_get_clock(vm_clock);
         s->clock = value;
         pxa2xx_timer_update(s, s->lastload);
         break;
@@ -268,10 +252,10 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
     case OSCR6:  tm ++;
     case OSCR5:  tm ++;
     case OSCR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         s->tm4[tm].oldclock = s->tm4[tm].clock;
-        s->tm4[tm].lastload = qemu_get_clock_ns(vm_clock);
+        s->tm4[tm].lastload = qemu_get_clock(vm_clock);
         s->tm4[tm].clock = value;
         pxa2xx_timer_update4(s, s->tm4[tm].lastload, tm);
         break;
@@ -279,13 +263,20 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
         s->irq_enabled = value & 0xfff;
         break;
     case OSSR:	/* Status register */
-        value &= s->events;
         s->events &= ~value;
-        for (i = 0; i < 4; i ++, value >>= 1)
-            if (value & 1)
+        for (i = 0; i < 4; i ++, value >>= 1) {
+            if (s->timer[i].level && (value & 1)) {
+                s->timer[i].level = 0;
                 qemu_irq_lower(s->timer[i].irq);
-        if (pxa2xx_timer_has_tm4(s) && !(s->events & 0xff0) && value)
-            qemu_irq_lower(s->irq4);
+            }
+        }
+        if (s->tm4) {
+            for (i = 0; i < 8; i ++, value >>= 1)
+                if (s->tm4[i].tm.level && (value & 1))
+                    s->tm4[i].tm.level = 0;
+            if (!(s->events & 0xff0))
+                qemu_irq_lower(s->tm4->tm.irq);
+        }
         break;
     case OWER:	/* XXX: Reset on OSMR3 match? */
         s->reset3 = value;
@@ -294,7 +285,7 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
     case OMCR6:  tm ++;
     case OMCR5:  tm ++;
     case OMCR4:
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         s->tm4[tm].control = value & 0x0ff;
         /* XXX Stop if running (shouldn't happen) */
@@ -302,14 +293,14 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
             s->tm4[tm].freq = pxa2xx_timer4_freq[value & 7];
         else {
             s->tm4[tm].freq = 0;
-            pxa2xx_timer_update4(s, qemu_get_clock_ns(vm_clock), tm);
+            pxa2xx_timer_update4(s, qemu_get_clock(vm_clock), tm);
         }
         break;
     case OMCR11: tm ++;
     case OMCR10: tm ++;
     case OMCR9:  tm ++;
     case OMCR8:  tm += 4;
-        if (!pxa2xx_timer_has_tm4(s))
+        if (!s->tm4)
             goto badreg;
         s->tm4[tm].control = value & 0x3ff;
         /* XXX Stop if running (shouldn't happen) */
@@ -318,7 +309,7 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
                     pxa2xx_timer4_freq[(value & (1 << 8)) ?  0 : (value & 7)];
         else {
             s->tm4[tm].freq = 0;
-            pxa2xx_timer_update4(s, qemu_get_clock_ns(vm_clock), tm);
+            pxa2xx_timer_update4(s, qemu_get_clock(vm_clock), tm);
         }
         break;
     default:
@@ -327,18 +318,25 @@ static void pxa2xx_timer_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps pxa2xx_timer_ops = {
-    .read = pxa2xx_timer_read,
-    .write = pxa2xx_timer_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pxa2xx_timer_readfn[] = {
+    pxa2xx_timer_read,
+    pxa2xx_timer_read,
+    pxa2xx_timer_read,
+};
+
+static CPUWriteMemoryFunc * const pxa2xx_timer_writefn[] = {
+    pxa2xx_timer_write,
+    pxa2xx_timer_write,
+    pxa2xx_timer_write,
 };
 
 static void pxa2xx_timer_tick(void *opaque)
 {
     PXA2xxTimer0 *t = (PXA2xxTimer0 *) opaque;
-    PXA2xxTimerInfo *i = t->info;
+    pxa2xx_timer_info *i = (pxa2xx_timer_info *) t->info;
 
     if (i->irq_enabled & (1 << t->num)) {
+        t->level = 1;
         i->events |= 1 << t->num;
         qemu_irq_raise(t->irq);
     }
@@ -353,184 +351,140 @@ static void pxa2xx_timer_tick(void *opaque)
 static void pxa2xx_timer_tick4(void *opaque)
 {
     PXA2xxTimer4 *t = (PXA2xxTimer4 *) opaque;
-    PXA2xxTimerInfo *i = (PXA2xxTimerInfo *) t->tm.info;
+    pxa2xx_timer_info *i = (pxa2xx_timer_info *) t->tm.info;
 
     pxa2xx_timer_tick(&t->tm);
     if (t->control & (1 << 3))
         t->clock = 0;
     if (t->control & (1 << 6))
-        pxa2xx_timer_update4(i, qemu_get_clock_ns(vm_clock), t->tm.num - 4);
-    if (i->events & 0xff0)
-        qemu_irq_raise(i->irq4);
+        pxa2xx_timer_update4(i, qemu_get_clock(vm_clock), t->tm.num - 4);
 }
 
-static int pxa25x_timer_post_load(void *opaque, int version_id)
+static void pxa2xx_timer_save(QEMUFile *f, void *opaque)
 {
-    PXA2xxTimerInfo *s = (PXA2xxTimerInfo *) opaque;
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
+    int i;
+
+    qemu_put_be32s(f, (uint32_t *) &s->clock);
+    qemu_put_be32s(f, (uint32_t *) &s->oldclock);
+    qemu_put_be64s(f, &s->lastload);
+
+    for (i = 0; i < 4; i ++) {
+        qemu_put_be32s(f, &s->timer[i].value);
+        qemu_put_be32(f, s->timer[i].level);
+    }
+    if (s->tm4)
+        for (i = 0; i < 8; i ++) {
+            qemu_put_be32s(f, &s->tm4[i].tm.value);
+            qemu_put_be32(f, s->tm4[i].tm.level);
+            qemu_put_sbe32s(f, &s->tm4[i].oldclock);
+            qemu_put_sbe32s(f, &s->tm4[i].clock);
+            qemu_put_be64s(f, &s->tm4[i].lastload);
+            qemu_put_be32s(f, &s->tm4[i].freq);
+            qemu_put_be32s(f, &s->tm4[i].control);
+        }
+
+    qemu_put_be32s(f, &s->events);
+    qemu_put_be32s(f, &s->irq_enabled);
+    qemu_put_be32s(f, &s->reset3);
+    qemu_put_be32s(f, &s->snapshot);
+}
+
+static int pxa2xx_timer_load(QEMUFile *f, void *opaque, int version_id)
+{
+    pxa2xx_timer_info *s = (pxa2xx_timer_info *) opaque;
     int64_t now;
     int i;
 
-    now = qemu_get_clock_ns(vm_clock);
+    qemu_get_be32s(f, (uint32_t *) &s->clock);
+    qemu_get_be32s(f, (uint32_t *) &s->oldclock);
+    qemu_get_be64s(f, &s->lastload);
+
+    now = qemu_get_clock(vm_clock);
+    for (i = 0; i < 4; i ++) {
+        qemu_get_be32s(f, &s->timer[i].value);
+        s->timer[i].level = qemu_get_be32(f);
+    }
     pxa2xx_timer_update(s, now);
 
-    if (pxa2xx_timer_has_tm4(s))
-        for (i = 0; i < 8; i ++)
+    if (s->tm4)
+        for (i = 0; i < 8; i ++) {
+            qemu_get_be32s(f, &s->tm4[i].tm.value);
+            s->tm4[i].tm.level = qemu_get_be32(f);
+            qemu_get_sbe32s(f, &s->tm4[i].oldclock);
+            qemu_get_sbe32s(f, &s->tm4[i].clock);
+            qemu_get_be64s(f, &s->tm4[i].lastload);
+            qemu_get_be32s(f, &s->tm4[i].freq);
+            qemu_get_be32s(f, &s->tm4[i].control);
             pxa2xx_timer_update4(s, now, i);
+        }
+
+    qemu_get_be32s(f, &s->events);
+    qemu_get_be32s(f, &s->irq_enabled);
+    qemu_get_be32s(f, &s->reset3);
+    qemu_get_be32s(f, &s->snapshot);
 
     return 0;
 }
 
-static int pxa2xx_timer_init(SysBusDevice *dev)
+static pxa2xx_timer_info *pxa2xx_timer_init(target_phys_addr_t base,
+                qemu_irq *irqs)
 {
     int i;
-    PXA2xxTimerInfo *s;
+    int iomemtype;
+    pxa2xx_timer_info *s;
 
-    s = FROM_SYSBUS(PXA2xxTimerInfo, dev);
+    s = (pxa2xx_timer_info *) qemu_mallocz(sizeof(pxa2xx_timer_info));
     s->irq_enabled = 0;
     s->oldclock = 0;
     s->clock = 0;
-    s->lastload = qemu_get_clock_ns(vm_clock);
+    s->lastload = qemu_get_clock(vm_clock);
     s->reset3 = 0;
 
     for (i = 0; i < 4; i ++) {
         s->timer[i].value = 0;
-        sysbus_init_irq(dev, &s->timer[i].irq);
+        s->timer[i].irq = irqs[i];
         s->timer[i].info = s;
         s->timer[i].num = i;
-        s->timer[i].qtimer = qemu_new_timer_ns(vm_clock,
+        s->timer[i].level = 0;
+        s->timer[i].qtimer = qemu_new_timer(vm_clock,
                         pxa2xx_timer_tick, &s->timer[i]);
     }
-    if (s->flags & (1 << PXA2XX_TIMER_HAVE_TM4)) {
-        sysbus_init_irq(dev, &s->irq4);
 
-        for (i = 0; i < 8; i ++) {
-            s->tm4[i].tm.value = 0;
-            s->tm4[i].tm.info = s;
-            s->tm4[i].tm.num = i + 4;
-            s->tm4[i].freq = 0;
-            s->tm4[i].control = 0x0;
-            s->tm4[i].tm.qtimer = qemu_new_timer_ns(vm_clock,
+    iomemtype = cpu_register_io_memory(pxa2xx_timer_readfn,
+                    pxa2xx_timer_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x00001000, iomemtype);
+
+    register_savevm(NULL, "pxa2xx_timer", 0, 0,
+                    pxa2xx_timer_save, pxa2xx_timer_load, s);
+
+    return s;
+}
+
+void pxa25x_timer_init(target_phys_addr_t base, qemu_irq *irqs)
+{
+    pxa2xx_timer_info *s = pxa2xx_timer_init(base, irqs);
+    s->freq = PXA25X_FREQ;
+    s->tm4 = NULL;
+}
+
+void pxa27x_timer_init(target_phys_addr_t base,
+                qemu_irq *irqs, qemu_irq irq4)
+{
+    pxa2xx_timer_info *s = pxa2xx_timer_init(base, irqs);
+    int i;
+    s->freq = PXA27X_FREQ;
+    s->tm4 = (PXA2xxTimer4 *) qemu_mallocz(8 *
+                    sizeof(PXA2xxTimer4));
+    for (i = 0; i < 8; i ++) {
+        s->tm4[i].tm.value = 0;
+        s->tm4[i].tm.irq = irq4;
+        s->tm4[i].tm.info = s;
+        s->tm4[i].tm.num = i + 4;
+        s->tm4[i].tm.level = 0;
+        s->tm4[i].freq = 0;
+        s->tm4[i].control = 0x0;
+        s->tm4[i].tm.qtimer = qemu_new_timer(vm_clock,
                         pxa2xx_timer_tick4, &s->tm4[i]);
-        }
     }
-
-    memory_region_init_io(&s->iomem, &pxa2xx_timer_ops, s,
-                          "pxa2xx-timer", 0x00001000);
-    sysbus_init_mmio(dev, &s->iomem);
-
-    return 0;
 }
-
-static const VMStateDescription vmstate_pxa2xx_timer0_regs = {
-    .name = "pxa2xx_timer0",
-    .version_id = 2,
-    .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT32(value, PXA2xxTimer0),
-        VMSTATE_END_OF_LIST(),
-    },
-};
-
-static const VMStateDescription vmstate_pxa2xx_timer4_regs = {
-    .name = "pxa2xx_timer4",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_STRUCT(tm, PXA2xxTimer4, 1,
-                        vmstate_pxa2xx_timer0_regs, PXA2xxTimer0),
-        VMSTATE_INT32(oldclock, PXA2xxTimer4),
-        VMSTATE_INT32(clock, PXA2xxTimer4),
-        VMSTATE_UINT64(lastload, PXA2xxTimer4),
-        VMSTATE_UINT32(freq, PXA2xxTimer4),
-        VMSTATE_UINT32(control, PXA2xxTimer4),
-        VMSTATE_END_OF_LIST(),
-    },
-};
-
-static bool pxa2xx_timer_has_tm4_test(void *opaque, int version_id)
-{
-    return pxa2xx_timer_has_tm4(opaque);
-}
-
-static const VMStateDescription vmstate_pxa2xx_timer_regs = {
-    .name = "pxa2xx_timer",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .post_load = pxa25x_timer_post_load,
-    .fields = (VMStateField[]) {
-        VMSTATE_INT32(clock, PXA2xxTimerInfo),
-        VMSTATE_INT32(oldclock, PXA2xxTimerInfo),
-        VMSTATE_UINT64(lastload, PXA2xxTimerInfo),
-        VMSTATE_STRUCT_ARRAY(timer, PXA2xxTimerInfo, 4, 1,
-                        vmstate_pxa2xx_timer0_regs, PXA2xxTimer0),
-        VMSTATE_UINT32(events, PXA2xxTimerInfo),
-        VMSTATE_UINT32(irq_enabled, PXA2xxTimerInfo),
-        VMSTATE_UINT32(reset3, PXA2xxTimerInfo),
-        VMSTATE_UINT32(snapshot, PXA2xxTimerInfo),
-        VMSTATE_STRUCT_ARRAY_TEST(tm4, PXA2xxTimerInfo, 8,
-                        pxa2xx_timer_has_tm4_test, 0,
-                        vmstate_pxa2xx_timer4_regs, PXA2xxTimer4),
-        VMSTATE_END_OF_LIST(),
-    }
-};
-
-static Property pxa25x_timer_dev_properties[] = {
-    DEFINE_PROP_UINT32("freq", PXA2xxTimerInfo, freq, PXA25X_FREQ),
-    DEFINE_PROP_BIT("tm4", PXA2xxTimerInfo, flags,
-    PXA2XX_TIMER_HAVE_TM4, false),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void pxa25x_timer_dev_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = pxa2xx_timer_init;
-    dc->desc = "PXA25x timer";
-    dc->vmsd = &vmstate_pxa2xx_timer_regs;
-    dc->props = pxa25x_timer_dev_properties;
-}
-
-static TypeInfo pxa25x_timer_dev_info = {
-    .name          = "pxa25x-timer",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(PXA2xxTimerInfo),
-    .class_init    = pxa25x_timer_dev_class_init,
-};
-
-static Property pxa27x_timer_dev_properties[] = {
-    DEFINE_PROP_UINT32("freq", PXA2xxTimerInfo, freq, PXA27X_FREQ),
-    DEFINE_PROP_BIT("tm4", PXA2xxTimerInfo, flags,
-    PXA2XX_TIMER_HAVE_TM4, true),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void pxa27x_timer_dev_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = pxa2xx_timer_init;
-    dc->desc = "PXA27x timer";
-    dc->vmsd = &vmstate_pxa2xx_timer_regs;
-    dc->props = pxa27x_timer_dev_properties;
-}
-
-static TypeInfo pxa27x_timer_dev_info = {
-    .name          = "pxa27x-timer",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(PXA2xxTimerInfo),
-    .class_init    = pxa27x_timer_dev_class_init,
-};
-
-static void pxa2xx_timer_register_types(void)
-{
-    type_register_static(&pxa25x_timer_dev_info);
-    type_register_static(&pxa27x_timer_dev_info);
-}
-
-type_init(pxa2xx_timer_register_types)

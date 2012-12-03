@@ -24,58 +24,59 @@
 
 #include "hw.h"
 #include "isa.h"
-#include "exec-memory.h"
 
-static void isa_mmio_writeb (void *opaque, hwaddr addr,
+static void isa_mmio_writeb (void *opaque, target_phys_addr_t addr,
                                   uint32_t val)
 {
     cpu_outb(addr & IOPORTS_MASK, val);
 }
 
-static void isa_mmio_writew(void *opaque, hwaddr addr,
+static void isa_mmio_writew(void *opaque, target_phys_addr_t addr,
                                uint32_t val)
 {
     cpu_outw(addr & IOPORTS_MASK, val);
 }
 
-static void isa_mmio_writel(void *opaque, hwaddr addr,
+static void isa_mmio_writel(void *opaque, target_phys_addr_t addr,
                                uint32_t val)
 {
     cpu_outl(addr & IOPORTS_MASK, val);
 }
 
-static uint32_t isa_mmio_readb (void *opaque, hwaddr addr)
+static uint32_t isa_mmio_readb (void *opaque, target_phys_addr_t addr)
 {
     return cpu_inb(addr & IOPORTS_MASK);
 }
 
-static uint32_t isa_mmio_readw(void *opaque, hwaddr addr)
+static uint32_t isa_mmio_readw(void *opaque, target_phys_addr_t addr)
 {
     return cpu_inw(addr & IOPORTS_MASK);
 }
 
-static uint32_t isa_mmio_readl(void *opaque, hwaddr addr)
+static uint32_t isa_mmio_readl(void *opaque, target_phys_addr_t addr)
 {
     return cpu_inl(addr & IOPORTS_MASK);
 }
 
-static const MemoryRegionOps isa_mmio_ops = {
-    .old_mmio = {
-        .write = { isa_mmio_writeb, isa_mmio_writew, isa_mmio_writel },
-        .read = { isa_mmio_readb, isa_mmio_readw, isa_mmio_readl, },
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
+static CPUWriteMemoryFunc * const isa_mmio_write[] = {
+    &isa_mmio_writeb,
+    &isa_mmio_writew,
+    &isa_mmio_writel,
 };
 
-void isa_mmio_setup(MemoryRegion *mr, hwaddr size)
-{
-    memory_region_init_io(mr, &isa_mmio_ops, NULL, "isa-mmio", size);
-}
+static CPUReadMemoryFunc * const isa_mmio_read[] = {
+    &isa_mmio_readb,
+    &isa_mmio_readw,
+    &isa_mmio_readl,
+};
 
-void isa_mmio_init(hwaddr base, hwaddr size)
+void isa_mmio_init(target_phys_addr_t base, target_phys_addr_t size)
 {
-    MemoryRegion *mr = g_malloc(sizeof(*mr));
+    int isa_mmio_iomemtype;
 
-    isa_mmio_setup(mr, size);
-    memory_region_add_subregion(get_system_memory(), base, mr);
+    isa_mmio_iomemtype = cpu_register_io_memory(isa_mmio_read,
+                                                isa_mmio_write,
+                                                NULL,
+                                                DEVICE_LITTLE_ENDIAN);
+    cpu_register_physical_memory(base, size, isa_mmio_iomemtype);
 }

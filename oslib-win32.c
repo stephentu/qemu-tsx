@@ -28,16 +28,8 @@
 #include <windows.h>
 #include "config-host.h"
 #include "sysemu.h"
-#include "main-loop.h"
 #include "trace.h"
 #include "qemu_socket.h"
-
-static void default_qemu_fd_register(int fd)
-{
-}
-QEMU_WEAK_ALIAS(qemu_fd_register, default_qemu_fd_register);
-#define qemu_fd_register \
-    QEMU_WEAK_REF(qemu_fd_register, default_qemu_fd_register)
 
 void *qemu_oom_check(void *ptr)
 {
@@ -81,42 +73,10 @@ void qemu_vfree(void *ptr)
     VirtualFree(ptr, 0, MEM_RELEASE);
 }
 
-/* FIXME: add proper locking */
-struct tm *gmtime_r(const time_t *timep, struct tm *result)
-{
-    struct tm *p = gmtime(timep);
-    memset(result, 0, sizeof(*result));
-    if (p) {
-        *result = *p;
-        p = result;
-    }
-    return p;
-}
-
-/* FIXME: add proper locking */
-struct tm *localtime_r(const time_t *timep, struct tm *result)
-{
-    struct tm *p = localtime(timep);
-    memset(result, 0, sizeof(*result));
-    if (p) {
-        *result = *p;
-        p = result;
-    }
-    return p;
-}
-
-void socket_set_block(int fd)
-{
-    unsigned long opt = 0;
-    WSAEventSelect(fd, NULL, 0);
-    ioctlsocket(fd, FIONBIO, &opt);
-}
-
 void socket_set_nonblock(int fd)
 {
     unsigned long opt = 1;
     ioctlsocket(fd, FIONBIO, &opt);
-    qemu_fd_register(fd);
 }
 
 int inet_aton(const char *cp, struct in_addr *ia)
@@ -131,6 +91,13 @@ int inet_aton(const char *cp, struct in_addr *ia)
 
 void qemu_set_cloexec(int fd)
 {
+}
+
+/* mingw32 needs ffs for compilations without optimization. */
+int ffs(int i)
+{
+    /* Use gcc's builtin ffs. */
+    return __builtin_ffs(i);
 }
 
 /* Offset between 1/1/1601 and 1/1/1970 in 100 nanosec units */
@@ -151,9 +118,4 @@ int qemu_gettimeofday(qemu_timeval *tp)
   /* Always return 0 as per Open Group Base Specifications Issue 6.
      Do not set errno on error.  */
   return 0;
-}
-
-int qemu_get_thread_id(void)
-{
-    return GetCurrentThreadId();
 }

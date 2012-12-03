@@ -38,8 +38,8 @@
 #endif
 
 struct MacIONVRAMState {
-    uint32_t size;
-    MemoryRegion mem;
+    target_phys_addr_t size;
+    int mem_index;
     unsigned int it_shift;
     uint8_t *data;
 };
@@ -71,8 +71,8 @@ void macio_nvram_write (void *opaque, uint32_t addr, uint32_t val)
 }
 
 /* macio style NVRAM device */
-static void macio_nvram_writeb(void *opaque, hwaddr addr,
-                               uint64_t value, unsigned size)
+static void macio_nvram_writeb (void *opaque,
+                                target_phys_addr_t addr, uint32_t value)
 {
     MacIONVRAMState *s = opaque;
 
@@ -81,8 +81,7 @@ static void macio_nvram_writeb(void *opaque, hwaddr addr,
     NVR_DPRINTF("writeb addr %04x val %x\n", (int)addr, value);
 }
 
-static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
-                                  unsigned size)
+static uint32_t macio_nvram_readb (void *opaque, target_phys_addr_t addr)
 {
     MacIONVRAMState *s = opaque;
     uint32_t value;
@@ -94,50 +93,68 @@ static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
     return value;
 }
 
-static const MemoryRegionOps macio_nvram_ops = {
-    .read = macio_nvram_readb,
-    .write = macio_nvram_writeb,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUWriteMemoryFunc * const nvram_write[] = {
+    &macio_nvram_writeb,
+    &macio_nvram_writeb,
+    &macio_nvram_writeb,
 };
 
-static const VMStateDescription vmstate_macio_nvram = {
-    .name = "macio_nvram",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_VBUFFER_UINT32(data, MacIONVRAMState, 0, NULL, 0, size),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUReadMemoryFunc * const nvram_read[] = {
+    &macio_nvram_readb,
+    &macio_nvram_readb,
+    &macio_nvram_readb,
 };
 
+static void macio_nvram_save(QEMUFile *f, void *opaque)
+{
+    MacIONVRAMState *s = (MacIONVRAMState *)opaque;
+
+    qemu_put_buffer(f, s->data, s->size);
+}
+
+static int macio_nvram_load(QEMUFile *f, void *opaque, int version_id)
+{
+    MacIONVRAMState *s = (MacIONVRAMState *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    qemu_get_buffer(f, s->data, s->size);
+
+    return 0;
+}
 
 static void macio_nvram_reset(void *opaque)
 {
 }
 
-MacIONVRAMState *macio_nvram_init (hwaddr size,
+MacIONVRAMState *macio_nvram_init (int *mem_index, target_phys_addr_t size,
                                    unsigned int it_shift)
 {
     MacIONVRAMState *s;
 
-    s = g_malloc0(sizeof(MacIONVRAMState));
-    s->data = g_malloc0(size);
+    s = qemu_mallocz(sizeof(MacIONVRAMState));
+    s->data = qemu_mallocz(size);
     s->size = size;
     s->it_shift = it_shift;
 
-    memory_region_init_io(&s->mem, &macio_nvram_ops, s, "macio-nvram",
-                          size << it_shift);
-    vmstate_register(NULL, -1, &vmstate_macio_nvram, s);
+    s->mem_index = cpu_register_io_memory(nvram_read, nvram_write, s,
+                                          DEVICE_NATIVE_ENDIAN);
+    *mem_index = s->mem_index;
+    register_savevm(NULL, "macio_nvram", -1, 1, macio_nvram_save,
+                    macio_nvram_load, s);
     qemu_register_reset(macio_nvram_reset, s);
 
     return s;
 }
 
-void macio_nvram_setup_bar(MacIONVRAMState *s, MemoryRegion *bar,
-                           hwaddr mem_base)
+void macio_nvram_map (void *opaque, target_phys_addr_t mem_base)
 {
-    memory_region_add_subregion(bar, mem_base, &s->mem);
+    MacIONVRAMState *s;
+
+    s = opaque;
+    cpu_register_physical_memory(mem_base, s->size << s->it_shift,
+                                 s->mem_index);
 }
 
 /* Set up a system OpenBIOS NVRAM partition */

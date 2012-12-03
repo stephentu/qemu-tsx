@@ -15,8 +15,7 @@ static QEMUCursor *cursor_parse_xpm(const char *xpm[])
     uint8_t idx;
 
     /* parse header line: width, height, #colors, #chars */
-    if (sscanf(xpm[line], "%u %u %u %u",
-               &width, &height, &colors, &chars) != 4) {
+    if (sscanf(xpm[line], "%d %d %d %d", &width, &height, &colors, &chars) != 4) {
         fprintf(stderr, "%s: header parse error: \"%s\"\n",
                 __FUNCTION__, xpm[line]);
         return NULL;
@@ -99,7 +98,7 @@ QEMUCursor *cursor_alloc(int width, int height)
     QEMUCursor *c;
     int datasize = width * height * sizeof(uint32_t);
 
-    c = g_malloc0(sizeof(QEMUCursor) + datasize);
+    c = qemu_mallocz(sizeof(QEMUCursor) + datasize);
     c->width  = width;
     c->height = height;
     c->refcount = 1;
@@ -118,7 +117,7 @@ void cursor_put(QEMUCursor *c)
     c->refcount--;
     if (c->refcount)
         return;
-    g_free(c);
+    qemu_free(c);
 }
 
 int cursor_get_mono_bpl(QEMUCursor *c)

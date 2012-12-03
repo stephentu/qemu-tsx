@@ -29,15 +29,13 @@
 
 /* host loopback address */
 struct in_addr loopback_addr;
-/* host loopback network mask */
-unsigned long loopback_mask;
 
 /* emulated hosts use the MAC addr 52:55:IP:IP:IP:IP */
-static const uint8_t special_ethaddr[ETH_ALEN] = {
+static const uint8_t special_ethaddr[6] = {
     0x52, 0x55, 0x00, 0x00, 0x00, 0x00
 };
 
-static const uint8_t zero_ethaddr[ETH_ALEN] = { 0, 0, 0, 0, 0, 0 };
+static const uint8_t zero_ethaddr[6] = { 0, 0, 0, 0, 0, 0 };
 
 /* XXX: suppress those select globals */
 fd_set *global_readfds, *global_writefds, *global_xfds;
@@ -193,7 +191,6 @@ static void slirp_init_once(void)
 #endif
 
     loopback_addr.s_addr = htonl(INADDR_LOOPBACK);
-    loopback_mask = htonl(IN_CLASSA_NET);
 }
 
 static void slirp_state_save(QEMUFile *f, void *opaque);
@@ -205,7 +202,7 @@ Slirp *slirp_init(int restricted, struct in_addr vnetwork,
                   const char *bootfile, struct in_addr vdhcp_start,
                   struct in_addr vnameserver, void *opaque)
 {
-    Slirp *slirp = g_malloc0(sizeof(Slirp));
+    Slirp *slirp = qemu_mallocz(sizeof(Slirp));
 
     slirp_init_once();
 
@@ -225,10 +222,10 @@ Slirp *slirp_init(int restricted, struct in_addr vnetwork,
                 vhostname);
     }
     if (tftp_path) {
-        slirp->tftp_prefix = g_strdup(tftp_path);
+        slirp->tftp_prefix = qemu_strdup(tftp_path);
     }
     if (bootfile) {
-        slirp->bootp_filename = g_strdup(bootfile);
+        slirp->bootp_filename = qemu_strdup(bootfile);
     }
     slirp->vdhcp_startaddr = vdhcp_start;
     slirp->vnameserver_addr = vnameserver;
@@ -249,24 +246,14 @@ void slirp_cleanup(Slirp *slirp)
 
     unregister_savevm(NULL, "slirp", slirp);
 
-    ip_cleanup(slirp);
-    m_cleanup(slirp);
-
-    g_free(slirp->tftp_prefix);
-    g_free(slirp->bootp_filename);
-    g_free(slirp);
+    qemu_free(slirp->tftp_prefix);
+    qemu_free(slirp->bootp_filename);
+    qemu_free(slirp);
 }
 
 #define CONN_CANFSEND(so) (((so)->so_state & (SS_FCANTSENDMORE|SS_ISFCONNECTED)) == SS_ISFCONNECTED)
 #define CONN_CANFRCV(so) (((so)->so_state & (SS_FCANTRCVMORE|SS_ISFCONNECTED)) == SS_ISFCONNECTED)
 #define UPD_NFDS(x) if (nfds < (x)) nfds = (x)
-
-void slirp_update_timeout(uint32_t *timeout)
-{
-    if (!QTAILQ_EMPTY(&slirp_instances)) {
-        *timeout = MIN(1000, *timeout);
-    }
-}
 
 void slirp_select_fill(int *pnfds,
                        fd_set *readfds, fd_set *writefds, fd_set *xfds)
@@ -386,31 +373,6 @@ void slirp_select_fill(int *pnfds,
 				UPD_NFDS(so->s);
 			}
 		}
-
-                /*
-                 * ICMP sockets
-                 */
-                for (so = slirp->icmp.so_next; so != &slirp->icmp;
-                     so = so_next) {
-                    so_next = so->so_next;
-
-                    /*
-                     * See if it's timed out
-                     */
-                    if (so->so_expire) {
-                        if (so->so_expire <= curtime) {
-                            icmp_detach(so);
-                            continue;
-                        } else {
-                            do_slowtimo = 1; /* Let socket expire */
-                        }
-                    }
-
-                    if (so->so_state & SS_ISFCONNECTED) {
-                        FD_SET(so->s, readfds);
-                        UPD_NFDS(so->s);
-                    }
-                }
 	}
 
         *pnfds = nfds;
@@ -431,7 +393,7 @@ void slirp_select_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds,
     global_writefds = writefds;
     global_xfds = xfds;
 
-    curtime = qemu_get_clock_ms(rt_clock);
+    curtime = qemu_get_clock(rt_clock);
 
     QTAILQ_FOREACH(slirp, &slirp_instances, entry) {
 	/*
@@ -535,7 +497,7 @@ void slirp_select_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds,
 	 	 	 */
 #ifdef PROBE_CONN
 			if (so->so_state & SS_ISFCONNECTING) {
-                          ret = qemu_recv(so->s, &ret, 0,0);
+			  ret = recv(so->s, (char *)&ret, 0,0);
 
 			  if (ret < 0) {
 			    /* XXX */
@@ -580,21 +542,14 @@ void slirp_select_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds,
                             sorecvfrom(so);
                         }
 		}
-
-                /*
-                 * Check incoming ICMP relies.
-                 */
-                for (so = slirp->icmp.so_next; so != &slirp->icmp;
-                     so = so_next) {
-                     so_next = so->so_next;
-
-                    if (so->s != -1 && FD_ISSET(so->s, readfds)) {
-                        icmp_receive(so);
-                    }
-                }
 	}
 
-        if_start(slirp);
+	/*
+	 * See if we can start outputting
+	 */
+	if (slirp->if_queued) {
+	    if_start(slirp);
+	}
     }
 
 	/* clear global file descriptor sets.
@@ -607,8 +562,42 @@ void slirp_select_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds,
 	 global_xfds = NULL;
 }
 
+#define ETH_ALEN 6
+#define ETH_HLEN 14
+
+#define ETH_P_IP	0x0800		/* Internet Protocol packet	*/
+#define ETH_P_ARP	0x0806		/* Address Resolution packet	*/
+
+#define	ARPOP_REQUEST	1		/* ARP request			*/
+#define	ARPOP_REPLY	2		/* ARP reply			*/
+
+struct ethhdr
+{
+	unsigned char	h_dest[ETH_ALEN];	/* destination eth addr	*/
+	unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
+	unsigned short	h_proto;		/* packet type ID field	*/
+};
+
+struct arphdr
+{
+	unsigned short	ar_hrd;		/* format of hardware address	*/
+	unsigned short	ar_pro;		/* format of protocol address	*/
+	unsigned char	ar_hln;		/* length of hardware address	*/
+	unsigned char	ar_pln;		/* length of protocol address	*/
+	unsigned short	ar_op;		/* ARP opcode (command)		*/
+
+	 /*
+	  *	 Ethernet looks like this : This bit is variable sized however...
+	  */
+	unsigned char		ar_sha[ETH_ALEN];	/* sender hardware address	*/
+	uint32_t		ar_sip;			/* sender IP address		*/
+	unsigned char		ar_tha[ETH_ALEN];	/* target hardware address	*/
+	uint32_t		ar_tip	;		/* target IP address		*/
+} __attribute__((packed));
+
 static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 {
+    struct ethhdr *eh = (struct ethhdr *)pkt;
     struct arphdr *ah = (struct arphdr *)(pkt + ETH_HLEN);
     uint8_t arp_reply[max(ETH_HLEN + sizeof(struct arphdr), 64)];
     struct ethhdr *reh = (struct ethhdr *)arp_reply;
@@ -619,12 +608,6 @@ static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
     ar_op = ntohs(ah->ar_op);
     switch(ar_op) {
     case ARPOP_REQUEST:
-        if (ah->ar_tip == ah->ar_sip) {
-            /* Gratuitous ARP */
-            arp_table_add(slirp, ah->ar_sip, ah->ar_sha);
-            return;
-        }
-
         if ((ah->ar_tip & slirp->vnetwork_mask.s_addr) ==
             slirp->vnetwork_addr.s_addr) {
             if (ah->ar_tip == slirp->vnameserver_addr.s_addr ||
@@ -637,8 +620,8 @@ static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
             return;
         arp_ok:
             memset(arp_reply, 0, sizeof(arp_reply));
-
-            arp_table_add(slirp, ah->ar_sip, ah->ar_sha);
+            /* XXX: make an ARP request to have the client address */
+            memcpy(slirp->client_ethaddr, eh->h_source, ETH_ALEN);
 
             /* ARP request for alias/dns mac address */
             memcpy(reh->h_dest, pkt + ETH_ALEN, ETH_ALEN);
@@ -659,7 +642,11 @@ static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
         }
         break;
     case ARPOP_REPLY:
-        arp_table_add(slirp, ah->ar_sip, ah->ar_sha);
+        /* reply to request of client mac address ? */
+        if (!memcmp(slirp->client_ethaddr, zero_ethaddr, ETH_ALEN) &&
+            ah->ar_sip == slirp->client_ipaddr.s_addr) {
+            memcpy(slirp->client_ethaddr, ah->ar_sha, ETH_ALEN);
+        }
         break;
     default:
         break;
@@ -700,66 +687,54 @@ void slirp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
     }
 }
 
-/* Output the IP packet to the ethernet device. Returns 0 if the packet must be
- * re-queued.
- */
-int if_encap(Slirp *slirp, struct mbuf *ifm)
+/* output the IP packet to the ethernet device */
+void if_encap(Slirp *slirp, const uint8_t *ip_data, int ip_data_len)
 {
     uint8_t buf[1600];
     struct ethhdr *eh = (struct ethhdr *)buf;
-    uint8_t ethaddr[ETH_ALEN];
-    const struct ip *iph = (const struct ip *)ifm->m_data;
 
-    if (ifm->m_len + ETH_HLEN > sizeof(buf)) {
-        return 1;
-    }
-
-    if (!arp_table_search(slirp, iph->ip_dst.s_addr, ethaddr)) {
+    if (ip_data_len + ETH_HLEN > sizeof(buf))
+        return;
+    
+    if (!memcmp(slirp->client_ethaddr, zero_ethaddr, ETH_ALEN)) {
         uint8_t arp_req[ETH_HLEN + sizeof(struct arphdr)];
         struct ethhdr *reh = (struct ethhdr *)arp_req;
         struct arphdr *rah = (struct arphdr *)(arp_req + ETH_HLEN);
+        const struct ip *iph = (const struct ip *)ip_data;
 
-        if (!ifm->arp_requested) {
-            /* If the client addr is not known, send an ARP request */
-            memset(reh->h_dest, 0xff, ETH_ALEN);
-            memcpy(reh->h_source, special_ethaddr, ETH_ALEN - 4);
-            memcpy(&reh->h_source[2], &slirp->vhost_addr, 4);
-            reh->h_proto = htons(ETH_P_ARP);
-            rah->ar_hrd = htons(1);
-            rah->ar_pro = htons(ETH_P_IP);
-            rah->ar_hln = ETH_ALEN;
-            rah->ar_pln = 4;
-            rah->ar_op = htons(ARPOP_REQUEST);
-
-            /* source hw addr */
-            memcpy(rah->ar_sha, special_ethaddr, ETH_ALEN - 4);
-            memcpy(&rah->ar_sha[2], &slirp->vhost_addr, 4);
-
-            /* source IP */
-            rah->ar_sip = slirp->vhost_addr.s_addr;
-
-            /* target hw addr (none) */
-            memset(rah->ar_tha, 0, ETH_ALEN);
-
-            /* target IP */
-            rah->ar_tip = iph->ip_dst.s_addr;
-            slirp->client_ipaddr = iph->ip_dst;
-            slirp_output(slirp->opaque, arp_req, sizeof(arp_req));
-            ifm->arp_requested = true;
-
-            /* Expire request and drop outgoing packet after 1 second */
-            ifm->expiration_date = qemu_get_clock_ns(rt_clock) + 1000000000ULL;
-        }
-        return 0;
+        /* If the client addr is not known, there is no point in
+           sending the packet to it. Normally the sender should have
+           done an ARP request to get its MAC address. Here we do it
+           in place of sending the packet and we hope that the sender
+           will retry sending its packet. */
+        memset(reh->h_dest, 0xff, ETH_ALEN);
+        memcpy(reh->h_source, special_ethaddr, ETH_ALEN - 4);
+        memcpy(&reh->h_source[2], &slirp->vhost_addr, 4);
+        reh->h_proto = htons(ETH_P_ARP);
+        rah->ar_hrd = htons(1);
+        rah->ar_pro = htons(ETH_P_IP);
+        rah->ar_hln = ETH_ALEN;
+        rah->ar_pln = 4;
+        rah->ar_op = htons(ARPOP_REQUEST);
+        /* source hw addr */
+        memcpy(rah->ar_sha, special_ethaddr, ETH_ALEN - 4);
+        memcpy(&rah->ar_sha[2], &slirp->vhost_addr, 4);
+        /* source IP */
+        rah->ar_sip = slirp->vhost_addr.s_addr;
+        /* target hw addr (none) */
+        memset(rah->ar_tha, 0, ETH_ALEN);
+        /* target IP */
+        rah->ar_tip = iph->ip_dst.s_addr;
+        slirp->client_ipaddr = iph->ip_dst;
+        slirp_output(slirp->opaque, arp_req, sizeof(arp_req));
     } else {
-        memcpy(eh->h_dest, ethaddr, ETH_ALEN);
+        memcpy(eh->h_dest, slirp->client_ethaddr, ETH_ALEN);
         memcpy(eh->h_source, special_ethaddr, ETH_ALEN - 4);
         /* XXX: not correct */
         memcpy(&eh->h_source[2], &slirp->vhost_addr, 4);
         eh->h_proto = htons(ETH_P_IP);
-        memcpy(buf + sizeof(struct ethhdr), ifm->m_data, ifm->m_len);
-        slirp_output(slirp->opaque, buf, ifm->m_len + ETH_HLEN);
-        return 1;
+        memcpy(buf + sizeof(struct ethhdr), ip_data, ip_data_len);
+        slirp_output(slirp->opaque, buf, ip_data_len + ETH_HLEN);
     }
 }
 
@@ -826,7 +801,7 @@ int slirp_add_exec(Slirp *slirp, int do_pty, const void *args,
 ssize_t slirp_send(struct socket *so, const void *buf, size_t len, int flags)
 {
 	if (so->s == -1 && so->extra) {
-		qemu_chr_fe_write(so->extra, buf, len);
+		qemu_chr_write(so->extra, buf, len);
 		return len;
 	}
 

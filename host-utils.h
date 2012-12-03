@@ -23,7 +23,7 @@
  * THE SOFTWARE.
  */
 
-#include "compiler.h"   /* QEMU_GNUC_PREREQ */
+#include "osdep.h"
 
 #if defined(__x86_64__)
 #define __HAVE_FAST_MULU64__

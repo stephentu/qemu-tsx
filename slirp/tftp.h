@@ -26,18 +26,16 @@ struct tftp_t {
       uint16_t tp_error_code;
       uint8_t tp_msg[512];
     } tp_error;
-    char tp_buf[512 + 2];
+    uint8_t tp_buf[512 + 2];
   } x;
 };
 
 struct tftp_session {
     Slirp *slirp;
     char *filename;
-    int fd;
 
     struct in_addr client_ip;
     uint16_t client_port;
-    uint32_t block_nr;
 
     int timestamp;
 };

@@ -26,55 +26,10 @@
  * THE SOFTWARE.
  */
 
-/* The following block of code temporarily renames the daemon() function so the
-   compiler does not see the warning associated with it in stdlib.h on OSX */
-#ifdef __APPLE__
-#define daemon qemu_fake_daemon_function
-#include <stdlib.h>
-#undef daemon
-extern int daemon(int, int);
-#endif
-
-#if defined(__linux__) && defined(__x86_64__)
-   /* Use 2 MiB alignment so transparent hugepages can be used by KVM.
-      Valgrind does not support alignments larger than 1 MiB,
-      therefore we need special code which handles running on Valgrind. */
-#  define QEMU_VMALLOC_ALIGN (512 * 4096)
-#  define CONFIG_VALGRIND
-#elif defined(__linux__) && defined(__s390x__)
-   /* Use 1 MiB (segment size) alignment so gmap can be used by KVM. */
-#  define QEMU_VMALLOC_ALIGN (256 * 4096)
-#else
-#  define QEMU_VMALLOC_ALIGN getpagesize()
-#endif
-
 #include "config-host.h"
 #include "sysemu.h"
 #include "trace.h"
 #include "qemu_socket.h"
-
-#if defined(CONFIG_VALGRIND)
-static int running_on_valgrind = -1;
-#else
-#  define running_on_valgrind 0
-#endif
-#ifdef CONFIG_LINUX
-#include <sys/syscall.h>
-#endif
-
-int qemu_get_thread_id(void)
-{
-#if defined(__linux__)
-    return syscall(SYS_gettid);
-#else
-    return getpid();
-#endif
-}
-
-int qemu_daemon(int nochdir, int noclose)
-{
-    return daemon(nochdir, noclose);
-}
 
 void *qemu_oom_check(void *ptr)
 {
@@ -105,43 +60,16 @@ void *qemu_memalign(size_t alignment, size_t size)
     return ptr;
 }
 
-/* conflicts with qemu_vmalloc in bsd-user/mmap.c */
-#if !defined(CONFIG_BSD_USER)
 /* alloc shared memory pages */
 void *qemu_vmalloc(size_t size)
 {
-    void *ptr;
-    size_t align = QEMU_VMALLOC_ALIGN;
-
-#if defined(CONFIG_VALGRIND)
-    if (running_on_valgrind < 0) {
-        /* First call, test whether we are running on Valgrind.
-           This is a substitute for RUNNING_ON_VALGRIND from valgrind.h. */
-        const char *ld = getenv("LD_PRELOAD");
-        running_on_valgrind = (ld != NULL && strstr(ld, "vgpreload"));
-    }
-#endif
-
-    if (size < align || running_on_valgrind) {
-        align = getpagesize();
-    }
-    ptr = qemu_memalign(align, size);
-    trace_qemu_vmalloc(size, ptr);
-    return ptr;
+    return qemu_memalign(getpagesize(), size);
 }
-#endif
 
 void qemu_vfree(void *ptr)
 {
     trace_qemu_vfree(ptr);
     free(ptr);
-}
-
-void socket_set_block(int fd)
-{
-    int f;
-    f = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, f & ~O_NONBLOCK);
 }
 
 void socket_set_nonblock(int fd)
@@ -180,7 +108,8 @@ int qemu_pipe(int pipefd[2])
     return ret;
 }
 
-int qemu_utimens(const char *path, const struct timespec *times)
+int qemu_utimensat(int dirfd, const char *path, const struct timespec *times,
+                   int flags)
 {
     struct timeval tv[2], tv_now;
     struct stat st;
@@ -188,7 +117,7 @@ int qemu_utimens(const char *path, const struct timespec *times)
 #ifdef CONFIG_UTIMENSAT
     int ret;
 
-    ret = utimensat(AT_FDCWD, path, times, AT_SYMLINK_NOFOLLOW);
+    ret = utimensat(dirfd, path, times, flags);
     if (ret != -1 || errno != ENOSYS) {
         return ret;
     }

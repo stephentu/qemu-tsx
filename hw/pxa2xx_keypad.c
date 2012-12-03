@@ -6,9 +6,6 @@
  *              or  <Akuster@mvista.com>
  *
  * This code is licensed under the GPLv2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "hw.h"
@@ -83,99 +80,81 @@
 #define PXAKBD_MAXCOL   8
 
 struct PXA2xxKeyPadState {
-    MemoryRegion iomem;
     qemu_irq    irq;
     struct  keymap *map;
-    int         pressed_cnt;
-    int         alt_code;
 
     uint32_t    kpc;
     uint32_t    kpdk;
     uint32_t    kprec;
     uint32_t    kpmk;
     uint32_t    kpas;
-    uint32_t    kpasmkp[4];
+    uint32_t    kpasmkp0;
+    uint32_t    kpasmkp1;
+    uint32_t    kpasmkp2;
+    uint32_t    kpasmkp3;
     uint32_t    kpkdi;
 };
 
-static void pxa27x_keypad_find_pressed_key(PXA2xxKeyPadState *kp, int *row, int *col)
-{
-    int i;
-    for (i = 0; i < 4; i++)
-    {
-        *col = i * 2;
-        for (*row = 0; *row < 8; (*row)++) {
-            if (kp->kpasmkp[i] & (1 << *row))
-                return;
-        }
-        *col = i * 2 + 1;
-        for (*row = 0; *row < 8; (*row)++) {
-            if (kp->kpasmkp[i] & (1 << (*row + 16)))
-                return;
-        }
-    }
-}
-
 static void pxa27x_keyboard_event (PXA2xxKeyPadState *kp, int keycode)
 {
-    int row, col, rel, assert_irq = 0;
-    uint32_t val;
-
-    if (keycode == 0xe0) {
-        kp->alt_code = 1;
-        return;
-    }
+    int row, col,rel;
 
     if(!(kp->kpc & KPC_ME)) /* skip if not enabled */
         return;
 
-    rel = (keycode & 0x80) ? 1 : 0; /* key release from qemu */
-    keycode &= ~0x80; /* strip qemu key release bit */
-    if (kp->alt_code) {
-        keycode |= 0x80;
-        kp->alt_code = 0;
-    }
+    if(kp->kpc & KPC_AS || kp->kpc & KPC_ASACT) {
+        if(kp->kpc & KPC_AS)
+            kp->kpc &= ~(KPC_AS);
 
-    row = kp->map[keycode].row;
-    col = kp->map[keycode].column;
-    if (row == -1 || col == -1) {
-        return;
+        rel = (keycode & 0x80) ? 1 : 0; /* key release from qemu */
+        keycode &= ~(0x80); /* strip qemu key release bit */
+        row = kp->map[keycode].row;
+        col = kp->map[keycode].column;
+        if(row == -1 || col == -1)
+            return;
+        switch (col) {
+        case 0:
+        case 1:
+            if(rel)
+                kp->kpasmkp0 = ~(0xffffffff);
+            else
+                kp->kpasmkp0 |= KPASMKPx_MKC(row,col);
+            break;
+        case 2:
+        case 3:
+            if(rel)
+                kp->kpasmkp1 = ~(0xffffffff);
+            else
+                kp->kpasmkp1 |= KPASMKPx_MKC(row,col);
+            break;
+        case 4:
+        case 5:
+            if(rel)
+                kp->kpasmkp2 = ~(0xffffffff);
+            else
+                kp->kpasmkp2 |= KPASMKPx_MKC(row,col);
+            break;
+        case 6:
+        case 7:
+            if(rel)
+                kp->kpasmkp3 = ~(0xffffffff);
+            else
+                kp->kpasmkp3 |= KPASMKPx_MKC(row,col);
+            break;
+        } /* switch */
+        goto out;
     }
+    return;
 
-    val = KPASMKPx_MKC(row, col);
-    if (rel) {
-        if (kp->kpasmkp[col / 2] & val) {
-            kp->kpasmkp[col / 2] &= ~val;
-            kp->pressed_cnt--;
-            assert_irq = 1;
-        }
-    } else {
-        if (!(kp->kpasmkp[col / 2] & val)) {
-            kp->kpasmkp[col / 2] |= val;
-            kp->pressed_cnt++;
-            assert_irq = 1;
-        }
-    }
-    kp->kpas = ((kp->pressed_cnt & 0x1f) << 26) | (0xf << 4) | 0xf;
-    if (kp->pressed_cnt == 1) {
-        kp->kpas &= ~((0xf << 4) | 0xf);
-        if (rel) {
-            pxa27x_keypad_find_pressed_key(kp, &row, &col);
-        }
-        kp->kpas |= ((row & 0xf) << 4) | (col & 0xf);
-    }
-
-    if (!(kp->kpc & (KPC_AS | KPC_ASACT)))
-        assert_irq = 0;
-
-    if (assert_irq && (kp->kpc & KPC_MIE)) {
+out:
+    if(kp->kpc & KPC_MIE) {
         kp->kpc |= KPC_MI;
         qemu_irq_raise(kp->irq);
     }
+    return;
 }
 
-static uint64_t pxa2xx_keypad_read(void *opaque, hwaddr offset,
-                                   unsigned size)
+static uint32_t pxa2xx_keypad_read(void *opaque, target_phys_addr_t offset)
 {
     PXA2xxKeyPadState *s = (PXA2xxKeyPadState *) opaque;
     uint32_t tmp;
@@ -215,16 +194,16 @@ static uint64_t pxa2xx_keypad_read(void *opaque, hwaddr offset,
         return s->kpas;
         break;
     case KPASMKP0:
-        return s->kpasmkp[0];
+        return s->kpasmkp0;
         break;
     case KPASMKP1:
-        return s->kpasmkp[1];
+        return s->kpasmkp1;
         break;
     case KPASMKP2:
-        return s->kpasmkp[2];
+        return s->kpasmkp2;
         break;
     case KPASMKP3:
-        return s->kpasmkp[3];
+        return s->kpasmkp3;
         break;
     case KPKDI:
         return s->kpkdi;
@@ -236,17 +215,14 @@ static uint64_t pxa2xx_keypad_read(void *opaque, hwaddr offset,
     return 0;
 }
 
-static void pxa2xx_keypad_write(void *opaque, hwaddr offset,
-                                uint64_t value, unsigned size)
+static void pxa2xx_keypad_write(void *opaque,
+                target_phys_addr_t offset, uint32_t value)
 {
     PXA2xxKeyPadState *s = (PXA2xxKeyPadState *) opaque;
 
     switch (offset) {
     case KPC:
         s->kpc = value;
-        if (s->kpc & KPC_AS) {
-            s->kpc &= ~(KPC_AS);
-        }
         break;
     case KPDK:
         s->kpdk = value;
@@ -261,16 +237,16 @@ static void pxa2xx_keypad_write(void *opaque, hwaddr offset,
         s->kpas = value;
         break;
     case KPASMKP0:
-        s->kpasmkp[0] = value;
+        s->kpasmkp0 = value;
         break;
     case KPASMKP1:
-        s->kpasmkp[1] = value;
+        s->kpasmkp1 = value;
         break;
     case KPASMKP2:
-        s->kpasmkp[2] = value;
+        s->kpasmkp2 = value;
         break;
     case KPASMKP3:
-        s->kpasmkp[3] = value;
+        s->kpasmkp3 = value;
         break;
     case KPKDI:
         s->kpkdi = value;
@@ -281,43 +257,68 @@ static void pxa2xx_keypad_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps pxa2xx_keypad_ops = {
-    .read = pxa2xx_keypad_read,
-    .write = pxa2xx_keypad_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pxa2xx_keypad_readfn[] = {
+    pxa2xx_keypad_read,
+    pxa2xx_keypad_read,
+    pxa2xx_keypad_read
 };
 
-static const VMStateDescription vmstate_pxa2xx_keypad = {
-    .name = "pxa2xx_keypad",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(kpc, PXA2xxKeyPadState),
-        VMSTATE_UINT32(kpdk, PXA2xxKeyPadState),
-        VMSTATE_UINT32(kprec, PXA2xxKeyPadState),
-        VMSTATE_UINT32(kpmk, PXA2xxKeyPadState),
-        VMSTATE_UINT32(kpas, PXA2xxKeyPadState),
-        VMSTATE_UINT32_ARRAY(kpasmkp, PXA2xxKeyPadState, 4),
-        VMSTATE_UINT32(kpkdi, PXA2xxKeyPadState),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUWriteMemoryFunc * const pxa2xx_keypad_writefn[] = {
+    pxa2xx_keypad_write,
+    pxa2xx_keypad_write,
+    pxa2xx_keypad_write
 };
 
-PXA2xxKeyPadState *pxa27x_keypad_init(MemoryRegion *sysmem,
-                                      hwaddr base,
-                                      qemu_irq irq)
+static void pxa2xx_keypad_save(QEMUFile *f, void *opaque)
 {
+    PXA2xxKeyPadState *s = (PXA2xxKeyPadState *) opaque;
+
+    qemu_put_be32s(f, &s->kpc);
+    qemu_put_be32s(f, &s->kpdk);
+    qemu_put_be32s(f, &s->kprec);
+    qemu_put_be32s(f, &s->kpmk);
+    qemu_put_be32s(f, &s->kpas);
+    qemu_put_be32s(f, &s->kpasmkp0);
+    qemu_put_be32s(f, &s->kpasmkp1);
+    qemu_put_be32s(f, &s->kpasmkp2);
+    qemu_put_be32s(f, &s->kpasmkp3);
+    qemu_put_be32s(f, &s->kpkdi);
+
+}
+
+static int pxa2xx_keypad_load(QEMUFile *f, void *opaque, int version_id)
+{
+    PXA2xxKeyPadState *s = (PXA2xxKeyPadState *) opaque;
+
+    qemu_get_be32s(f, &s->kpc);
+    qemu_get_be32s(f, &s->kpdk);
+    qemu_get_be32s(f, &s->kprec);
+    qemu_get_be32s(f, &s->kpmk);
+    qemu_get_be32s(f, &s->kpas);
+    qemu_get_be32s(f, &s->kpasmkp0);
+    qemu_get_be32s(f, &s->kpasmkp1);
+    qemu_get_be32s(f, &s->kpasmkp2);
+    qemu_get_be32s(f, &s->kpasmkp3);
+    qemu_get_be32s(f, &s->kpkdi);
+
+    return 0;
+}
+
+PXA2xxKeyPadState *pxa27x_keypad_init(target_phys_addr_t base,
+        qemu_irq irq)
+{
+    int iomemtype;
     PXA2xxKeyPadState *s;
 
-    s = (PXA2xxKeyPadState *) g_malloc0(sizeof(PXA2xxKeyPadState));
+    s = (PXA2xxKeyPadState *) qemu_mallocz(sizeof(PXA2xxKeyPadState));
     s->irq = irq;
 
-    memory_region_init_io(&s->iomem, &pxa2xx_keypad_ops, s,
-                          "pxa2xx-keypad", 0x00100000);
-    memory_region_add_subregion(sysmem, base, &s->iomem);
+    iomemtype = cpu_register_io_memory(pxa2xx_keypad_readfn,
+                    pxa2xx_keypad_writefn, s, DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x00100000, iomemtype);
 
-    vmstate_register(NULL, 0, &vmstate_pxa2xx_keypad, s);
+    register_savevm(NULL, "pxa2xx_keypad", 0, 0,
+                    pxa2xx_keypad_save, pxa2xx_keypad_load, s);
 
     return s;
 }

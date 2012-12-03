@@ -40,9 +40,6 @@
 #include "flash.h"
 #include "block.h"
 #include "qemu-timer.h"
-#include "exec-memory.h"
-#include "host-utils.h"
-#include "sysbus.h"
 
 #define PFLASH_BUG(fmt, ...) \
 do { \
@@ -61,28 +58,24 @@ do {                                               \
 #endif
 
 struct pflash_t {
-    SysBusDevice busdev;
     BlockDriverState *bs;
-    uint32_t nb_blocs;
-    uint64_t sector_len;
-    uint8_t width;
-    uint8_t be;
+    target_phys_addr_t base;
+    target_phys_addr_t sector_len;
+    target_phys_addr_t total_len;
+    int width;
     int wcycle; /* if 0, the flash is read normally */
     int bypass;
     int ro;
     uint8_t cmd;
     uint8_t status;
-    uint16_t ident0;
-    uint16_t ident1;
-    uint16_t ident2;
-    uint16_t ident3;
+    uint16_t ident[4];
     uint8_t cfi_len;
     uint8_t cfi_table[0x52];
-    hwaddr counter;
+    target_phys_addr_t counter;
     unsigned int writeblock_size;
     QEMUTimer *timer;
-    MemoryRegion mem;
-    char *name;
+    ram_addr_t off;
+    int fl_mem;
     void *storage;
 };
 
@@ -96,16 +89,17 @@ static void pflash_timer (void *opaque)
     if (pfl->bypass) {
         pfl->wcycle = 2;
     } else {
-        memory_region_rom_device_set_readable(&pfl->mem, true);
+        cpu_register_physical_memory(pfl->base, pfl->total_len,
+                        pfl->off | IO_MEM_ROMD | pfl->fl_mem);
         pfl->wcycle = 0;
     }
     pfl->cmd = 0;
 }
 
-static uint32_t pflash_read (pflash_t *pfl, hwaddr offset,
+static uint32_t pflash_read (pflash_t *pfl, target_phys_addr_t offset,
                              int width, int be)
 {
-    hwaddr boff;
+    target_phys_addr_t boff;
     uint32_t ret;
     uint8_t *p;
 
@@ -151,6 +145,7 @@ static uint32_t pflash_read (pflash_t *pfl, hwaddr offset,
             } else {
                 ret = p[offset];
                 ret |= p[offset + 1] << 8;
+                ret |= p[offset + 1] << 8;
                 ret |= p[offset + 2] << 16;
                 ret |= p[offset + 3] << 24;
             }
@@ -174,16 +169,15 @@ static uint32_t pflash_read (pflash_t *pfl, hwaddr offset,
     case 0x90:
         switch (boff) {
         case 0:
-            ret = pfl->ident0 << 8 | pfl->ident1;
+            ret = pfl->ident[0] << 8 | pfl->ident[1];
             DPRINTF("%s: Manufacturer Code %04x\n", __func__, ret);
             break;
         case 1:
-            ret = pfl->ident2 << 8 | pfl->ident3;
+            ret = pfl->ident[2] << 8 | pfl->ident[3];
             DPRINTF("%s: Device ID Code %04x\n", __func__, ret);
             break;
         default:
-            DPRINTF("%s: Read Device Information boff=%x\n", __func__,
-                    (unsigned)boff);
+            DPRINTF("%s: Read Device Information boff=%x\n", __func__, boff);
             ret = 0;
             break;
         }
@@ -218,7 +212,7 @@ static void pflash_update(pflash_t *pfl, int offset,
     }
 }
 
-static inline void pflash_data_write(pflash_t *pfl, hwaddr offset,
+static inline void pflash_data_write(pflash_t *pfl, target_phys_addr_t offset,
                                      uint32_t value, int width, int be)
 {
     uint8_t *p = pfl->storage;
@@ -256,7 +250,7 @@ static inline void pflash_data_write(pflash_t *pfl, hwaddr offset,
 
 }
 
-static void pflash_write(pflash_t *pfl, hwaddr offset,
+static void pflash_write(pflash_t *pfl, target_phys_addr_t offset,
                          uint32_t value, int width, int be)
 {
     uint8_t *p;
@@ -269,7 +263,7 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
 
     if (!pfl->wcycle) {
         /* Set the device in I/O access mode */
-        memory_region_rom_device_set_readable(&pfl->mem, false);
+        cpu_register_physical_memory(pfl->base, pfl->total_len, pfl->fl_mem);
     }
 
     switch (pfl->wcycle) {
@@ -286,15 +280,12 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
             p = pfl->storage;
             offset &= ~(pfl->sector_len - 1);
 
-            DPRINTF("%s: block erase at " TARGET_FMT_plx " bytes %x\n",
-                    __func__, offset, (unsigned)pfl->sector_len);
+            DPRINTF("%s: block erase at " TARGET_FMT_plx " bytes "
+                    TARGET_FMT_plx "\n",
+                    __func__, offset, pfl->sector_len);
 
-            if (!pfl->ro) {
-                memset(p + offset, 0xff, pfl->sector_len);
-                pflash_update(pfl, offset, pfl->sector_len);
-            } else {
-                pfl->status |= 0x20; /* Block erase error */
-            }
+            memset(p + offset, 0xff, pfl->sector_len);
+            pflash_update(pfl, offset, pfl->sector_len);
             pfl->status |= 0x80; /* Ready! */
             break;
         case 0x50: /* Clear status bits */
@@ -327,18 +318,14 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
         }
         pfl->wcycle++;
         pfl->cmd = cmd;
-        break;
+        return;
     case 1:
         switch (pfl->cmd) {
         case 0x10: /* Single Byte Program */
         case 0x40: /* Single Byte Program */
             DPRINTF("%s: Single Byte Program\n", __func__);
-            if (!pfl->ro) {
-                pflash_data_write(pfl, offset, value, width, be);
-                pflash_update(pfl, offset, width);
-            } else {
-                pfl->status |= 0x10; /* Programming error */
-            }
+            pflash_data_write(pfl, offset, value, width, be);
+            pflash_update(pfl, offset, width);
             pfl->status |= 0x80; /* Ready! */
             pfl->wcycle = 0;
         break;
@@ -382,30 +369,22 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
         default:
             goto error_flash;
         }
-        break;
+        return;
     case 2:
         switch (pfl->cmd) {
         case 0xe8: /* Block write */
-            if (!pfl->ro) {
-                pflash_data_write(pfl, offset, value, width, be);
-            } else {
-                pfl->status |= 0x10; /* Programming error */
-            }
+            pflash_data_write(pfl, offset, value, width, be);
 
             pfl->status |= 0x80;
 
             if (!pfl->counter) {
-                hwaddr mask = pfl->writeblock_size - 1;
+                target_phys_addr_t mask = pfl->writeblock_size - 1;
                 mask = ~mask;
 
                 DPRINTF("%s: block write finished\n", __func__);
                 pfl->wcycle++;
-                if (!pfl->ro) {
-                    /* Flush the entire write buffer onto backing storage.  */
-                    pflash_update(pfl, offset & mask, pfl->writeblock_size);
-                } else {
-                    pfl->status |= 0x10; /* Programming error */
-                }
+                /* Flush the entire write buffer onto backing storage.  */
+                pflash_update(pfl, offset & mask, pfl->writeblock_size);
             }
 
             pfl->counter--;
@@ -413,7 +392,7 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
         default:
             goto error_flash;
         }
-        break;
+        return;
     case 3: /* Confirm mode */
         switch (pfl->cmd) {
         case 0xe8: /* Block write */
@@ -429,7 +408,7 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
         default:
             goto error_flash;
         }
-        break;
+        return;
     default:
         /* Should never happen */
         DPRINTF("%s: invalid write state\n",  __func__);
@@ -443,65 +422,67 @@ static void pflash_write(pflash_t *pfl, hwaddr offset,
            __func__, offset, pfl->wcycle, pfl->cmd, value);
 
  reset_flash:
-    memory_region_rom_device_set_readable(&pfl->mem, true);
+    cpu_register_physical_memory(pfl->base, pfl->total_len,
+                    pfl->off | IO_MEM_ROMD | pfl->fl_mem);
 
     pfl->bypass = 0;
     pfl->wcycle = 0;
     pfl->cmd = 0;
+    return;
 }
 
 
-static uint32_t pflash_readb_be(void *opaque, hwaddr addr)
+static uint32_t pflash_readb_be(void *opaque, target_phys_addr_t addr)
 {
     return pflash_read(opaque, addr, 1, 1);
 }
 
-static uint32_t pflash_readb_le(void *opaque, hwaddr addr)
+static uint32_t pflash_readb_le(void *opaque, target_phys_addr_t addr)
 {
     return pflash_read(opaque, addr, 1, 0);
 }
 
-static uint32_t pflash_readw_be(void *opaque, hwaddr addr)
+static uint32_t pflash_readw_be(void *opaque, target_phys_addr_t addr)
 {
     pflash_t *pfl = opaque;
 
     return pflash_read(pfl, addr, 2, 1);
 }
 
-static uint32_t pflash_readw_le(void *opaque, hwaddr addr)
+static uint32_t pflash_readw_le(void *opaque, target_phys_addr_t addr)
 {
     pflash_t *pfl = opaque;
 
     return pflash_read(pfl, addr, 2, 0);
 }
 
-static uint32_t pflash_readl_be(void *opaque, hwaddr addr)
+static uint32_t pflash_readl_be(void *opaque, target_phys_addr_t addr)
 {
     pflash_t *pfl = opaque;
 
     return pflash_read(pfl, addr, 4, 1);
 }
 
-static uint32_t pflash_readl_le(void *opaque, hwaddr addr)
+static uint32_t pflash_readl_le(void *opaque, target_phys_addr_t addr)
 {
     pflash_t *pfl = opaque;
 
     return pflash_read(pfl, addr, 4, 0);
 }
 
-static void pflash_writeb_be(void *opaque, hwaddr addr,
+static void pflash_writeb_be(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_write(opaque, addr, value, 1, 1);
 }
 
-static void pflash_writeb_le(void *opaque, hwaddr addr,
+static void pflash_writeb_le(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_write(opaque, addr, value, 1, 0);
 }
 
-static void pflash_writew_be(void *opaque, hwaddr addr,
+static void pflash_writew_be(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_t *pfl = opaque;
@@ -509,7 +490,7 @@ static void pflash_writew_be(void *opaque, hwaddr addr,
     pflash_write(pfl, addr, value, 2, 1);
 }
 
-static void pflash_writew_le(void *opaque, hwaddr addr,
+static void pflash_writew_le(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_t *pfl = opaque;
@@ -517,7 +498,7 @@ static void pflash_writew_le(void *opaque, hwaddr addr,
     pflash_write(pfl, addr, value, 2, 0);
 }
 
-static void pflash_writel_be(void *opaque, hwaddr addr,
+static void pflash_writel_be(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_t *pfl = opaque;
@@ -525,7 +506,7 @@ static void pflash_writel_be(void *opaque, hwaddr addr,
     pflash_write(pfl, addr, value, 4, 1);
 }
 
-static void pflash_writel_le(void *opaque, hwaddr addr,
+static void pflash_writel_le(void *opaque, target_phys_addr_t addr,
                              uint32_t value)
 {
     pflash_t *pfl = opaque;
@@ -533,29 +514,78 @@ static void pflash_writel_le(void *opaque, hwaddr addr,
     pflash_write(pfl, addr, value, 4, 0);
 }
 
-static const MemoryRegionOps pflash_cfi01_ops_be = {
-    .old_mmio = {
-        .read = { pflash_readb_be, pflash_readw_be, pflash_readl_be, },
-        .write = { pflash_writeb_be, pflash_writew_be, pflash_writel_be, },
-    },
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUWriteMemoryFunc * const pflash_write_ops_be[] = {
+    &pflash_writeb_be,
+    &pflash_writew_be,
+    &pflash_writel_be,
 };
 
-static const MemoryRegionOps pflash_cfi01_ops_le = {
-    .old_mmio = {
-        .read = { pflash_readb_le, pflash_readw_le, pflash_readl_le, },
-        .write = { pflash_writeb_le, pflash_writew_le, pflash_writel_le, },
-    },
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const pflash_read_ops_be[] = {
+    &pflash_readb_be,
+    &pflash_readw_be,
+    &pflash_readl_be,
 };
 
-static int pflash_cfi01_init(SysBusDevice *dev)
+static CPUWriteMemoryFunc * const pflash_write_ops_le[] = {
+    &pflash_writeb_le,
+    &pflash_writew_le,
+    &pflash_writel_le,
+};
+
+static CPUReadMemoryFunc * const pflash_read_ops_le[] = {
+    &pflash_readb_le,
+    &pflash_readw_le,
+    &pflash_readl_le,
+};
+
+/* Count trailing zeroes of a 32 bits quantity */
+static int ctz32 (uint32_t n)
 {
-    pflash_t *pfl = FROM_SYSBUS(typeof(*pfl), dev);
-    uint64_t total_len;
     int ret;
 
-    total_len = pfl->sector_len * pfl->nb_blocs;
+    ret = 0;
+    if (!(n & 0xFFFF)) {
+        ret += 16;
+        n = n >> 16;
+    }
+    if (!(n & 0xFF)) {
+        ret += 8;
+        n = n >> 8;
+    }
+    if (!(n & 0xF)) {
+        ret += 4;
+        n = n >> 4;
+    }
+    if (!(n & 0x3)) {
+        ret += 2;
+        n = n >> 2;
+    }
+    if (!(n & 0x1)) {
+        ret++;
+#if 0 /* This is not necessary as n is never 0 */
+        n = n >> 1;
+#endif
+    }
+#if 0 /* This is not necessary as n is never 0 */
+    if (!n)
+        ret++;
+#endif
+
+    return ret;
+}
+
+pflash_t *pflash_cfi01_register(target_phys_addr_t base, ram_addr_t off,
+                                BlockDriverState *bs, uint32_t sector_len,
+                                int nb_blocs, int width,
+                                uint16_t id0, uint16_t id1,
+                                uint16_t id2, uint16_t id3,
+                                int be)
+{
+    pflash_t *pfl;
+    target_phys_addr_t total_len;
+    int ret;
+
+    total_len = sector_len * nb_blocs;
 
     /* XXX: to be fixed */
 #if 0
@@ -564,34 +594,52 @@ static int pflash_cfi01_init(SysBusDevice *dev)
         return NULL;
 #endif
 
-    memory_region_init_rom_device(
-        &pfl->mem, pfl->be ? &pflash_cfi01_ops_be : &pflash_cfi01_ops_le, pfl,
-        pfl->name, total_len);
-    vmstate_register_ram(&pfl->mem, DEVICE(pfl));
-    pfl->storage = memory_region_get_ram_ptr(&pfl->mem);
-    sysbus_init_mmio(dev, &pfl->mem);
+    pfl = qemu_mallocz(sizeof(pflash_t));
 
+    /* FIXME: Allocate ram ourselves.  */
+    pfl->storage = qemu_get_ram_ptr(off);
+    if (be) {
+        pfl->fl_mem = cpu_register_io_memory(pflash_read_ops_be,
+                                             pflash_write_ops_be, pfl,
+                                             DEVICE_NATIVE_ENDIAN);
+    } else {
+        pfl->fl_mem = cpu_register_io_memory(pflash_read_ops_le,
+                                             pflash_write_ops_le, pfl,
+                                             DEVICE_NATIVE_ENDIAN);
+    }
+    pfl->off = off;
+    cpu_register_physical_memory(base, total_len,
+                    off | pfl->fl_mem | IO_MEM_ROMD);
+
+    pfl->bs = bs;
     if (pfl->bs) {
         /* read the initial flash content */
         ret = bdrv_read(pfl->bs, 0, pfl->storage, total_len >> 9);
-
         if (ret < 0) {
-            vmstate_unregister_ram(&pfl->mem, DEVICE(pfl));
-            memory_region_destroy(&pfl->mem);
-            return 1;
+            cpu_unregister_io_memory(pfl->fl_mem);
+            qemu_free(pfl);
+            return NULL;
         }
     }
-
-    if (pfl->bs) {
-        pfl->ro = bdrv_is_read_only(pfl->bs);
-    } else {
-        pfl->ro = 0;
-    }
-
-    pfl->timer = qemu_new_timer_ns(vm_clock, pflash_timer, pfl);
+#if 0 /* XXX: there should be a bit to set up read-only,
+       *      the same way the hardware does (with WP pin).
+       */
+    pfl->ro = 1;
+#else
+    pfl->ro = 0;
+#endif
+    pfl->timer = qemu_new_timer(vm_clock, pflash_timer, pfl);
+    pfl->base = base;
+    pfl->sector_len = sector_len;
+    pfl->total_len = total_len;
+    pfl->width = width;
     pfl->wcycle = 0;
     pfl->cmd = 0;
     pfl->status = 0;
+    pfl->ident[0] = id0;
+    pfl->ident[1] = id1;
+    pfl->ident[2] = id2;
+    pfl->ident[3] = id3;
     /* Hardcoded CFI table */
     pfl->cfi_len = 0x52;
     /* Standard "QRY" string */
@@ -640,7 +688,7 @@ static int pflash_cfi01_init(SysBusDevice *dev)
     pfl->cfi_table[0x28] = 0x02;
     pfl->cfi_table[0x29] = 0x00;
     /* Max number of bytes in multi-bytes write */
-    if (pfl->width == 1) {
+    if (width == 1) {
         pfl->cfi_table[0x2A] = 0x08;
     } else {
         pfl->cfi_table[0x2A] = 0x0B;
@@ -651,10 +699,10 @@ static int pflash_cfi01_init(SysBusDevice *dev)
     /* Number of erase block regions (uniform) */
     pfl->cfi_table[0x2C] = 0x01;
     /* Erase block region 1 */
-    pfl->cfi_table[0x2D] = pfl->nb_blocs - 1;
-    pfl->cfi_table[0x2E] = (pfl->nb_blocs - 1) >> 8;
-    pfl->cfi_table[0x2F] = pfl->sector_len >> 8;
-    pfl->cfi_table[0x30] = pfl->sector_len >> 16;
+    pfl->cfi_table[0x2D] = nb_blocs - 1;
+    pfl->cfi_table[0x2E] = (nb_blocs - 1) >> 8;
+    pfl->cfi_table[0x2F] = sector_len >> 8;
+    pfl->cfi_table[0x30] = sector_len >> 16;
 
     /* Extended */
     pfl->cfi_table[0x31] = 'P';
@@ -662,7 +710,7 @@ static int pflash_cfi01_init(SysBusDevice *dev)
     pfl->cfi_table[0x33] = 'I';
 
     pfl->cfi_table[0x34] = '1';
-    pfl->cfi_table[0x35] = '0';
+    pfl->cfi_table[0x35] = '1';
 
     pfl->cfi_table[0x36] = 0x00;
     pfl->cfi_table[0x37] = 0x00;
@@ -674,81 +722,5 @@ static int pflash_cfi01_init(SysBusDevice *dev)
     pfl->cfi_table[0x3b] = 0x00;
     pfl->cfi_table[0x3c] = 0x00;
 
-    pfl->cfi_table[0x3f] = 0x01; /* Number of protection fields */
-
-    return 0;
-}
-
-static Property pflash_cfi01_properties[] = {
-    DEFINE_PROP_DRIVE("drive", struct pflash_t, bs),
-    DEFINE_PROP_UINT32("num-blocks", struct pflash_t, nb_blocs, 0),
-    DEFINE_PROP_UINT64("sector-length", struct pflash_t, sector_len, 0),
-    DEFINE_PROP_UINT8("width", struct pflash_t, width, 0),
-    DEFINE_PROP_UINT8("big-endian", struct pflash_t, be, 0),
-    DEFINE_PROP_UINT16("id0", struct pflash_t, ident0, 0),
-    DEFINE_PROP_UINT16("id1", struct pflash_t, ident1, 0),
-    DEFINE_PROP_UINT16("id2", struct pflash_t, ident2, 0),
-    DEFINE_PROP_UINT16("id3", struct pflash_t, ident3, 0),
-    DEFINE_PROP_STRING("name", struct pflash_t, name),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void pflash_cfi01_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = pflash_cfi01_init;
-    dc->props = pflash_cfi01_properties;
-}
-
-
-static const TypeInfo pflash_cfi01_info = {
-    .name           = "cfi.pflash01",
-    .parent         = TYPE_SYS_BUS_DEVICE,
-    .instance_size  = sizeof(struct pflash_t),
-    .class_init     = pflash_cfi01_class_init,
-};
-
-static void pflash_cfi01_register_types(void)
-{
-    type_register_static(&pflash_cfi01_info);
-}
-
-type_init(pflash_cfi01_register_types)
-
-pflash_t *pflash_cfi01_register(hwaddr base,
-                                DeviceState *qdev, const char *name,
-                                hwaddr size,
-                                BlockDriverState *bs,
-                                uint32_t sector_len, int nb_blocs, int width,
-                                uint16_t id0, uint16_t id1,
-                                uint16_t id2, uint16_t id3, int be)
-{
-    DeviceState *dev = qdev_create(NULL, "cfi.pflash01");
-    SysBusDevice *busdev = sysbus_from_qdev(dev);
-    pflash_t *pfl = (pflash_t *)object_dynamic_cast(OBJECT(dev),
-                                                    "cfi.pflash01");
-
-    if (bs && qdev_prop_set_drive(dev, "drive", bs)) {
-        abort();
-    }
-    qdev_prop_set_uint32(dev, "num-blocks", nb_blocs);
-    qdev_prop_set_uint64(dev, "sector-length", sector_len);
-    qdev_prop_set_uint8(dev, "width", width);
-    qdev_prop_set_uint8(dev, "big-endian", !!be);
-    qdev_prop_set_uint16(dev, "id0", id0);
-    qdev_prop_set_uint16(dev, "id1", id1);
-    qdev_prop_set_uint16(dev, "id2", id2);
-    qdev_prop_set_uint16(dev, "id3", id3);
-    qdev_prop_set_string(dev, "name", name);
-    qdev_init_nofail(dev);
-
-    sysbus_mmio_map(busdev, 0, base);
     return pfl;
-}
-
-MemoryRegion *pflash_cfi01_get_memory(pflash_t *fl)
-{
-    return &fl->mem;
 }

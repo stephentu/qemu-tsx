@@ -28,7 +28,7 @@
 #define VERBOSE 1
 
 typedef struct {
-    I2CSlave i2c;
+    i2c_slave i2c;
 
     int firstbyte;
     uint8_t reg;
@@ -62,7 +62,9 @@ typedef struct {
     } rtc;
     uint16_t rtc_next_vmstate;
     qemu_irq out[4];
+    qemu_irq *in;
     uint8_t pwrbtn_state;
+    qemu_irq pwrbtn;
 } MenelausState;
 
 static inline void menelaus_update(MenelausState *s)
@@ -72,14 +74,14 @@ static inline void menelaus_update(MenelausState *s)
 
 static inline void menelaus_rtc_start(MenelausState *s)
 {
-    s->rtc.next += qemu_get_clock_ms(rtc_clock);
+    s->rtc.next += qemu_get_clock(rt_clock);
     qemu_mod_timer(s->rtc.hz_tm, s->rtc.next);
 }
 
 static inline void menelaus_rtc_stop(MenelausState *s)
 {
     qemu_del_timer(s->rtc.hz_tm);
-    s->rtc.next -= qemu_get_clock_ms(rtc_clock);
+    s->rtc.next -= qemu_get_clock(rt_clock);
     if (s->rtc.next < 1)
         s->rtc.next = 1;
 }
@@ -125,7 +127,7 @@ static void menelaus_rtc_hz(void *opaque)
     menelaus_update(s);
 }
 
-static void menelaus_reset(I2CSlave *i2c)
+static void menelaus_reset(i2c_slave *i2c)
 {
     MenelausState *s = (MenelausState *) i2c;
     s->reg = 0x00;
@@ -185,12 +187,14 @@ static void menelaus_gpio_set(void *opaque, int line, int level)
 {
     MenelausState *s = (MenelausState *) opaque;
 
-    if (line < 3) {
-        /* No interrupt generated */
-        s->inputs &= ~(1 << line);
-        s->inputs |= level << line;
-        return;
-    }
+    /* No interrupt generated */
+    s->inputs &= ~(1 << line);
+    s->inputs |= level << line;
+}
+
+static void menelaus_pwrbtn_set(void *opaque, int line, int level)
+{
+    MenelausState *s = (MenelausState *) opaque;
 
     if (!s->pwrbtn_state && level) {
         s->status |= 1 << 11;					/* PSHBTN */
@@ -706,7 +710,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
     }
 }
 
-static void menelaus_event(I2CSlave *i2c, enum i2c_event event)
+static void menelaus_event(i2c_slave *i2c, enum i2c_event event)
 {
     MenelausState *s = (MenelausState *) i2c;
 
@@ -714,7 +718,7 @@ static void menelaus_event(I2CSlave *i2c, enum i2c_event event)
         s->firstbyte = 1;
 }
 
-static int menelaus_tx(I2CSlave *i2c, uint8_t data)
+static int menelaus_tx(i2c_slave *i2c, uint8_t data)
 {
     MenelausState *s = (MenelausState *) i2c;
     /* Interpret register address byte */
@@ -727,7 +731,7 @@ static int menelaus_tx(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-static int menelaus_rx(I2CSlave *i2c)
+static int menelaus_rx(i2c_slave *i2c)
 {
     MenelausState *s = (MenelausState *) i2c;
 
@@ -782,7 +786,7 @@ static void menelaus_pre_save(void *opaque)
 {
     MenelausState *s = opaque;
     /* Should be <= 1000 */
-    s->rtc_next_vmstate =  s->rtc.next - qemu_get_clock_ms(rtc_clock);
+    s->rtc_next_vmstate =  s->rtc.next - qemu_get_clock(rt_clock);
 }
 
 static int menelaus_post_load(void *opaque, int version_id)
@@ -839,44 +843,34 @@ static const VMStateDescription vmstate_menelaus = {
     }
 };
 
-static int twl92230_init(I2CSlave *i2c)
+static int twl92230_init(i2c_slave *i2c)
 {
     MenelausState *s = FROM_I2C_SLAVE(MenelausState, i2c);
 
-    s->rtc.hz_tm = qemu_new_timer_ms(rtc_clock, menelaus_rtc_hz, s);
+    s->rtc.hz_tm = qemu_new_timer(rt_clock, menelaus_rtc_hz, s);
     /* Three output pins plus one interrupt pin.  */
     qdev_init_gpio_out(&i2c->qdev, s->out, 4);
-
-    /* Three input pins plus one power-button pin.  */
-    qdev_init_gpio_in(&i2c->qdev, menelaus_gpio_set, 4);
+    qdev_init_gpio_in(&i2c->qdev, menelaus_gpio_set, 3);
+    s->pwrbtn = qemu_allocate_irqs(menelaus_pwrbtn_set, s, 1)[0];
 
     menelaus_reset(&s->i2c);
 
     return 0;
 }
 
-static void twl92230_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
-
-    sc->init = twl92230_init;
-    sc->event = menelaus_event;
-    sc->recv = menelaus_rx;
-    sc->send = menelaus_tx;
-    dc->vmsd = &vmstate_menelaus;
-}
-
-static TypeInfo twl92230_info = {
-    .name          = "twl92230",
-    .parent        = TYPE_I2C_SLAVE,
-    .instance_size = sizeof(MenelausState),
-    .class_init    = twl92230_class_init,
+static I2CSlaveInfo twl92230_info = {
+    .qdev.name ="twl92230",
+    .qdev.size = sizeof(MenelausState),
+    .qdev.vmsd = &vmstate_menelaus,
+    .init = twl92230_init,
+    .event = menelaus_event,
+    .recv = menelaus_rx,
+    .send = menelaus_tx
 };
 
-static void twl92230_register_types(void)
+static void twl92230_register_devices(void)
 {
-    type_register_static(&twl92230_info);
+    i2c_register_slave(&twl92230_info);
 }
 
-type_init(twl92230_register_types)
+device_init(twl92230_register_devices)

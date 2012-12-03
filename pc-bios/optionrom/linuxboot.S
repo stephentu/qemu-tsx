@@ -22,8 +22,6 @@
 
 #include "optionrom.h"
 
-#define BOOT_ROM_PRODUCT "Linux loader"
-
 BOOT_ROM_START
 
 run_linuxboot:

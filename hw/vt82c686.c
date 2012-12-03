@@ -5,9 +5,6 @@
  * Copyright (c) 2009 chenming (chenming@rdc.faw.com.cn)
  * Copyright (c) 2010 Huacai Chen (zltjiangshi@gmail.com)
  * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "hw.h"
@@ -52,7 +49,7 @@ static void superio_ioport_writeb(void *opaque, uint32_t addr, uint32_t data)
     int can_write;
     SuperIOConfig *superio_conf = opaque;
 
-    DPRINTF("superio_ioport_writeb  address 0x%x  val 0x%x\n", addr, data);
+    DPRINTF("superio_ioport_writeb  address 0x%x  val 0x%x  \n", addr, data);
     if (addr == 0x3f0) {
         superio_conf->index = data & 0xff;
     } else {
@@ -76,12 +73,12 @@ static void superio_ioport_writeb(void *opaque, uint32_t addr, uint32_t data)
                 switch (superio_conf->index) {
                 case 0xe7:
                     if ((data & 0xff) != 0xfe) {
-                        DPRINTF("chage uart 1 base. unsupported yet\n");
+                        DPRINTF("chage uart 1 base. unsupported yet \n");
                     }
                     break;
                 case 0xe8:
                     if ((data & 0xff) != 0xbe) {
-                        DPRINTF("chage uart 2 base. unsupported yet\n");
+                        DPRINTF("chage uart 2 base. unsupported yet \n");
                     }
                     break;
 
@@ -98,7 +95,7 @@ static uint32_t superio_ioport_readb(void *opaque, uint32_t addr)
 {
     SuperIOConfig *superio_conf = opaque;
 
-    DPRINTF("superio_ioport_readb  address 0x%x\n", addr);
+    DPRINTF("superio_ioport_readb  address 0x%x   \n", addr);
     return (superio_conf->config[superio_conf->index]);
 }
 
@@ -136,7 +133,7 @@ static void vt82c686b_write_config(PCIDevice * d, uint32_t address,
 {
     VT82C686BState *vt686 = DO_UPCAST(VT82C686BState, dev, d);
 
-    DPRINTF("vt82c686b_write_config  address 0x%x  val 0x%x len 0x%x\n",
+    DPRINTF("vt82c686b_write_config  address 0x%x  val 0x%x len 0x%x \n",
            address, val, len);
 
     pci_default_write_config(d, address, val, len);
@@ -159,8 +156,12 @@ static void vt82c686b_write_config(PCIDevice * d, uint32_t address,
 
 typedef struct VT686PMState {
     PCIDevice dev;
-    ACPIREGS ar;
+    uint16_t pmsts;
+    uint16_t pmen;
+    uint16_t pmcntrl;
     APMState apm;
+    QEMUTimer *tmr_timer;
+    int64_t tmr_overflow_time;
     PMSMBus smb;
     uint32_t smb_io_base;
 } VT686PMState;
@@ -173,25 +174,54 @@ typedef struct VT686MC97State {
     PCIDevice dev;
 } VT686MC97State;
 
+#define RTC_EN    (1 << 10)
+#define PWRBTN_EN (1 << 8)
+#define GBL_EN    (1 << 5)
+#define TMROF_EN  (1 << 0)
+#define SUS_EN    (1 << 13)
+
+#define ACPI_ENABLE  0xf1
+#define ACPI_DISABLE 0xf0
+
+static uint32_t get_pmtmr(VT686PMState *s)
+{
+    uint32_t d;
+    d = muldiv64(qemu_get_clock(vm_clock), PM_TIMER_FREQUENCY, get_ticks_per_sec());
+    return d & 0xffffff;
+}
+
+static int get_pmsts(VT686PMState *s)
+{
+    int64_t d;
+    int pmsts;
+    pmsts = s->pmsts;
+    d = muldiv64(qemu_get_clock(vm_clock), PM_TIMER_FREQUENCY, get_ticks_per_sec());
+    if (d >= s->tmr_overflow_time)
+        s->pmsts |= TMROF_EN;
+    return pmsts;
+}
+
 static void pm_update_sci(VT686PMState *s)
 {
     int sci_level, pmsts;
+    int64_t expire_time;
 
-    pmsts = acpi_pm1_evt_get_sts(&s->ar);
-    sci_level = (((pmsts & s->ar.pm1.evt.en) &
-                  (ACPI_BITMASK_RT_CLOCK_ENABLE |
-                   ACPI_BITMASK_POWER_BUTTON_ENABLE |
-                   ACPI_BITMASK_GLOBAL_LOCK_ENABLE |
-                   ACPI_BITMASK_TIMER_ENABLE)) != 0);
+    pmsts = get_pmsts(s);
+    sci_level = (((pmsts & s->pmen) &
+                  (RTC_EN | PWRBTN_EN | GBL_EN | TMROF_EN)) != 0);
     qemu_set_irq(s->dev.irq[0], sci_level);
     /* schedule a timer interruption if needed */
-    acpi_pm_tmr_update(&s->ar, (s->ar.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
-                       !(pmsts & ACPI_BITMASK_TIMER_STATUS));
+    if ((s->pmen & TMROF_EN) && !(pmsts & TMROF_EN)) {
+        expire_time = muldiv64(s->tmr_overflow_time, get_ticks_per_sec(), PM_TIMER_FREQUENCY);
+        qemu_mod_timer(s->tmr_timer, expire_time);
+    } else {
+        qemu_del_timer(s->tmr_timer);
+    }
 }
 
-static void pm_tmr_timer(ACPIREGS *ar)
+static void pm_tmr_timer(void *opaque)
 {
-    VT686PMState *s = container_of(ar, VT686PMState, ar);
+    VT686PMState *s = opaque;
     pm_update_sci(s);
 }
 
@@ -202,15 +232,39 @@ static void pm_ioport_writew(void *opaque, uint32_t addr, uint32_t val)
     addr &= 0x0f;
     switch (addr) {
     case 0x00:
-        acpi_pm1_evt_write_sts(&s->ar, val);
-        pm_update_sci(s);
+        {
+            int64_t d;
+            int pmsts;
+            pmsts = get_pmsts(s);
+            if (pmsts & val & TMROF_EN) {
+                /* if TMRSTS is reset, then compute the new overflow time */
+                d = muldiv64(qemu_get_clock(vm_clock), PM_TIMER_FREQUENCY, get_ticks_per_sec());
+                s->tmr_overflow_time = (d + 0x800000LL) & ~0x7fffffLL;
+            }
+            s->pmsts &= ~val;
+            pm_update_sci(s);
+        }
         break;
     case 0x02:
-        acpi_pm1_evt_write_en(&s->ar, val);
+        s->pmen = val;
         pm_update_sci(s);
         break;
     case 0x04:
-        acpi_pm1_cnt_write(&s->ar, val, 0);
+        {
+            int sus_typ;
+            s->pmcntrl = val & ~(SUS_EN);
+            if (val & SUS_EN) {
+                /* change suspend type */
+                sus_typ = (val >> 10) & 3;
+                switch (sus_typ) {
+                case 0: /* soft power off */
+                    qemu_system_shutdown_request();
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
         break;
     default:
         break;
@@ -226,13 +280,13 @@ static uint32_t pm_ioport_readw(void *opaque, uint32_t addr)
     addr &= 0x0f;
     switch (addr) {
     case 0x00:
-        val = acpi_pm1_evt_get_sts(&s->ar);
+        val = get_pmsts(s);
         break;
     case 0x02:
-        val = s->ar.pm1.evt.en;
+        val = s->pmen;
         break;
     case 0x04:
-        val = s->ar.pm1.cnt.cnt;
+        val = s->pmcntrl;
         break;
     default:
         val = 0;
@@ -256,7 +310,7 @@ static uint32_t pm_ioport_readl(void *opaque, uint32_t addr)
     addr &= 0x0f;
     switch (addr) {
     case 0x08:
-        val = acpi_pm_tmr_get(&s->ar);
+        val = get_pmtmr(s);
         break;
     default:
         val = 0;
@@ -286,7 +340,7 @@ static void pm_io_space_update(VT686PMState *s)
 static void pm_write_config(PCIDevice *d,
                             uint32_t address, uint32_t val, int len)
 {
-    DPRINTF("pm_write_config  address 0x%x  val 0x%x len 0x%x\n",
+    DPRINTF("pm_write_config  address 0x%x  val 0x%x len 0x%x \n",
            address, val, len);
     pci_default_write_config(d, address, val, len);
 }
@@ -307,12 +361,12 @@ static const VMStateDescription vmstate_acpi = {
     .post_load = vmstate_acpi_post_load,
     .fields      = (VMStateField []) {
         VMSTATE_PCI_DEVICE(dev, VT686PMState),
-        VMSTATE_UINT16(ar.pm1.evt.sts, VT686PMState),
-        VMSTATE_UINT16(ar.pm1.evt.en, VT686PMState),
-        VMSTATE_UINT16(ar.pm1.cnt.cnt, VT686PMState),
+        VMSTATE_UINT16(pmsts, VT686PMState),
+        VMSTATE_UINT16(pmen, VT686PMState),
+        VMSTATE_UINT16(pmcntrl, VT686PMState),
         VMSTATE_STRUCT(apm, VT686PMState, 0, vmstate_apm, APMState),
-        VMSTATE_TIMER(ar.tmr.timer, VT686PMState),
-        VMSTATE_INT64(ar.tmr.overflow_time, VT686PMState),
+        VMSTATE_TIMER(tmr_timer, VT686PMState),
+        VMSTATE_INT64(tmr_overflow_time, VT686PMState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -326,6 +380,11 @@ static int vt82c686b_ac97_initfn(PCIDevice *dev)
 {
     VT686AC97State *s = DO_UPCAST(VT686AC97State, dev, dev);
     uint8_t *pci_conf = s->dev.config;
+
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_VIA);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_VIA_AC97);
+    pci_config_set_class(pci_conf, PCI_CLASS_MULTIMEDIA_AUDIO);
+    pci_config_set_revision(pci_conf, 0x50);
 
     pci_set_word(pci_conf + PCI_COMMAND, PCI_COMMAND_INVALIDATE |
                  PCI_COMMAND_PARITY);
@@ -344,30 +403,29 @@ void vt82c686b_ac97_init(PCIBus *bus, int devfn)
     qdev_init_nofail(&dev->qdev);
 }
 
-static void via_ac97_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+static PCIDeviceInfo via_ac97_info = {
+    .qdev.name          = "VT82C686B_AC97",
+    .qdev.desc          = "AC97",
+    .qdev.size          = sizeof(VT686AC97State),
+    .init               = vt82c686b_ac97_initfn,
+};
 
-    k->init = vt82c686b_ac97_initfn;
-    k->vendor_id = PCI_VENDOR_ID_VIA;
-    k->device_id = PCI_DEVICE_ID_VIA_AC97;
-    k->revision = 0x50;
-    k->class_id = PCI_CLASS_MULTIMEDIA_AUDIO;
-    dc->desc = "AC97";
+static void vt82c686b_ac97_register(void)
+{
+    pci_qdev_register(&via_ac97_info);
 }
 
-static TypeInfo via_ac97_info = {
-    .name          = "VT82C686B_AC97",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VT686AC97State),
-    .class_init    = via_ac97_class_init,
-};
+device_init(vt82c686b_ac97_register);
 
 static int vt82c686b_mc97_initfn(PCIDevice *dev)
 {
     VT686MC97State *s = DO_UPCAST(VT686MC97State, dev, dev);
     uint8_t *pci_conf = s->dev.config;
+
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_VIA);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_VIA_MC97);
+    pci_config_set_class(pci_conf, PCI_CLASS_COMMUNICATION_OTHER);
+    pci_config_set_revision(pci_conf, 0x30);
 
     pci_set_word(pci_conf + PCI_COMMAND, PCI_COMMAND_INVALIDATE |
                  PCI_COMMAND_VGA_PALETTE);
@@ -385,25 +443,19 @@ void vt82c686b_mc97_init(PCIBus *bus, int devfn)
     qdev_init_nofail(&dev->qdev);
 }
 
-static void via_mc97_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+static PCIDeviceInfo via_mc97_info = {
+    .qdev.name          = "VT82C686B_MC97",
+    .qdev.desc          = "MC97",
+    .qdev.size          = sizeof(VT686MC97State),
+    .init               = vt82c686b_mc97_initfn,
+};
 
-    k->init = vt82c686b_mc97_initfn;
-    k->vendor_id = PCI_VENDOR_ID_VIA;
-    k->device_id = PCI_DEVICE_ID_VIA_MC97;
-    k->class_id = PCI_CLASS_COMMUNICATION_OTHER;
-    k->revision = 0x30;
-    dc->desc = "MC97";
+static void vt82c686b_mc97_register(void)
+{
+    pci_qdev_register(&via_mc97_info);
 }
 
-static TypeInfo via_mc97_info = {
-    .name          = "VT82C686B_MC97",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VT686MC97State),
-    .class_init    = via_mc97_class_init,
-};
+device_init(vt82c686b_mc97_register);
 
 /* vt82c686 pm init */
 static int vt82c686b_pm_initfn(PCIDevice *dev)
@@ -412,6 +464,11 @@ static int vt82c686b_pm_initfn(PCIDevice *dev)
     uint8_t *pci_conf;
 
     pci_conf = s->dev.config;
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_VIA);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_VIA_ACPI);
+    pci_config_set_class(pci_conf, PCI_CLASS_BRIDGE_OTHER);
+    pci_config_set_revision(pci_conf, 0x40);
+
     pci_set_word(pci_conf + PCI_COMMAND, 0);
     pci_set_word(pci_conf + PCI_STATUS, PCI_STATUS_FAST_BACK |
                  PCI_STATUS_DEVSEL_MEDIUM);
@@ -429,8 +486,7 @@ static int vt82c686b_pm_initfn(PCIDevice *dev)
 
     apm_init(&s->apm, NULL, s);
 
-    acpi_pm_tmr_init(&s->ar, pm_tmr_timer);
-    acpi_pm1_cnt_init(&s->ar);
+    s->tmr_timer = qemu_new_timer(vm_clock, pm_tmr_timer, s);
 
     pm_smbus_init(&s->dev.qdev, &s->smb);
 
@@ -453,33 +509,25 @@ i2c_bus *vt82c686b_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
     return s->smb.smbus;
 }
 
-static Property via_pm_properties[] = {
-    DEFINE_PROP_UINT32("smb_io_base", VT686PMState, smb_io_base, 0),
-    DEFINE_PROP_END_OF_LIST(),
+static PCIDeviceInfo via_pm_info = {
+    .qdev.name          = "VT82C686B_PM",
+    .qdev.desc          = "PM",
+    .qdev.size          = sizeof(VT686PMState),
+    .qdev.vmsd          = &vmstate_acpi,
+    .init               = vt82c686b_pm_initfn,
+    .config_write       = pm_write_config,
+    .qdev.props         = (Property[]) {
+        DEFINE_PROP_UINT32("smb_io_base", VT686PMState, smb_io_base, 0),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void via_pm_class_init(ObjectClass *klass, void *data)
+static void vt82c686b_pm_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = vt82c686b_pm_initfn;
-    k->config_write = pm_write_config;
-    k->vendor_id = PCI_VENDOR_ID_VIA;
-    k->device_id = PCI_DEVICE_ID_VIA_ACPI;
-    k->class_id = PCI_CLASS_BRIDGE_OTHER;
-    k->revision = 0x40;
-    dc->desc = "PM";
-    dc->vmsd = &vmstate_acpi;
-    dc->props = via_pm_properties;
+    pci_qdev_register(&via_pm_info);
 }
 
-static TypeInfo via_pm_info = {
-    .name          = "VT82C686B_PM",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VT686PMState),
-    .class_init    = via_pm_class_init,
-};
+device_init(vt82c686b_pm_register);
 
 static const VMStateDescription vmstate_via = {
     .name = "vt82c686b",
@@ -499,10 +547,14 @@ static int vt82c686b_initfn(PCIDevice *d)
     uint8_t *wmask;
     int i;
 
-    isa_bus_new(&d->qdev, pci_address_space_io(d));
+    isa_bus_new(&d->qdev);
 
     pci_conf = d->config;
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_VIA);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_VIA_ISA_BRIDGE);
+    pci_config_set_class(pci_conf, PCI_CLASS_BRIDGE_ISA);
     pci_config_set_prog_interface(pci_conf, 0x0);
+    pci_config_set_revision(pci_conf,0x40); /* Revision 4.0 */
 
     wmask = d->wmask;
     for (i = 0x00; i < 0xff; i++) {
@@ -516,44 +568,27 @@ static int vt82c686b_initfn(PCIDevice *d)
     return 0;
 }
 
-ISABus *vt82c686b_init(PCIBus *bus, int devfn)
+int vt82c686b_init(PCIBus *bus, int devfn)
 {
     PCIDevice *d;
 
     d = pci_create_simple_multifunction(bus, devfn, true, "VT82C686B");
 
-    return DO_UPCAST(ISABus, qbus, qdev_get_child_bus(&d->qdev, "isa.0"));
+    return d->devfn;
 }
 
-static void via_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->init = vt82c686b_initfn;
-    k->config_write = vt82c686b_write_config;
-    k->vendor_id = PCI_VENDOR_ID_VIA;
-    k->device_id = PCI_DEVICE_ID_VIA_ISA_BRIDGE;
-    k->class_id = PCI_CLASS_BRIDGE_ISA;
-    k->revision = 0x40;
-    dc->desc = "ISA bridge";
-    dc->no_user = 1;
-    dc->vmsd = &vmstate_via;
-}
-
-static TypeInfo via_info = {
-    .name          = "VT82C686B",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(VT82C686BState),
-    .class_init    = via_class_init,
+static PCIDeviceInfo via_info = {
+    .qdev.name    = "VT82C686B",
+    .qdev.desc    = "ISA bridge",
+    .qdev.size    = sizeof(VT82C686BState),
+    .qdev.vmsd    = &vmstate_via,
+    .qdev.no_user = 1,
+    .init         = vt82c686b_initfn,
+    .config_write = vt82c686b_write_config,
 };
 
-static void vt82c686b_register_types(void)
+static void vt82c686b_register(void)
 {
-    type_register_static(&via_ac97_info);
-    type_register_static(&via_mc97_info);
-    type_register_static(&via_pm_info);
-    type_register_static(&via_info);
+    pci_qdev_register(&via_info);
 }
-
-type_init(vt82c686b_register_types)
+device_init(vt82c686b_register);

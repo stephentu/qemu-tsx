@@ -46,24 +46,22 @@
 struct SLAVIO_INTCTLState;
 
 typedef struct SLAVIO_CPUINTCTLState {
-    MemoryRegion iomem;
-    struct SLAVIO_INTCTLState *master;
     uint32_t intreg_pending;
+    struct SLAVIO_INTCTLState *master;
     uint32_t cpu;
     uint32_t irl_out;
 } SLAVIO_CPUINTCTLState;
 
 typedef struct SLAVIO_INTCTLState {
     SysBusDevice busdev;
-    MemoryRegion iomem;
+    uint32_t intregm_pending;
+    uint32_t intregm_disabled;
+    uint32_t target_cpu;
 #ifdef DEBUG_IRQ_COUNT
     uint64_t irq_count[32];
 #endif
     qemu_irq cpu_irqs[MAX_CPUS][MAX_PILS];
     SLAVIO_CPUINTCTLState slaves[MAX_CPUS];
-    uint32_t intregm_pending;
-    uint32_t intregm_disabled;
-    uint32_t target_cpu;
 } SLAVIO_INTCTLState;
 
 #define INTCTL_MAXADDR 0xf
@@ -78,8 +76,7 @@ typedef struct SLAVIO_INTCTLState {
 static void slavio_check_interrupts(SLAVIO_INTCTLState *s, int set_irqs);
 
 // per-cpu interrupt controller
-static uint64_t slavio_intctl_mem_readl(void *opaque, hwaddr addr,
-                                        unsigned size)
+static uint32_t slavio_intctl_mem_readl(void *opaque, target_phys_addr_t addr)
 {
     SLAVIO_CPUINTCTLState *s = opaque;
     uint32_t saddr, ret;
@@ -98,8 +95,8 @@ static uint64_t slavio_intctl_mem_readl(void *opaque, hwaddr addr,
     return ret;
 }
 
-static void slavio_intctl_mem_writel(void *opaque, hwaddr addr,
-                                     uint64_t val, unsigned size)
+static void slavio_intctl_mem_writel(void *opaque, target_phys_addr_t addr,
+                                     uint32_t val)
 {
     SLAVIO_CPUINTCTLState *s = opaque;
     uint32_t saddr;
@@ -124,19 +121,20 @@ static void slavio_intctl_mem_writel(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps slavio_intctl_mem_ops = {
-    .read = slavio_intctl_mem_readl,
-    .write = slavio_intctl_mem_writel,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
+static CPUReadMemoryFunc * const slavio_intctl_mem_read[3] = {
+    NULL,
+    NULL,
+    slavio_intctl_mem_readl,
+};
+
+static CPUWriteMemoryFunc * const slavio_intctl_mem_write[3] = {
+    NULL,
+    NULL,
+    slavio_intctl_mem_writel,
 };
 
 // master system interrupt controller
-static uint64_t slavio_intctlm_mem_readl(void *opaque, hwaddr addr,
-                                         unsigned size)
+static uint32_t slavio_intctlm_mem_readl(void *opaque, target_phys_addr_t addr)
 {
     SLAVIO_INTCTLState *s = opaque;
     uint32_t saddr, ret;
@@ -161,8 +159,8 @@ static uint64_t slavio_intctlm_mem_readl(void *opaque, hwaddr addr,
     return ret;
 }
 
-static void slavio_intctlm_mem_writel(void *opaque, hwaddr addr,
-                                      uint64_t val, unsigned size)
+static void slavio_intctlm_mem_writel(void *opaque, target_phys_addr_t addr,
+                                      uint32_t val)
 {
     SLAVIO_INTCTLState *s = opaque;
     uint32_t saddr;
@@ -194,14 +192,16 @@ static void slavio_intctlm_mem_writel(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps slavio_intctlm_mem_ops = {
-    .read = slavio_intctlm_mem_readl,
-    .write = slavio_intctlm_mem_writel,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
+static CPUReadMemoryFunc * const slavio_intctlm_mem_read[3] = {
+    NULL,
+    NULL,
+    slavio_intctlm_mem_readl,
+};
+
+static CPUWriteMemoryFunc * const slavio_intctlm_mem_write[3] = {
+    NULL,
+    NULL,
+    slavio_intctlm_mem_writel,
 };
 
 void slavio_pic_info(Monitor *mon, DeviceState *dev)
@@ -422,23 +422,24 @@ static void slavio_intctl_reset(DeviceState *d)
 static int slavio_intctl_init1(SysBusDevice *dev)
 {
     SLAVIO_INTCTLState *s = FROM_SYSBUS(SLAVIO_INTCTLState, dev);
+    int io_memory;
     unsigned int i, j;
-    char slave_name[45];
 
     qdev_init_gpio_in(&dev->qdev, slavio_set_irq_all, 32 + MAX_CPUS);
-    memory_region_init_io(&s->iomem, &slavio_intctlm_mem_ops, s,
-                          "master-interrupt-controller", INTCTLM_SIZE);
-    sysbus_init_mmio(dev, &s->iomem);
+    io_memory = cpu_register_io_memory(slavio_intctlm_mem_read,
+                                       slavio_intctlm_mem_write, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, INTCTLM_SIZE, io_memory);
 
     for (i = 0; i < MAX_CPUS; i++) {
-        snprintf(slave_name, sizeof(slave_name),
-                 "slave-interrupt-controller-%i", i);
         for (j = 0; j < MAX_PILS; j++) {
             sysbus_init_irq(dev, &s->cpu_irqs[i][j]);
         }
-        memory_region_init_io(&s->slaves[i].iomem, &slavio_intctl_mem_ops,
-                              &s->slaves[i], slave_name, INTCTL_SIZE);
-        sysbus_init_mmio(dev, &s->slaves[i].iomem);
+        io_memory = cpu_register_io_memory(slavio_intctl_mem_read,
+                                           slavio_intctl_mem_write,
+                                           &s->slaves[i],
+                                           DEVICE_NATIVE_ENDIAN);
+        sysbus_init_mmio(dev, INTCTL_SIZE, io_memory);
         s->slaves[i].cpu = i;
         s->slaves[i].master = s;
     }
@@ -446,26 +447,17 @@ static int slavio_intctl_init1(SysBusDevice *dev)
     return 0;
 }
 
-static void slavio_intctl_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = slavio_intctl_init1;
-    dc->reset = slavio_intctl_reset;
-    dc->vmsd = &vmstate_intctl;
-}
-
-static TypeInfo slavio_intctl_info = {
-    .name          = "slavio_intctl",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(SLAVIO_INTCTLState),
-    .class_init    = slavio_intctl_class_init,
+static SysBusDeviceInfo slavio_intctl_info = {
+    .init = slavio_intctl_init1,
+    .qdev.name  = "slavio_intctl",
+    .qdev.size  = sizeof(SLAVIO_INTCTLState),
+    .qdev.vmsd  = &vmstate_intctl,
+    .qdev.reset = slavio_intctl_reset,
 };
 
-static void slavio_intctl_register_types(void)
+static void slavio_intctl_register_devices(void)
 {
-    type_register_static(&slavio_intctl_info);
+    sysbus_register_withprop(&slavio_intctl_info);
 }
 
-type_init(slavio_intctl_register_types)
+device_init(slavio_intctl_register_devices)

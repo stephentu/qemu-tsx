@@ -25,7 +25,6 @@ typedef enum json_token_type {
     JSON_STRING,
     JSON_ESCAPE,
     JSON_SKIP,
-    JSON_ERROR,
 } JSONTokenType;
 
 typedef struct JSONLexer JSONLexer;

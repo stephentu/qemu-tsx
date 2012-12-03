@@ -24,13 +24,13 @@
 #include "hw.h"
 #include "nvram.h"
 #include "pc.h"
-#include "serial.h"
 #include "fdc.h"
 #include "net.h"
 #include "sysemu.h"
 #include "isa.h"
 #include "pci.h"
-#include "pci_host.h"
+#include "prep_pci.h"
+#include "usb-ohci.h"
 #include "ppc.h"
 #include "boards.h"
 #include "qemu-log.h"
@@ -38,8 +38,6 @@
 #include "loader.h"
 #include "mc146818rtc.h"
 #include "blockdev.h"
-#include "arch_init.h"
-#include "exec-memory.h"
 
 //#define HARD_DEBUG_PPC_IO
 //#define DEBUG_PPC_IO
@@ -84,8 +82,88 @@ static const int ide_irq[2] = { 13, 13 };
 static uint32_t ne2000_io[NE2000_NB_MAX] = { 0x300, 0x320, 0x340, 0x360, 0x280, 0x380 };
 static int ne2000_irq[NE2000_NB_MAX] = { 9, 10, 11, 3, 4, 5 };
 
+//static PITState *pit;
+
 /* ISA IO ports bridge */
 #define PPC_IO_BASE 0x80000000
+
+#if 0
+/* Speaker port 0x61 */
+static int speaker_data_on;
+static int dummy_refresh_clock;
+#endif
+
+static void speaker_ioport_write (void *opaque, uint32_t addr, uint32_t val)
+{
+#if 0
+    speaker_data_on = (val >> 1) & 1;
+    pit_set_gate(pit, 2, val & 1);
+#endif
+}
+
+static uint32_t speaker_ioport_read (void *opaque, uint32_t addr)
+{
+#if 0
+    int out;
+    out = pit_get_out(pit, 2, qemu_get_clock(vm_clock));
+    dummy_refresh_clock ^= 1;
+    return (speaker_data_on << 1) | pit_get_gate(pit, 2) | (out << 5) |
+        (dummy_refresh_clock << 4);
+#endif
+    return 0;
+}
+
+/* PCI intack register */
+/* Read-only register (?) */
+static void _PPC_intack_write (void *opaque,
+                               target_phys_addr_t addr, uint32_t value)
+{
+#if 0
+    printf("%s: 0x" TARGET_FMT_plx " => 0x%08" PRIx32 "\n", __func__, addr,
+           value);
+#endif
+}
+
+static inline uint32_t _PPC_intack_read(target_phys_addr_t addr)
+{
+    uint32_t retval = 0;
+
+    if ((addr & 0xf) == 0)
+        retval = pic_intack_read(isa_pic);
+#if 0
+    printf("%s: 0x" TARGET_FMT_plx " <= %08" PRIx32 "\n", __func__, addr,
+           retval);
+#endif
+
+    return retval;
+}
+
+static uint32_t PPC_intack_readb (void *opaque, target_phys_addr_t addr)
+{
+    return _PPC_intack_read(addr);
+}
+
+static uint32_t PPC_intack_readw (void *opaque, target_phys_addr_t addr)
+{
+    return _PPC_intack_read(addr);
+}
+
+static uint32_t PPC_intack_readl (void *opaque, target_phys_addr_t addr)
+{
+    return _PPC_intack_read(addr);
+}
+
+static CPUWriteMemoryFunc * const PPC_intack_write[] = {
+    &_PPC_intack_write,
+    &_PPC_intack_write,
+    &_PPC_intack_write,
+};
+
+static CPUReadMemoryFunc * const PPC_intack_read[] = {
+    &PPC_intack_readb,
+    &PPC_intack_readw,
+    &PPC_intack_readl,
+};
 
 /* PowerPC control and status registers */
 #if 0 // Not used
@@ -115,27 +193,27 @@ static struct {
 } XCSR;
 
 static void PPC_XCSR_writeb (void *opaque,
-                             hwaddr addr, uint32_t value)
+                             target_phys_addr_t addr, uint32_t value)
 {
     printf("%s: 0x" TARGET_FMT_plx " => 0x%08" PRIx32 "\n", __func__, addr,
            value);
 }
 
 static void PPC_XCSR_writew (void *opaque,
-                             hwaddr addr, uint32_t value)
+                             target_phys_addr_t addr, uint32_t value)
 {
     printf("%s: 0x" TARGET_FMT_plx " => 0x%08" PRIx32 "\n", __func__, addr,
            value);
 }
 
 static void PPC_XCSR_writel (void *opaque,
-                             hwaddr addr, uint32_t value)
+                             target_phys_addr_t addr, uint32_t value)
 {
     printf("%s: 0x" TARGET_FMT_plx " => 0x%08" PRIx32 "\n", __func__, addr,
            value);
 }
 
-static uint32_t PPC_XCSR_readb (void *opaque, hwaddr addr)
+static uint32_t PPC_XCSR_readb (void *opaque, target_phys_addr_t addr)
 {
     uint32_t retval = 0;
 
@@ -145,7 +223,7 @@ static uint32_t PPC_XCSR_readb (void *opaque, hwaddr addr)
     return retval;
 }
 
-static uint32_t PPC_XCSR_readw (void *opaque, hwaddr addr)
+static uint32_t PPC_XCSR_readw (void *opaque, target_phys_addr_t addr)
 {
     uint32_t retval = 0;
 
@@ -155,7 +233,7 @@ static uint32_t PPC_XCSR_readw (void *opaque, hwaddr addr)
     return retval;
 }
 
-static uint32_t PPC_XCSR_readl (void *opaque, hwaddr addr)
+static uint32_t PPC_XCSR_readl (void *opaque, target_phys_addr_t addr)
 {
     uint32_t retval = 0;
 
@@ -165,14 +243,17 @@ static uint32_t PPC_XCSR_readl (void *opaque, hwaddr addr)
     return retval;
 }
 
-static const MemoryRegionOps PPC_XCSR_ops = {
-    .old_mmio = {
-        .read = { PPC_XCSR_readb, PPC_XCSR_readw, PPC_XCSR_readl, },
-        .write = { PPC_XCSR_writeb, PPC_XCSR_writew, PPC_XCSR_writel, },
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
+static CPUWriteMemoryFunc * const PPC_XCSR_write[] = {
+    &PPC_XCSR_writeb,
+    &PPC_XCSR_writew,
+    &PPC_XCSR_writel,
 };
 
+static CPUReadMemoryFunc * const PPC_XCSR_read[] = {
+    &PPC_XCSR_readb,
+    &PPC_XCSR_readw,
+    &PPC_XCSR_readl,
+};
 #endif
 
 /* Fake super-io ports for PREP platform (Intel 82378ZB) */
@@ -343,8 +424,8 @@ static uint32_t PREP_io_800_readb (void *opaque, uint32_t addr)
     return retval;
 }
 
-static inline hwaddr prep_IO_address(sysctrl_t *sysctrl,
-                                                 hwaddr addr)
+static inline target_phys_addr_t prep_IO_address(sysctrl_t *sysctrl,
+                                                 target_phys_addr_t addr)
 {
     if (sysctrl->contiguous_map == 0) {
         /* 64 KB contiguous space for IOs */
@@ -357,7 +438,7 @@ static inline hwaddr prep_IO_address(sysctrl_t *sysctrl,
     return addr;
 }
 
-static void PPC_prep_io_writeb (void *opaque, hwaddr addr,
+static void PPC_prep_io_writeb (void *opaque, target_phys_addr_t addr,
                                 uint32_t value)
 {
     sysctrl_t *sysctrl = opaque;
@@ -366,7 +447,7 @@ static void PPC_prep_io_writeb (void *opaque, hwaddr addr,
     cpu_outb(addr, value);
 }
 
-static uint32_t PPC_prep_io_readb (void *opaque, hwaddr addr)
+static uint32_t PPC_prep_io_readb (void *opaque, target_phys_addr_t addr)
 {
     sysctrl_t *sysctrl = opaque;
     uint32_t ret;
@@ -377,7 +458,7 @@ static uint32_t PPC_prep_io_readb (void *opaque, hwaddr addr)
     return ret;
 }
 
-static void PPC_prep_io_writew (void *opaque, hwaddr addr,
+static void PPC_prep_io_writew (void *opaque, target_phys_addr_t addr,
                                 uint32_t value)
 {
     sysctrl_t *sysctrl = opaque;
@@ -387,7 +468,7 @@ static void PPC_prep_io_writew (void *opaque, hwaddr addr,
     cpu_outw(addr, value);
 }
 
-static uint32_t PPC_prep_io_readw (void *opaque, hwaddr addr)
+static uint32_t PPC_prep_io_readw (void *opaque, target_phys_addr_t addr)
 {
     sysctrl_t *sysctrl = opaque;
     uint32_t ret;
@@ -399,7 +480,7 @@ static uint32_t PPC_prep_io_readw (void *opaque, hwaddr addr)
     return ret;
 }
 
-static void PPC_prep_io_writel (void *opaque, hwaddr addr,
+static void PPC_prep_io_writel (void *opaque, target_phys_addr_t addr,
                                 uint32_t value)
 {
     sysctrl_t *sysctrl = opaque;
@@ -409,7 +490,7 @@ static void PPC_prep_io_writel (void *opaque, hwaddr addr,
     cpu_outl(addr, value);
 }
 
-static uint32_t PPC_prep_io_readl (void *opaque, hwaddr addr)
+static uint32_t PPC_prep_io_readl (void *opaque, target_phys_addr_t addr)
 {
     sysctrl_t *sysctrl = opaque;
     uint32_t ret;
@@ -421,67 +502,54 @@ static uint32_t PPC_prep_io_readl (void *opaque, hwaddr addr)
     return ret;
 }
 
-static const MemoryRegionOps PPC_prep_io_ops = {
-    .old_mmio = {
-        .read = { PPC_prep_io_readb, PPC_prep_io_readw, PPC_prep_io_readl },
-        .write = { PPC_prep_io_writeb, PPC_prep_io_writew, PPC_prep_io_writel },
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
+static CPUWriteMemoryFunc * const PPC_prep_io_write[] = {
+    &PPC_prep_io_writeb,
+    &PPC_prep_io_writew,
+    &PPC_prep_io_writel,
+};
+
+static CPUReadMemoryFunc * const PPC_prep_io_read[] = {
+    &PPC_prep_io_readb,
+    &PPC_prep_io_readw,
+    &PPC_prep_io_readl,
 };
 
 #define NVRAM_SIZE        0x2000
 
 static void cpu_request_exit(void *opaque, int irq, int level)
 {
-    CPUPPCState *env = cpu_single_env;
+    CPUState *env = cpu_single_env;
 
     if (env && level) {
         cpu_exit(env);
     }
 }
 
-static void ppc_prep_reset(void *opaque)
-{
-    PowerPCCPU *cpu = opaque;
-
-    cpu_reset(CPU(cpu));
-}
-
 /* PowerPC PREP hardware initialisation */
-static void ppc_prep_init(QEMUMachineInitArgs *args)
+static void ppc_prep_init (ram_addr_t ram_size,
+                           const char *boot_device,
+                           const char *kernel_filename,
+                           const char *kernel_cmdline,
+                           const char *initrd_filename,
+                           const char *cpu_model)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
-    MemoryRegion *sysmem = get_system_memory();
-    PowerPCCPU *cpu = NULL;
-    CPUPPCState *env = NULL;
+    CPUState *env = NULL;
     char *filename;
     nvram_t nvram;
     M48t59State *m48t59;
-    MemoryRegion *PPC_io_memory = g_new(MemoryRegion, 1);
-#if 0
-    MemoryRegion *xcsr = g_new(MemoryRegion, 1);
-#endif
+    int PPC_io_memory;
     int linux_boot, i, nb_nics1, bios_size;
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
-    MemoryRegion *bios = g_new(MemoryRegion, 1);
+    ram_addr_t ram_offset, bios_offset;
     uint32_t kernel_base, initrd_base;
     long kernel_size, initrd_size;
-    DeviceState *dev;
-    PCIHostState *pcihost;
     PCIBus *pci_bus;
-    PCIDevice *pci;
-    ISABus *isa_bus;
+    qemu_irq *i8259;
     qemu_irq *cpu_exit_irq;
     int ppc_boot_device;
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     DriveInfo *fd[MAX_FD];
 
-    sysctrl = g_malloc0(sizeof(sysctrl_t));
+    sysctrl = qemu_mallocz(sizeof(sysctrl_t));
 
     linux_boot = (kernel_filename != NULL);
 
@@ -489,13 +557,11 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
     if (cpu_model == NULL)
         cpu_model = "602";
     for (i = 0; i < smp_cpus; i++) {
-        cpu = cpu_ppc_init(cpu_model);
-        if (cpu == NULL) {
+        env = cpu_init(cpu_model);
+        if (!env) {
             fprintf(stderr, "Unable to find PowerPC CPU definition\n");
             exit(1);
         }
-        env = &cpu->env;
-
         if (env->flags & POWERPC_FLAG_RTC_CLK) {
             /* POWER / PowerPC 601 RTC clock frequency is 7.8125 MHz */
             cpu_ppc_tb_init(env, 7812500UL);
@@ -503,19 +569,15 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
             /* Set time-base frequency to 100 Mhz */
             cpu_ppc_tb_init(env, 100UL * 1000UL * 1000UL);
         }
-        qemu_register_reset(ppc_prep_reset, cpu);
+        qemu_register_reset((QEMUResetHandler*)&cpu_reset, env);
     }
 
     /* allocate RAM */
-    memory_region_init_ram(ram, "ppc_prep.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_add_subregion(sysmem, 0, ram);
+    ram_offset = qemu_ram_alloc(NULL, "ppc_prep.ram", ram_size);
+    cpu_register_physical_memory(0, ram_size, ram_offset);
 
     /* allocate and load BIOS */
-    memory_region_init_ram(bios, "ppc_prep.bios", BIOS_SIZE);
-    memory_region_set_readonly(bios, true);
-    memory_region_add_subregion(sysmem, (uint32_t)(-BIOS_SIZE), bios);
-    vmstate_register_ram_global(bios);
+    bios_offset = qemu_ram_alloc(NULL, "ppc_prep.bios", BIOS_SIZE);
     if (bios_name == NULL)
         bios_name = BIOS_FILENAME;
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
@@ -525,16 +587,18 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
         bios_size = -1;
     }
     if (bios_size > 0 && bios_size <= BIOS_SIZE) {
-        hwaddr bios_addr;
+        target_phys_addr_t bios_addr;
         bios_size = (bios_size + 0xfff) & ~0xfff;
         bios_addr = (uint32_t)(-bios_size);
+        cpu_register_physical_memory(bios_addr, bios_size,
+                                     bios_offset | IO_MEM_ROM);
         bios_size = load_image_targphys(filename, bios_addr, bios_size);
     }
     if (bios_size < 0 || bios_size > BIOS_SIZE) {
         hw_error("qemu: could not load PPC PREP bios '%s'\n", bios_name);
     }
     if (filename) {
-        g_free(filename);
+        qemu_free(filename);
     }
 
     if (linux_boot) {
@@ -579,73 +643,73 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
         }
     }
 
+    isa_mem_base = 0xc0000000;
     if (PPC_INPUT(env) != PPC_FLAGS_INPUT_6xx) {
         hw_error("Only 6xx bus is supported on PREP machine\n");
     }
-
-    dev = qdev_create(NULL, "raven-pcihost");
-    pcihost = PCI_HOST_BRIDGE(dev);
-    pcihost->address_space = get_system_memory();
-    object_property_add_child(qdev_get_machine(), "raven", OBJECT(dev), NULL);
-    qdev_init_nofail(dev);
-    pci_bus = (PCIBus *)qdev_get_child_bus(dev, "pci.0");
-    if (pci_bus == NULL) {
-        fprintf(stderr, "Couldn't create PCI host controller.\n");
-        exit(1);
-    }
-
-    /* PCI -> ISA bridge */
-    pci = pci_create_simple(pci_bus, PCI_DEVFN(1, 0), "i82378");
-    cpu_exit_irq = qemu_allocate_irqs(cpu_request_exit, NULL, 1);
-    qdev_connect_gpio_out(&pci->qdev, 0,
-                          first_cpu->irq_inputs[PPC6xx_INPUT_INT]);
-    qdev_connect_gpio_out(&pci->qdev, 1, *cpu_exit_irq);
-    sysbus_connect_irq(&pcihost->busdev, 0, qdev_get_gpio_in(&pci->qdev, 9));
-    sysbus_connect_irq(&pcihost->busdev, 1, qdev_get_gpio_in(&pci->qdev, 11));
-    sysbus_connect_irq(&pcihost->busdev, 2, qdev_get_gpio_in(&pci->qdev, 9));
-    sysbus_connect_irq(&pcihost->busdev, 3, qdev_get_gpio_in(&pci->qdev, 11));
-    isa_bus = DO_UPCAST(ISABus, qbus, qdev_get_child_bus(&pci->qdev, "isa.0"));
-
+    i8259 = i8259_init(first_cpu->irq_inputs[PPC6xx_INPUT_INT]);
+    pci_bus = pci_prep_init(i8259);
+    /* Hmm, prep has no pci-isa bridge ??? */
+    isa_bus_new(NULL);
+    isa_bus_irqs(i8259);
+    //    pci_bus = i440fx_init();
     /* Register 8 MB of ISA IO space (needed for non-contiguous map) */
-    memory_region_init_io(PPC_io_memory, &PPC_prep_io_ops, sysctrl,
-                          "ppc-io", 0x00800000);
-    memory_region_add_subregion(sysmem, 0x80000000, PPC_io_memory);
+    PPC_io_memory = cpu_register_io_memory(PPC_prep_io_read,
+                                           PPC_prep_io_write, sysctrl,
+                                           DEVICE_LITTLE_ENDIAN);
+    cpu_register_physical_memory(0x80000000, 0x00800000, PPC_io_memory);
 
     /* init basic PC hardware */
     pci_vga_init(pci_bus);
+    //    openpic = openpic_init(0x00000000, 0xF0000000, 1);
+    //    pit = pit_init(0x40, i8259[0]);
+    rtc_init(2000, NULL);
 
     if (serial_hds[0])
-        serial_isa_init(isa_bus, 0, serial_hds[0]);
+        serial_isa_init(0, serial_hds[0]);
     nb_nics1 = nb_nics;
     if (nb_nics1 > NE2000_NB_MAX)
         nb_nics1 = NE2000_NB_MAX;
     for(i = 0; i < nb_nics1; i++) {
         if (nd_table[i].model == NULL) {
-	    nd_table[i].model = g_strdup("ne2k_isa");
+	    nd_table[i].model = qemu_strdup("ne2k_isa");
         }
         if (strcmp(nd_table[i].model, "ne2k_isa") == 0) {
-            isa_ne2000_init(isa_bus, ne2000_io[i], ne2000_irq[i],
-                            &nd_table[i]);
+            isa_ne2000_init(ne2000_io[i], ne2000_irq[i], &nd_table[i]);
         } else {
             pci_nic_init_nofail(&nd_table[i], "ne2k_pci", NULL);
         }
     }
 
-    ide_drive_get(hd, MAX_IDE_BUS);
+    if (drive_get_max_bus(IF_IDE) >= MAX_IDE_BUS) {
+        fprintf(stderr, "qemu: too many IDE bus\n");
+        exit(1);
+    }
+
+    for(i = 0; i < MAX_IDE_BUS * MAX_IDE_DEVS; i++) {
+        hd[i] = drive_get(IF_IDE, i / MAX_IDE_DEVS, i % MAX_IDE_DEVS);
+    }
+
     for(i = 0; i < MAX_IDE_BUS; i++) {
-        isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i], ide_irq[i],
+        isa_ide_init(ide_iobase[i], ide_iobase2[i], ide_irq[i],
                      hd[2 * i],
 		     hd[2 * i + 1]);
     }
-    isa_create_simple(isa_bus, "i8042");
+    isa_create_simple("i8042");
+
+    cpu_exit_irq = qemu_allocate_irqs(cpu_request_exit, NULL, 1);
+    DMA_init(1, cpu_exit_irq);
 
     //    SB16_init();
 
     for(i = 0; i < MAX_FD; i++) {
         fd[i] = drive_get(IF_FLOPPY, 0, i);
     }
-    fdctrl_init_isa(isa_bus, fd);
+    fdctrl_init_isa(fd);
 
+    /* Register speaker port */
+    register_ioport_read(0x61, 1, 1, speaker_ioport_read, NULL);
+    register_ioport_write(0x61, 1, 1, speaker_ioport_write, NULL);
     /* Register fake IO ports for PREP */
     sysctrl->reset_irq = first_cpu->irq_inputs[PPC6xx_INPUT_HRESET];
     register_ioport_read(0x398, 2, 1, &PREP_io_read, sysctrl);
@@ -655,17 +719,23 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
     register_ioport_write(0x0092, 0x01, 1, &PREP_io_800_writeb, sysctrl);
     register_ioport_read(0x0800, 0x52, 1, &PREP_io_800_readb, sysctrl);
     register_ioport_write(0x0800, 0x52, 1, &PREP_io_800_writeb, sysctrl);
+    /* PCI intack location */
+    PPC_io_memory = cpu_register_io_memory(PPC_intack_read,
+                                           PPC_intack_write, NULL,
+                                           DEVICE_LITTLE_ENDIAN);
+    cpu_register_physical_memory(0xBFFFFFF0, 0x4, PPC_io_memory);
     /* PowerPC control and status register group */
 #if 0
-    memory_region_init_io(xcsr, &PPC_XCSR_ops, NULL, "ppc-xcsr", 0x1000);
-    memory_region_add_subregion(sysmem, 0xFEFF0000, xcsr);
+    PPC_io_memory = cpu_register_io_memory(PPC_XCSR_read, PPC_XCSR_write,
+                                           NULL, DEVICE_LITTLE_ENDIAN);
+    cpu_register_physical_memory(0xFEFF0000, 0x1000, PPC_io_memory);
 #endif
 
-    if (usb_enabled(false)) {
-        pci_create_simple(pci_bus, -1, "pci-ohci");
+    if (usb_enabled) {
+        usb_ohci_init_pci(pci_bus, -1);
     }
 
-    m48t59 = m48t59_init_isa(isa_bus, 0x0074, NVRAM_SIZE, 59);
+    m48t59 = m48t59_init(i8259[8], 0, 0x0074, NVRAM_SIZE, 59);
     if (m48t59 == NULL)
         return;
     sysctrl->nvram = m48t59;
@@ -684,9 +754,6 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
 
     /* Special port to get debug messages from Open-Firmware */
     register_ioport_write(0x0F00, 4, 1, &PPC_debug_write, NULL);
-
-    /* Initialize audio subsystem */
-    audio_init(isa_bus, pci_bus);
 }
 
 static QEMUMachine prep_machine = {

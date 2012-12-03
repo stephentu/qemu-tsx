@@ -31,8 +31,7 @@
 #define HALF (IN_MAX >> 1)
 #endif
 
-#define ET glue (ENDIAN_CONVERSION, glue (glue (glue (_, ITYPE), BSIZE), _t))
-#define IN_T glue (glue (ITYPE, BSIZE), _t)
+#define ET glue (ENDIAN_CONVERSION, glue (_, IN_T))
 
 #ifdef FLOAT_MIXENG
 static mixeng_real inline glue (conv_, ET) (IN_T v)
@@ -47,7 +46,7 @@ static mixeng_real inline glue (conv_, ET) (IN_T v)
 #endif
 #else  /* !RECIPROCAL */
 #ifdef SIGNED
-    return nv / (mixeng_real) ((mixeng_real) IN_MAX - IN_MIN);
+    return nv / (mixeng_real) (IN_MAX - IN_MIN);
 #else
     return (nv - HALF) / (mixeng_real) IN_MAX;
 #endif
@@ -64,7 +63,7 @@ static IN_T inline glue (clip_, ET) (mixeng_real v)
     }
 
 #ifdef SIGNED
-    return ENDIAN_CONVERT ((IN_T) (v * ((mixeng_real) IN_MAX - IN_MIN)));
+    return ENDIAN_CONVERT ((IN_T) (v * (IN_MAX - IN_MIN)));
 #else
     return ENDIAN_CONVERT ((IN_T) ((v * IN_MAX) + HALF));
 #endif
@@ -151,4 +150,3 @@ static void glue (glue (clip_, ET), _from_mono)
 
 #undef ET
 #undef HALF
-#undef IN_T

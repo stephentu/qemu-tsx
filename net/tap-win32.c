@@ -26,10 +26,9 @@
  *  distribution); if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "tap.h"
+#include "net/tap.h"
 
 #include "qemu-common.h"
-#include "clients.h"            /* net_init_tap */
 #include "net.h"
 #include "sysemu.h"
 #include "qemu-error.h"
@@ -481,7 +480,7 @@ static int tap_win32_write(tap_win32_overlapped_t *overlapped,
         }
     }
 
-    return write_size;
+    return 0;
 }
 
 static DWORD WINAPI tap_win32_thread_entry(LPVOID param)
@@ -631,11 +630,11 @@ static int tap_win32_open(tap_win32_overlapped_t **phandle,
 /********************************************/
 
  typedef struct TAPState {
-     NetClientState nc;
+     VLANClientState nc;
      tap_win32_overlapped_t *handle;
  } TAPState;
 
-static void tap_cleanup(NetClientState *nc)
+static void tap_cleanup(VLANClientState *nc)
 {
     TAPState *s = DO_UPCAST(TAPState, nc, nc);
 
@@ -646,7 +645,7 @@ static void tap_cleanup(NetClientState *nc)
     */
 }
 
-static ssize_t tap_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+static ssize_t tap_receive(VLANClientState *nc, const uint8_t *buf, size_t size)
 {
     TAPState *s = DO_UPCAST(TAPState, nc, nc);
 
@@ -668,16 +667,16 @@ static void tap_win32_send(void *opaque)
 }
 
 static NetClientInfo net_tap_win32_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_TAP,
+    .type = NET_CLIENT_TYPE_TAP,
     .size = sizeof(TAPState),
     .receive = tap_receive,
     .cleanup = tap_cleanup,
 };
 
-static int tap_win32_init(NetClientState *peer, const char *model,
+static int tap_win32_init(VLANState *vlan, const char *model,
                           const char *name, const char *ifname)
 {
-    NetClientState *nc;
+    VLANClientState *nc;
     TAPState *s;
     tap_win32_overlapped_t *handle;
 
@@ -686,7 +685,7 @@ static int tap_win32_init(NetClientState *peer, const char *model,
         return -1;
     }
 
-    nc = qemu_new_net_client(&net_tap_win32_info, peer, model, name);
+    nc = qemu_new_net_client(&net_tap_win32_info, vlan, NULL, model, name);
 
     s = DO_UPCAST(TAPState, nc, nc);
 
@@ -700,32 +699,30 @@ static int tap_win32_init(NetClientState *peer, const char *model,
     return 0;
 }
 
-int net_init_tap(const NetClientOptions *opts, const char *name,
-                 NetClientState *peer)
+int net_init_tap(QemuOpts *opts, Monitor *mon, const char *name, VLANState *vlan)
 {
-    const NetdevTapOptions *tap;
+    const char *ifname;
 
-    assert(opts->kind == NET_CLIENT_OPTIONS_KIND_TAP);
-    tap = opts->tap;
+    ifname = qemu_opt_get(opts, "ifname");
 
-    if (!tap->has_ifname) {
+    if (!ifname) {
         error_report("tap: no interface name");
         return -1;
     }
 
-    if (tap_win32_init(peer, "tap", name, tap->ifname) == -1) {
+    if (tap_win32_init(vlan, "tap", name, ifname) == -1) {
         return -1;
     }
 
     return 0;
 }
 
-int tap_has_ufo(NetClientState *nc)
+int tap_has_ufo(VLANClientState *vc)
 {
     return 0;
 }
 
-int tap_has_vnet_hdr(NetClientState *nc)
+int tap_has_vnet_hdr(VLANClientState *vc)
 {
     return 0;
 }
@@ -739,26 +736,16 @@ void tap_fd_set_vnet_hdr_len(int fd, int len)
 {
 }
 
-void tap_using_vnet_hdr(NetClientState *nc, int using_vnet_hdr)
+void tap_using_vnet_hdr(VLANClientState *vc, int using_vnet_hdr)
 {
 }
 
-void tap_set_offload(NetClientState *nc, int csum, int tso4,
+void tap_set_offload(VLANClientState *vc, int csum, int tso4,
                      int tso6, int ecn, int ufo)
 {
 }
 
-struct vhost_net *tap_get_vhost_net(NetClientState *nc)
+struct vhost_net *tap_get_vhost_net(VLANClientState *nc)
 {
     return NULL;
-}
-
-int tap_has_vnet_hdr_len(NetClientState *nc, int len)
-{
-    return 0;
-}
-
-void tap_set_vnet_hdr_len(NetClientState *nc, int len)
-{
-    assert(0);
 }

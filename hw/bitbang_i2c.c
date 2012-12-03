@@ -4,10 +4,7 @@
  *
  * Copyright (c) 2008 Jan Kiszka
  *
- * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
+ * This code is licenced under the GNU GPL v2.
  */
 #include "hw.h"
 #include "bitbang_i2c.h"
@@ -41,8 +38,7 @@ typedef enum bitbang_i2c_state {
     RECEIVING_BIT2,
     RECEIVING_BIT1,
     RECEIVING_BIT0,
-    SENDING_ACK,
-    SENT_NACK
+    SENDING_ACK
 } bitbang_i2c_state;
 
 struct bitbang_i2c_interface {
@@ -119,7 +115,6 @@ int bitbang_i2c_set(bitbang_i2c_interface *i2c, int line, int level)
     }
     switch (i2c->state) {
     case STOPPED:
-    case SENT_NACK:
         return bitbang_i2c_ret(i2c, 1);
 
     case SENDING_BIT7 ... SENDING_BIT0:
@@ -160,7 +155,6 @@ int bitbang_i2c_set(bitbang_i2c_interface *i2c, int line, int level)
         i2c->state = RECEIVING_BIT7;
         if (data != 0) {
             DPRINTF("NACKED\n");
-            i2c->state = SENT_NACK;
             i2c_nack(i2c->bus);
         } else {
             DPRINTF("ACKED\n");
@@ -174,7 +168,7 @@ bitbang_i2c_interface *bitbang_i2c_init(i2c_bus *bus)
 {
     bitbang_i2c_interface *s;
 
-    s = g_malloc0(sizeof(bitbang_i2c_interface));
+    s = qemu_mallocz(sizeof(bitbang_i2c_interface));
 
     s->bus = bus;
     s->last_data = 1;
@@ -187,7 +181,6 @@ bitbang_i2c_interface *bitbang_i2c_init(i2c_bus *bus)
 /* GPIO interface.  */
 typedef struct {
     SysBusDevice busdev;
-    MemoryRegion dummy_iomem;
     bitbang_i2c_interface *bitbang;
     int last_level;
     qemu_irq out;
@@ -209,8 +202,7 @@ static int gpio_i2c_init(SysBusDevice *dev)
     GPIOI2CState *s = FROM_SYSBUS(GPIOI2CState, dev);
     i2c_bus *bus;
 
-    memory_region_init(&s->dummy_iomem, "gpio_i2c", 0);
-    sysbus_init_mmio(dev, &s->dummy_iomem);
+    sysbus_init_mmio(dev, 0x0, 0);
 
     bus = i2c_init_bus(&dev->qdev, "i2c");
     s->bitbang = bitbang_i2c_init(bus);
@@ -221,25 +213,16 @@ static int gpio_i2c_init(SysBusDevice *dev)
     return 0;
 }
 
-static void gpio_i2c_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = gpio_i2c_init;
-    dc->desc = "Virtual GPIO to I2C bridge";
-}
-
-static TypeInfo gpio_i2c_info = {
-    .name          = "gpio_i2c",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(GPIOI2CState),
-    .class_init    = gpio_i2c_class_init,
+static SysBusDeviceInfo gpio_i2c_info = {
+    .init = gpio_i2c_init,
+    .qdev.name  = "gpio_i2c",
+    .qdev.desc  = "Virtual GPIO to I2C bridge",
+    .qdev.size  = sizeof(GPIOI2CState),
 };
 
-static void bitbang_i2c_register_types(void)
+static void bitbang_i2c_register(void)
 {
-    type_register_static(&gpio_i2c_info);
+    sysbus_register_withprop(&gpio_i2c_info);
 }
 
-type_init(bitbang_i2c_register_types)
+device_init(bitbang_i2c_register)

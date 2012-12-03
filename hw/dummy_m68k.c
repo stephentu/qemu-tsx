@@ -3,30 +3,28 @@
  *
  * Copyright (c) 2007 CodeSourcery.
  *
- * This code is licensed under the GPL
+ * This code is licenced under the GPL
  */
 
 #include "hw.h"
+#include "sysemu.h"
 #include "boards.h"
 #include "loader.h"
 #include "elf.h"
-#include "exec-memory.h"
 
 #define KERNEL_LOAD_ADDR 0x10000
 
 /* Board init.  */
 
-static void dummy_m68k_init(QEMUMachineInitArgs *args)
+static void dummy_m68k_init(ram_addr_t ram_size,
+                     const char *boot_device,
+                     const char *kernel_filename, const char *kernel_cmdline,
+                     const char *initrd_filename, const char *cpu_model)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    CPUM68KState *env;
-    MemoryRegion *address_space_mem =  get_system_memory();
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
+    CPUState *env;
     int kernel_size;
     uint64_t elf_entry;
-    hwaddr entry;
+    target_phys_addr_t entry;
 
     if (!cpu_model)
         cpu_model = "cfv4e";
@@ -40,9 +38,8 @@ static void dummy_m68k_init(QEMUMachineInitArgs *args)
     env->vbr = 0;
 
     /* RAM at address zero */
-    memory_region_init_ram(ram, "dummy_m68k.ram", ram_size);
-    vmstate_register_ram_global(ram);
-    memory_region_add_subregion(address_space_mem, 0, ram);
+    cpu_register_physical_memory(0, ram_size,
+        qemu_ram_alloc(NULL, "dummy_m68k.ram", ram_size) | IO_MEM_RAM);
 
     /* Load kernel.  */
     if (kernel_filename) {

@@ -29,8 +29,13 @@
 #define _QEMU_OPTIONS_H_
 
 enum {
-#define QEMU_OPTIONS_GENERATE_ENUM
-#include "qemu-options-wrapper.h"
+#define DEF(option, opt_arg, opt_enum, opt_help, arch_mask)     \
+    opt_enum,
+#define DEFHEADING(text)
+#include "qemu-options.def"
+#undef DEF
+#undef DEFHEADING
+#undef GEN_DOCS
 };
 
 #endif

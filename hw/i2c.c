@@ -4,7 +4,7 @@
  * Copyright (c) 2007 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licensed under the LGPL.
+ * This code is licenced under the LGPL.
  */
 
 #include "i2c.h"
@@ -12,23 +12,18 @@
 struct i2c_bus
 {
     BusState qbus;
-    I2CSlave *current_dev;
-    I2CSlave *dev;
+    i2c_slave *current_dev;
+    i2c_slave *dev;
     uint8_t saved_address;
 };
 
-static Property i2c_props[] = {
-    DEFINE_PROP_UINT8("address", struct I2CSlave, address, 0),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-#define TYPE_I2C_BUS "i2c-bus"
-#define I2C_BUS(obj) OBJECT_CHECK(i2c_bus, (obj), TYPE_I2C_BUS)
-
-static const TypeInfo i2c_bus_info = {
-    .name = TYPE_I2C_BUS,
-    .parent = TYPE_BUS,
-    .instance_size = sizeof(i2c_bus),
+static struct BusInfo i2c_bus_info = {
+    .name = "I2C",
+    .size = sizeof(i2c_bus),
+    .props = (Property[]) {
+        DEFINE_PROP_UINT8("address", struct i2c_slave, address, 0),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
 static void i2c_bus_pre_save(void *opaque)
@@ -66,12 +61,12 @@ i2c_bus *i2c_init_bus(DeviceState *parent, const char *name)
 {
     i2c_bus *bus;
 
-    bus = FROM_QBUS(i2c_bus, qbus_create(TYPE_I2C_BUS, parent, name));
+    bus = FROM_QBUS(i2c_bus, qbus_create(&i2c_bus_info, parent, name));
     vmstate_register(NULL, -1, &vmstate_i2c_bus, bus);
     return bus;
 }
 
-void i2c_set_slave_address(I2CSlave *dev, uint8_t address)
+void i2c_set_slave_address(i2c_slave *dev, uint8_t address)
 {
     dev->address = address;
 }
@@ -86,102 +81,72 @@ int i2c_bus_busy(i2c_bus *bus)
 /* TODO: Make this handle multiple masters.  */
 int i2c_start_transfer(i2c_bus *bus, uint8_t address, int recv)
 {
-    BusChild *kid;
-    I2CSlave *slave = NULL;
-    I2CSlaveClass *sc;
+    DeviceState *qdev;
+    i2c_slave *slave = NULL;
 
-    QTAILQ_FOREACH(kid, &bus->qbus.children, sibling) {
-        DeviceState *qdev = kid->child;
-        I2CSlave *candidate = I2C_SLAVE_FROM_QDEV(qdev);
+    QLIST_FOREACH(qdev, &bus->qbus.children, sibling) {
+        i2c_slave *candidate = I2C_SLAVE_FROM_QDEV(qdev);
         if (candidate->address == address) {
             slave = candidate;
             break;
         }
     }
 
-    if (!slave) {
+    if (!slave)
         return 1;
-    }
 
-    sc = I2C_SLAVE_GET_CLASS(slave);
     /* If the bus is already busy, assume this is a repeated
        start condition.  */
     bus->current_dev = slave;
-    if (sc->event) {
-        sc->event(slave, recv ? I2C_START_RECV : I2C_START_SEND);
-    }
+    slave->info->event(slave, recv ? I2C_START_RECV : I2C_START_SEND);
     return 0;
 }
 
 void i2c_end_transfer(i2c_bus *bus)
 {
-    I2CSlave *dev = bus->current_dev;
-    I2CSlaveClass *sc;
+    i2c_slave *dev = bus->current_dev;
 
-    if (!dev) {
+    if (!dev)
         return;
-    }
 
-    sc = I2C_SLAVE_GET_CLASS(dev);
-    if (sc->event) {
-        sc->event(dev, I2C_FINISH);
-    }
+    dev->info->event(dev, I2C_FINISH);
 
     bus->current_dev = NULL;
 }
 
 int i2c_send(i2c_bus *bus, uint8_t data)
 {
-    I2CSlave *dev = bus->current_dev;
-    I2CSlaveClass *sc;
+    i2c_slave *dev = bus->current_dev;
 
-    if (!dev) {
+    if (!dev)
         return -1;
-    }
 
-    sc = I2C_SLAVE_GET_CLASS(dev);
-    if (sc->send) {
-        return sc->send(dev, data);
-    }
-
-    return -1;
+    return dev->info->send(dev, data);
 }
 
 int i2c_recv(i2c_bus *bus)
 {
-    I2CSlave *dev = bus->current_dev;
-    I2CSlaveClass *sc;
+    i2c_slave *dev = bus->current_dev;
 
-    if (!dev) {
+    if (!dev)
         return -1;
-    }
 
-    sc = I2C_SLAVE_GET_CLASS(dev);
-    if (sc->recv) {
-        return sc->recv(dev);
-    }
-
-    return -1;
+    return dev->info->recv(dev);
 }
 
 void i2c_nack(i2c_bus *bus)
 {
-    I2CSlave *dev = bus->current_dev;
-    I2CSlaveClass *sc;
+    i2c_slave *dev = bus->current_dev;
 
-    if (!dev) {
+    if (!dev)
         return;
-    }
 
-    sc = I2C_SLAVE_GET_CLASS(dev);
-    if (sc->event) {
-        sc->event(dev, I2C_NACK);
-    }
+    dev->info->event(dev, I2C_NACK);
 }
 
 static int i2c_slave_post_load(void *opaque, int version_id)
 {
-    I2CSlave *dev = opaque;
+    i2c_slave *dev = opaque;
     i2c_bus *bus;
     bus = FROM_QBUS(i2c_bus, qdev_get_parent_bus(&dev->qdev));
     if (bus->saved_address == dev->address) {
@@ -191,23 +156,33 @@ static int i2c_slave_post_load(void *opaque, int version_id)
 }
 
 const VMStateDescription vmstate_i2c_slave = {
-    .name = "I2CSlave",
+    .name = "i2c_slave",
     .version_id = 1,
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
     .post_load = i2c_slave_post_load,
     .fields      = (VMStateField []) {
-        VMSTATE_UINT8(address, I2CSlave),
+        VMSTATE_UINT8(address, i2c_slave),
         VMSTATE_END_OF_LIST()
     }
 };
 
-static int i2c_slave_qdev_init(DeviceState *dev)
+static int i2c_slave_qdev_init(DeviceState *dev, DeviceInfo *base)
 {
-    I2CSlave *s = I2C_SLAVE_FROM_QDEV(dev);
-    I2CSlaveClass *sc = I2C_SLAVE_GET_CLASS(s);
+    I2CSlaveInfo *info = container_of(base, I2CSlaveInfo, qdev);
+    i2c_slave *s = I2C_SLAVE_FROM_QDEV(dev);
 
-    return sc->init(s);
+    s->info = info;
+
+    return info->init(s);
+}
+
+void i2c_register_slave(I2CSlaveInfo *info)
+{
+    assert(info->qdev.size >= sizeof(i2c_slave));
+    info->qdev.init = i2c_slave_qdev_init;
+    info->qdev.bus_info = &i2c_bus_info;
+    qdev_register(&info->qdev);
 }
 
 DeviceState *i2c_create_slave(i2c_bus *bus, const char *name, uint8_t addr)
@@ -219,28 +194,3 @@ DeviceState *i2c_create_slave(i2c_bus *bus, const char *name, uint8_t addr)
     qdev_init_nofail(dev);
     return dev;
 }
-
-static void i2c_slave_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *k = DEVICE_CLASS(klass);
-    k->init = i2c_slave_qdev_init;
-    k->bus_type = TYPE_I2C_BUS;
-    k->props = i2c_props;
-}
-
-static TypeInfo i2c_slave_type_info = {
-    .name = TYPE_I2C_SLAVE,
-    .parent = TYPE_DEVICE,
-    .instance_size = sizeof(I2CSlave),
-    .abstract = true,
-    .class_size = sizeof(I2CSlaveClass),
-    .class_init = i2c_slave_class_init,
-};
-
-static void i2c_slave_register_types(void)
-{
-    type_register_static(&i2c_bus_info);
-    type_register_static(&i2c_slave_type_info);
-}
-
-type_init(i2c_slave_register_types)

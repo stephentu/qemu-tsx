@@ -42,7 +42,7 @@ typedef struct IB700state {
 
 /* This is the timer.  We use a global here because the watchdog
  * code ensures there is only one watchdog (it is located at a fixed,
- * unchangeable IO port, so there could only ever be one anyway).
+ * unchangable IO port, so there could only ever be one anyway).
  */
 
 /* A write to this register enables the timer. */
@@ -58,7 +58,7 @@ static void ib700_write_enable_reg(void *vp, uint32_t addr, uint32_t data)
     ib700_debug("addr = %x, data = %x\n", addr, data);
 
     timeout = (int64_t) time_map[data & 0xF] * get_ticks_per_sec();
-    qemu_mod_timer(s->timer, qemu_get_clock_ns (vm_clock) + timeout);
+    qemu_mod_timer(s->timer, qemu_get_clock (vm_clock) + timeout);
 }
 
 /* A write (of any value) to this register disables the timer. */
@@ -99,7 +99,7 @@ static int wdt_ib700_init(ISADevice *dev)
 
     ib700_debug("watchdog init\n");
 
-    s->timer = qemu_new_timer_ns(vm_clock, ib700_timer_expired, s);
+    s->timer = qemu_new_timer(vm_clock, ib700_timer_expired, s);
     register_ioport_write(0x441, 2, 1, ib700_write_disable_reg, s);
     register_ioport_write(0x443, 2, 1, ib700_write_enable_reg, s);
 
@@ -120,26 +120,18 @@ static WatchdogTimerModel model = {
     .wdt_description = "iBASE 700",
 };
 
-static void wdt_ib700_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
-    ic->init = wdt_ib700_init;
-    dc->reset = wdt_ib700_reset;
-    dc->vmsd = &vmstate_ib700;
-}
-
-static TypeInfo wdt_ib700_info = {
-    .name          = "ib700",
-    .parent        = TYPE_ISA_DEVICE,
-    .instance_size = sizeof(IB700State),
-    .class_init    = wdt_ib700_class_init,
+static ISADeviceInfo wdt_ib700_info = {
+    .qdev.name  = "ib700",
+    .qdev.size  = sizeof(IB700State),
+    .qdev.vmsd  = &vmstate_ib700,
+    .qdev.reset = wdt_ib700_reset,
+    .init       = wdt_ib700_init,
 };
 
-static void wdt_ib700_register_types(void)
+static void wdt_ib700_register_devices(void)
 {
     watchdog_add_model(&model);
-    type_register_static(&wdt_ib700_info);
+    isa_qdev_register(&wdt_ib700_info);
 }
 
-type_init(wdt_ib700_register_types)
+device_init(wdt_ib700_register_devices);

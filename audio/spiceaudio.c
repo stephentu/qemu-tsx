@@ -81,7 +81,7 @@ static void spice_audio_fini (void *opaque)
 static void rate_start (SpiceRateCtl *rate)
 {
     memset (rate, 0, sizeof (*rate));
-    rate->start_ticks = qemu_get_clock_ns (vm_clock);
+    rate->start_ticks = qemu_get_clock (vm_clock);
 }
 
 static int rate_get_samples (struct audio_pcm_info *info, SpiceRateCtl *rate)
@@ -91,7 +91,7 @@ static int rate_get_samples (struct audio_pcm_info *info, SpiceRateCtl *rate)
     int64_t bytes;
     int64_t samples;
 
-    now = qemu_get_clock_ns (vm_clock);
+    now = qemu_get_clock (vm_clock);
     ticks = now - rate->start_ticks;
     bytes = muldiv64 (ticks, info->bytes_per_second, get_ticks_per_sec ());
     samples = (bytes - rate->bytes_sent) >> info->shift;
@@ -202,26 +202,7 @@ static int line_out_ctl (HWVoiceOut *hw, int cmd, ...)
         }
         spice_server_playback_stop (&out->sin);
         break;
-    case VOICE_VOLUME:
-        {
-#if ((SPICE_INTERFACE_PLAYBACK_MAJOR >= 1) && (SPICE_INTERFACE_PLAYBACK_MINOR >= 2))
-            SWVoiceOut *sw;
-            va_list ap;
-            uint16_t vol[2];
-
-            va_start (ap, cmd);
-            sw = va_arg (ap, SWVoiceOut *);
-            va_end (ap);
-
-            vol[0] = sw->vol.l / ((1ULL << 16) + 1);
-            vol[1] = sw->vol.r / ((1ULL << 16) + 1);
-            spice_server_playback_set_volume (&out->sin, 2, vol);
-            spice_server_playback_set_mute (&out->sin, sw->vol.mute);
-#endif
-            break;
-        }
     }
-
     return 0;
 }
 
@@ -323,26 +304,7 @@ static int line_in_ctl (HWVoiceIn *hw, int cmd, ...)
         in->active = 0;
         spice_server_record_stop (&in->sin);
         break;
-    case VOICE_VOLUME:
-        {
-#if ((SPICE_INTERFACE_RECORD_MAJOR >= 2) && (SPICE_INTERFACE_RECORD_MINOR >= 2))
-            SWVoiceIn *sw;
-            va_list ap;
-            uint16_t vol[2];
-
-            va_start (ap, cmd);
-            sw = va_arg (ap, SWVoiceIn *);
-            va_end (ap);
-
-            vol[0] = sw->vol.l / ((1ULL << 16) + 1);
-            vol[1] = sw->vol.r / ((1ULL << 16) + 1);
-            spice_server_record_set_volume (&in->sin, 2, vol);
-            spice_server_record_set_mute (&in->sin, sw->vol.mute);
-#endif
-            break;
-        }
     }
-
     return 0;
 }
 
@@ -375,9 +337,6 @@ struct audio_driver spice_audio_driver = {
     .max_voices_in  = 1,
     .voice_size_out = sizeof (SpiceVoiceOut),
     .voice_size_in  = sizeof (SpiceVoiceIn),
-#if ((SPICE_INTERFACE_PLAYBACK_MAJOR >= 1) && (SPICE_INTERFACE_PLAYBACK_MINOR >= 2))
-    .ctl_caps       = VOICE_VOLUME_CAP
-#endif
 };
 
 void qemu_spice_audio_init (void)

@@ -72,7 +72,7 @@ static void winwave_log_mmresult (MMRESULT mr)
         break;
 
     case MMSYSERR_NOMEM:
-        str = "Unable to allocate or lock memory";
+        str = "Unable to allocate or locl memory";
         break;
 
     case WAVERR_SYNC:
@@ -222,9 +222,9 @@ static int winwave_init_out (HWVoiceOut *hw, struct audsettings *as)
     return 0;
 
  err4:
-    g_free (wave->pcm_buf);
+    qemu_free (wave->pcm_buf);
  err3:
-    g_free (wave->hdrs);
+    qemu_free (wave->hdrs);
  err2:
     winwave_anal_close_out (wave);
  err1:
@@ -310,10 +310,10 @@ static void winwave_fini_out (HWVoiceOut *hw)
         wave->event = NULL;
     }
 
-    g_free (wave->pcm_buf);
+    qemu_free (wave->pcm_buf);
     wave->pcm_buf = NULL;
 
-    g_free (wave->hdrs);
+    qemu_free (wave->hdrs);
     wave->hdrs = NULL;
 }
 
@@ -349,15 +349,21 @@ static int winwave_ctl_out (HWVoiceOut *hw, int cmd, ...)
             else {
                 hw->poll_mode = 0;
             }
-            wave->paused = 0;
+            if (wave->paused) {
+                mr = waveOutRestart (wave->hwo);
+                if (mr != MMSYSERR_NOERROR) {
+                    winwave_logerr (mr, "waveOutRestart");
+                }
+                wave->paused = 0;
+            }
         }
         return 0;
 
     case VOICE_DISABLE:
         if (!wave->paused) {
-            mr = waveOutReset (wave->hwo);
+            mr = waveOutPause (wave->hwo);
             if (mr != MMSYSERR_NOERROR) {
-                winwave_logerr (mr, "waveOutReset");
+                winwave_logerr (mr, "waveOutPause");
             }
             else {
                 wave->paused = 1;
@@ -505,9 +511,9 @@ static int winwave_init_in (HWVoiceIn *hw, struct audsettings *as)
     return 0;
 
  err4:
-    g_free (wave->pcm_buf);
+    qemu_free (wave->pcm_buf);
  err3:
-    g_free (wave->hdrs);
+    qemu_free (wave->hdrs);
  err2:
     winwave_anal_close_in (wave);
  err1:
@@ -544,10 +550,10 @@ static void winwave_fini_in (HWVoiceIn *hw)
         wave->event = NULL;
     }
 
-    g_free (wave->pcm_buf);
+    qemu_free (wave->pcm_buf);
     wave->pcm_buf = NULL;
 
-    g_free (wave->hdrs);
+    qemu_free (wave->hdrs);
     wave->hdrs = NULL;
 }
 

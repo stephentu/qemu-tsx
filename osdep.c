@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -47,53 +46,8 @@ extern int madvise(caddr_t, size_t, int);
 
 #include "qemu-common.h"
 #include "trace.h"
+#include "sysemu.h"
 #include "qemu_socket.h"
-#include "monitor.h"
-
-static bool fips_enabled = false;
-
-static const char *qemu_version = QEMU_VERSION;
-
-static int default_fdset_get_fd(int64_t fdset_id, int flags)
-{
-    return -1;
-}
-QEMU_WEAK_ALIAS(monitor_fdset_get_fd, default_fdset_get_fd);
-#define monitor_fdset_get_fd \
-    QEMU_WEAK_REF(monitor_fdset_get_fd, default_fdset_get_fd)
-
-static int default_fdset_dup_fd_add(int64_t fdset_id, int dup_fd)
-{
-    return -1;
-}
-QEMU_WEAK_ALIAS(monitor_fdset_dup_fd_add, default_fdset_dup_fd_add);
-#define monitor_fdset_dup_fd_add \
-    QEMU_WEAK_REF(monitor_fdset_dup_fd_add, default_fdset_dup_fd_add)
-
-static int default_fdset_dup_fd_remove(int dup_fd)
-{
-    return -1;
-}
-QEMU_WEAK_ALIAS(monitor_fdset_dup_fd_remove, default_fdset_dup_fd_remove);
-#define monitor_fdset_dup_fd_remove \
-    QEMU_WEAK_REF(monitor_fdset_dup_fd_remove, default_fdset_dup_fd_remove)
-
-static int default_fdset_dup_fd_find(int dup_fd)
-{
-    return -1;
-}
-QEMU_WEAK_ALIAS(monitor_fdset_dup_fd_find, default_fdset_dup_fd_find);
-#define monitor_fdset_dup_fd_find \
-    QEMU_WEAK_REF(monitor_fdset_dup_fd_remove, default_fdset_dup_fd_find)
-
-int socket_set_cork(int fd, int v)
-{
-#if defined(SOL_TCP) && defined(TCP_CORK)
-    return setsockopt(fd, SOL_TCP, TCP_CORK, &v, sizeof(v));
-#else
-    return 0;
-#endif
-}
 
 int qemu_madvise(void *addr, size_t len, int advice)
 {
@@ -111,67 +65,6 @@ int qemu_madvise(void *addr, size_t len, int advice)
 #endif
 }
 
-#ifndef _WIN32
-/*
- * Dups an fd and sets the flags
- */
-static int qemu_dup_flags(int fd, int flags)
-{
-    int ret;
-    int serrno;
-    int dup_flags;
-
-#ifdef F_DUPFD_CLOEXEC
-    ret = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-#else
-    ret = dup(fd);
-    if (ret != -1) {
-        qemu_set_cloexec(ret);
-    }
-#endif
-    if (ret == -1) {
-        goto fail;
-    }
-
-    dup_flags = fcntl(ret, F_GETFL);
-    if (dup_flags == -1) {
-        goto fail;
-    }
-
-    if ((flags & O_SYNC) != (dup_flags & O_SYNC)) {
-        errno = EINVAL;
-        goto fail;
-    }
-
-    /* Set/unset flags that we can with fcntl */
-    if (fcntl(ret, F_SETFL, flags) == -1) {
-        goto fail;
-    }
-
-    /* Truncate the file in the cases that open() would truncate it */
-    if (flags & O_TRUNC ||
-            ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))) {
-        if (ftruncate(ret, 0) == -1) {
-            goto fail;
-        }
-    }
-
-    return ret;
-
-fail:
-    serrno = errno;
-    if (ret != -1) {
-        close(ret);
-    }
-    errno = serrno;
-    return -1;
-}
-
-static int qemu_parse_fdset(const char *param)
-{
-    return qemu_parse_fd(param);
-}
-#endif
 
 /*
  * Opens a file with FD_CLOEXEC set
@@ -180,41 +73,6 @@ int qemu_open(const char *name, int flags, ...)
 {
     int ret;
     int mode = 0;
-
-#ifndef _WIN32
-    const char *fdset_id_str;
-
-    /* Attempt dup of fd from fd set */
-    if (strstart(name, "/dev/fdset/", &fdset_id_str)) {
-        int64_t fdset_id;
-        int fd, dupfd;
-
-        fdset_id = qemu_parse_fdset(fdset_id_str);
-        if (fdset_id == -1) {
-            errno = EINVAL;
-            return -1;
-        }
-
-        fd = monitor_fdset_get_fd(fdset_id, flags);
-        if (fd == -1) {
-            return -1;
-        }
-
-        dupfd = qemu_dup_flags(fd, flags);
-        if (dupfd == -1) {
-            return -1;
-        }
-
-        ret = monitor_fdset_dup_fd_add(fdset_id, dupfd);
-        if (ret == -1) {
-            close(dupfd);
-            errno = EINVAL;
-            return -1;
-        }
-
-        return dupfd;
-    }
-#endif
 
     if (flags & O_CREAT) {
         va_list ap;
@@ -234,26 +92,6 @@ int qemu_open(const char *name, int flags, ...)
 #endif
 
     return ret;
-}
-
-int qemu_close(int fd)
-{
-    int64_t fdset_id;
-
-    /* Close fd that was dup'd from an fdset */
-    fdset_id = monitor_fdset_dup_fd_find(fd);
-    if (fdset_id != -1) {
-        int ret;
-
-        ret = close(fd);
-        if (ret == 0) {
-            monitor_fdset_dup_fd_remove(fd);
-        }
-
-        return ret;
-    }
-
-    return close(fd);
 }
 
 /*
@@ -329,106 +167,3 @@ int qemu_accept(int s, struct sockaddr *addr, socklen_t *addrlen)
 
     return ret;
 }
-
-/*
- * A variant of send(2) which handles partial write.
- *
- * Return the number of bytes transferred, which is only
- * smaller than `count' if there is an error.
- *
- * This function won't work with non-blocking fd's.
- * Any of the possibilities with non-bloking fd's is bad:
- *   - return a short write (then name is wrong)
- *   - busy wait adding (errno == EAGAIN) to the loop
- */
-ssize_t qemu_send_full(int fd, const void *buf, size_t count, int flags)
-{
-    ssize_t ret = 0;
-    ssize_t total = 0;
-
-    while (count) {
-        ret = send(fd, buf, count, flags);
-        if (ret < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-
-        count -= ret;
-        buf += ret;
-        total += ret;
-    }
-
-    return total;
-}
-
-/*
- * A variant of recv(2) which handles partial write.
- *
- * Return the number of bytes transferred, which is only
- * smaller than `count' if there is an error.
- *
- * This function won't work with non-blocking fd's.
- * Any of the possibilities with non-bloking fd's is bad:
- *   - return a short write (then name is wrong)
- *   - busy wait adding (errno == EAGAIN) to the loop
- */
-ssize_t qemu_recv_full(int fd, void *buf, size_t count, int flags)
-{
-    ssize_t ret = 0;
-    ssize_t total = 0;
-
-    while (count) {
-        ret = qemu_recv(fd, buf, count, flags);
-        if (ret <= 0) {
-            if (ret < 0 && errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-
-        count -= ret;
-        buf += ret;
-        total += ret;
-    }
-
-    return total;
-}
-
-void qemu_set_version(const char *version)
-{
-    qemu_version = version;
-}
-
-const char *qemu_get_version(void)
-{
-    return qemu_version;
-}
-
-void fips_set_state(bool requested)
-{
-#ifdef __linux__
-    if (requested) {
-        FILE *fds = fopen("/proc/sys/crypto/fips_enabled", "r");
-        if (fds != NULL) {
-            fips_enabled = (fgetc(fds) == '1');
-            fclose(fds);
-        }
-    }
-#else
-    fips_enabled = false;
-#endif /* __linux__ */
-
-#ifdef _FIPS_DEBUG
-    fprintf(stderr, "FIPS mode %s (requested %s)\n",
-	    (fips_enabled ? "enabled" : "disabled"),
-	    (requested ? "enabled" : "disabled"));
-#endif
-}
-
-bool fips_get_state(void)
-{
-    return fips_enabled;
-}
-

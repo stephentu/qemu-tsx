@@ -24,75 +24,70 @@
 
 typedef struct EmptySlot {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint64_t size;
 } EmptySlot;
 
-static uint64_t empty_slot_read(void *opaque, hwaddr addr,
-                                unsigned size)
+static uint32_t empty_slot_readl(void *opaque, target_phys_addr_t addr)
 {
     DPRINTF("read from " TARGET_FMT_plx "\n", addr);
     return 0;
 }
 
-static void empty_slot_write(void *opaque, hwaddr addr,
-                             uint64_t val, unsigned size)
+static void empty_slot_writel(void *opaque, target_phys_addr_t addr,
+                              uint32_t val)
 {
-    DPRINTF("write 0x%x to " TARGET_FMT_plx "\n", (unsigned)val, addr);
+    DPRINTF("write 0x%x to " TARGET_FMT_plx "\n", val, addr);
 }
 
-static const MemoryRegionOps empty_slot_ops = {
-    .read = empty_slot_read,
-    .write = empty_slot_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+CPUReadMemoryFunc * const empty_slot_read[3] = {
+    empty_slot_readl,
+    empty_slot_readl,
+    empty_slot_readl,
 };
 
-void empty_slot_init(hwaddr addr, uint64_t slot_size)
+static CPUWriteMemoryFunc * const empty_slot_write[3] = {
+    empty_slot_writel,
+    empty_slot_writel,
+    empty_slot_writel,
+};
+
+void empty_slot_init(target_phys_addr_t addr, uint64_t slot_size)
 {
-    if (slot_size > 0) {
-        /* Only empty slots larger than 0 byte need handling. */
-        DeviceState *dev;
-        SysBusDevice *s;
-        EmptySlot *e;
+    DeviceState *dev;
+    SysBusDevice *s;
+    EmptySlot *e;
 
-        dev = qdev_create(NULL, "empty_slot");
-        s = sysbus_from_qdev(dev);
-        e = FROM_SYSBUS(EmptySlot, s);
-        e->size = slot_size;
+    dev = qdev_create(NULL, "empty_slot");
+    s = sysbus_from_qdev(dev);
+    e = FROM_SYSBUS(EmptySlot, s);
+    e->size = slot_size;
 
-        qdev_init_nofail(dev);
+    qdev_init_nofail(dev);
 
-        sysbus_mmio_map(s, 0, addr);
-    }
+    sysbus_mmio_map(s, 0, addr);
 }
 
 static int empty_slot_init1(SysBusDevice *dev)
 {
     EmptySlot *s = FROM_SYSBUS(EmptySlot, dev);
+    ram_addr_t empty_slot_offset;
 
-    memory_region_init_io(&s->iomem, &empty_slot_ops, s,
-                          "empty-slot", s->size);
-    sysbus_init_mmio(dev, &s->iomem);
+    empty_slot_offset = cpu_register_io_memory(empty_slot_read,
+                                               empty_slot_write, s,
+                                               DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, s->size, empty_slot_offset | IO_MEM_RAM);
     return 0;
 }
 
-static void empty_slot_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = empty_slot_init1;
-}
-
-static TypeInfo empty_slot_info = {
-    .name          = "empty_slot",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(EmptySlot),
-    .class_init    = empty_slot_class_init,
+static SysBusDeviceInfo empty_slot_info = {
+    .init = empty_slot_init1,
+    .qdev.name  = "empty_slot",
+    .qdev.size  = sizeof(EmptySlot),
 };
 
-static void empty_slot_register_types(void)
+static void empty_slot_register_devices(void)
 {
-    type_register_static(&empty_slot_info);
+    sysbus_register_withprop(&empty_slot_info);
 }
 
-type_init(empty_slot_register_types)
+device_init(empty_slot_register_devices);

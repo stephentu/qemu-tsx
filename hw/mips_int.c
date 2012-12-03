@@ -26,7 +26,7 @@
 
 static void cpu_mips_irq_request(void *opaque, int irq, int level)
 {
-    CPUMIPSState *env = (CPUMIPSState *)opaque;
+    CPUState *env = (CPUState *)opaque;
 
     if (irq < 0 || irq > 7)
         return;
@@ -44,7 +44,7 @@ static void cpu_mips_irq_request(void *opaque, int irq, int level)
     }
 }
 
-void cpu_mips_irq_init_cpu(CPUMIPSState *env)
+void cpu_mips_irq_init_cpu(CPUState *env)
 {
     qemu_irq *qi;
     int i;
@@ -55,7 +55,7 @@ void cpu_mips_irq_init_cpu(CPUMIPSState *env)
     }
 }
 
-void cpu_mips_soft_irq(CPUMIPSState *env, int irq, int level)
+void cpu_mips_soft_irq(CPUState *env, int irq, int level)
 {
     if (irq < 0 || irq > 2) {
         return;

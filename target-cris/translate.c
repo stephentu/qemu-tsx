@@ -23,12 +23,20 @@
  * The condition code translation is in need of attention.
  */
 
+#include <stdarg.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+
 #include "cpu.h"
+#include "exec-all.h"
 #include "disas.h"
 #include "tcg-op.h"
 #include "helper.h"
 #include "mmu.h"
 #include "crisv32-decode.h"
+#include "qemu-common.h"
 
 #define GEN_HELPER 1
 #include "helper.h"
@@ -74,11 +82,11 @@ static TCGv env_pc;
 
 /* This is the state at translation time.  */
 typedef struct DisasContext {
-	CPUCRISState *env;
+	CPUState *env;
 	target_ulong pc, ppc;
 
 	/* Decoder.  */
-        unsigned int (*decoder)(CPUCRISState *env, struct DisasContext *dc);
+	unsigned int (*decoder)(struct DisasContext *dc);
 	uint32_t ir;
 	uint32_t opcode;
 	unsigned int op1;
@@ -160,9 +168,9 @@ static int preg_sizes[] = {
 };
 
 #define t_gen_mov_TN_env(tn, member) \
- _t_gen_mov_TN_env((tn), offsetof(CPUCRISState, member))
+ _t_gen_mov_TN_env((tn), offsetof(CPUState, member))
 #define t_gen_mov_env_TN(member, tn) \
- _t_gen_mov_env_TN(offsetof(CPUCRISState, member), (tn))
+ _t_gen_mov_env_TN(offsetof(CPUState, member), (tn))
 
 static inline void t_gen_mov_TN_reg(TCGv tn, int r)
 {
@@ -179,13 +187,13 @@ static inline void t_gen_mov_reg_TN(int r, TCGv tn)
 
 static inline void _t_gen_mov_TN_env(TCGv tn, int offset)
 {
-	if (offset > sizeof (CPUCRISState))
+	if (offset > sizeof (CPUState))
 		fprintf(stderr, "wrong load from env from off=%d\n", offset);
 	tcg_gen_ld_tl(tn, cpu_env, offset);
 }
 static inline void _t_gen_mov_env_TN(int offset, TCGv tn)
 {
-	if (offset > sizeof (CPUCRISState))
+	if (offset > sizeof (CPUState))
 		fprintf(stderr, "wrong store to env at off=%d\n", offset);
 	tcg_gen_st_tl(tn, cpu_env, offset);
 }
@@ -211,9 +219,9 @@ static inline void t_gen_mov_preg_TN(DisasContext *dc, int r, TCGv tn)
 		tcg_gen_andi_tl(cpu_PR[r], tn, 3);
 	else {
 		if (r == PR_PID) 
-                        gen_helper_tlb_flush_pid(cpu_env, tn);
+			gen_helper_tlb_flush_pid(tn);
 		if (dc->tb_flags & S_FLAG && r == PR_SPC) 
-                        gen_helper_spc_write(cpu_env, tn);
+			gen_helper_spc_write(tn);
 		else if (r == PR_CCS)
 			dc->cpustate_changed = 1;
 		tcg_gen_mov_tl(cpu_PR[r], tn);
@@ -233,7 +241,7 @@ static int sign_extend(unsigned int val, unsigned int width)
 	return sval;
 }
 
-static int cris_fetch(CPUCRISState *env, DisasContext *dc, uint32_t addr,
+static int cris_fetch(DisasContext *dc, uint32_t addr,
 		      unsigned int size, unsigned int sign)
 {
 	int r;
@@ -241,24 +249,24 @@ static int cris_fetch(CPUCRISState *env, DisasContext *dc, uint32_t addr,
 	switch (size) {
 		case 4:
 		{
-                        r = cpu_ldl_code(env, addr);
+			r = ldl_code(addr);
 			break;
 		}
 		case 2:
 		{
 			if (sign) {
-                                r = cpu_ldsw_code(env, addr);
+				r = ldsw_code(addr);
 			} else {
-                                r = cpu_lduw_code(env, addr);
+				r = lduw_code(addr);
 			}
 			break;
 		}
 		case 1:
 		{
 			if (sign) {
-                                r = cpu_ldsb_code(env, addr);
+				r = ldsb_code(addr);
 			} else {
-                                r = cpu_ldub_code(env, addr);
+				r = ldub_code(addr);
 			}
 			break;
 		}
@@ -278,7 +286,7 @@ static void cris_lock_irq(DisasContext *dc)
 static inline void t_gen_raise_exception(uint32_t index)
 {
         TCGv_i32 tmp = tcg_const_i32(index);
-        gen_helper_raise_exception(cpu_env, tmp);
+	gen_helper_raise_exception(tmp);
         tcg_temp_free_i32(tmp);
 }
 
@@ -588,7 +596,7 @@ static void gen_goto_tb(DisasContext *dc, int n, target_ulong dest)
 	if ((tb->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK)) {
 		tcg_gen_goto_tb(n);
 		tcg_gen_movi_tl(env_pc, dest);
-                tcg_gen_exit_tb((tcg_target_long)tb + n);
+		tcg_gen_exit_tb((long)tb + n);
 	} else {
 		tcg_gen_movi_tl(env_pc, dest);
 		tcg_gen_exit_tb(0);
@@ -624,17 +632,17 @@ static void cris_evaluate_flags(DisasContext *dc)
 	switch (dc->cc_op)
 	{
 	case CC_OP_MCP:
-                gen_helper_evaluate_flags_mcp(cpu_PR[PR_CCS], cpu_env,
+		gen_helper_evaluate_flags_mcp(cpu_PR[PR_CCS],
 					cpu_PR[PR_CCS], cc_src,
 					cc_dest, cc_result);
 		break;
 	case CC_OP_MULS:
-                gen_helper_evaluate_flags_muls(cpu_PR[PR_CCS], cpu_env,
+		gen_helper_evaluate_flags_muls(cpu_PR[PR_CCS],
 					cpu_PR[PR_CCS], cc_result,
 					cpu_PR[PR_MOF]);
 		break;
 	case CC_OP_MULU:
-                gen_helper_evaluate_flags_mulu(cpu_PR[PR_CCS], cpu_env,
+		gen_helper_evaluate_flags_mulu(cpu_PR[PR_CCS],
 					cpu_PR[PR_CCS], cc_result,
 					cpu_PR[PR_MOF]);
 		break;
@@ -648,15 +656,15 @@ static void cris_evaluate_flags(DisasContext *dc)
 		switch (dc->cc_size)
 		{
 		case 4:
-                        gen_helper_evaluate_flags_move_4(cpu_PR[PR_CCS],
-                                           cpu_env, cpu_PR[PR_CCS], cc_result);
+			gen_helper_evaluate_flags_move_4(cpu_PR[PR_CCS],
+						cpu_PR[PR_CCS], cc_result);
 			break;
 		case 2:
-                        gen_helper_evaluate_flags_move_2(cpu_PR[PR_CCS],
-                                           cpu_env, cpu_PR[PR_CCS], cc_result);
+			gen_helper_evaluate_flags_move_2(cpu_PR[PR_CCS],
+						cpu_PR[PR_CCS], cc_result);
 			break;
 		default:
-                        gen_helper_evaluate_flags(cpu_env);
+			gen_helper_evaluate_flags();
 			break;
 		}
 		break;
@@ -666,21 +674,21 @@ static void cris_evaluate_flags(DisasContext *dc)
 	case CC_OP_SUB:
 	case CC_OP_CMP:
 		if (dc->cc_size == 4)
-                        gen_helper_evaluate_flags_sub_4(cpu_PR[PR_CCS], cpu_env,
+			gen_helper_evaluate_flags_sub_4(cpu_PR[PR_CCS],
 				cpu_PR[PR_CCS], cc_src, cc_dest, cc_result);
 		else
-                        gen_helper_evaluate_flags(cpu_env);
+			gen_helper_evaluate_flags();
 
 		break;
 	default:
 		switch (dc->cc_size)
 		{
 			case 4:
-                        gen_helper_evaluate_flags_alu_4(cpu_PR[PR_CCS], cpu_env,
+			gen_helper_evaluate_flags_alu_4(cpu_PR[PR_CCS],
 				cpu_PR[PR_CCS], cc_src, cc_dest, cc_result);
 				break;
 			default:
-                                gen_helper_evaluate_flags(cpu_env);
+				gen_helper_evaluate_flags();
 				break;
 		}
 		break;
@@ -1304,8 +1312,8 @@ static void dec_prep_alu_r(DisasContext *dc, int rs, int rd,
 		t_gen_zext(dst, cpu_R[rd], size);
 }
 
-static int dec_prep_move_m(CPUCRISState *env, DisasContext *dc,
-                           int s_ext, int memsize, TCGv dst)
+static int dec_prep_move_m(DisasContext *dc, int s_ext, int memsize,
+			   TCGv dst)
 {
 	unsigned int rs;
 	uint32_t imm;
@@ -1321,7 +1329,7 @@ static int dec_prep_move_m(CPUCRISState *env, DisasContext *dc,
 		if (memsize == 1)
 			insn_len++;
 
-                imm = cris_fetch(env, dc, dc->pc + 2, memsize, s_ext);
+		imm = cris_fetch(dc, dc->pc + 2, memsize, s_ext);
 		tcg_gen_movi_tl(dst, imm);
 		dc->postinc = 0;
 	} else {
@@ -1338,12 +1346,12 @@ static int dec_prep_move_m(CPUCRISState *env, DisasContext *dc,
 /* Prepare T0 and T1 for a memory + alu operation.
    s_ext decides if the operand1 should be sign-extended or zero-extended when
    needed.  */
-static int dec_prep_alu_m(CPUCRISState *env, DisasContext *dc,
-                          int s_ext, int memsize, TCGv dst, TCGv src)
+static int dec_prep_alu_m(DisasContext *dc, int s_ext, int memsize,
+			  TCGv dst, TCGv src)
 {
 	int insn_len;
 
-        insn_len = dec_prep_move_m(env, dc, s_ext, memsize, src);
+	insn_len = dec_prep_move_m(dc, s_ext, memsize, src);
 	tcg_gen_mov_tl(dst, cpu_R[dc->op2]);
 	return insn_len;
 }
@@ -1362,7 +1370,7 @@ static const char *cc_name(int cc)
 
 /* Start of insn decoders.  */
 
-static int dec_bccq(CPUCRISState *env, DisasContext *dc)
+static int dec_bccq(DisasContext *dc)
 {
 	int32_t offset;
 	int sign;
@@ -1382,7 +1390,7 @@ static int dec_bccq(CPUCRISState *env, DisasContext *dc)
 	cris_prepare_cc_branch (dc, offset, cond);
 	return 2;
 }
-static int dec_addoq(CPUCRISState *env, DisasContext *dc)
+static int dec_addoq(DisasContext *dc)
 {
 	int32_t imm;
 
@@ -1396,7 +1404,7 @@ static int dec_addoq(CPUCRISState *env, DisasContext *dc)
 
 	return 2;
 }
-static int dec_addq(CPUCRISState *env, DisasContext *dc)
+static int dec_addq(DisasContext *dc)
 {
 	LOG_DIS("addq %u, $r%u\n", dc->op1, dc->op2);
 
@@ -1408,7 +1416,7 @@ static int dec_addq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], tcg_const_tl(dc->op1), 4);
 	return 2;
 }
-static int dec_moveq(CPUCRISState *env, DisasContext *dc)
+static int dec_moveq(DisasContext *dc)
 {
 	uint32_t imm;
 
@@ -1419,7 +1427,7 @@ static int dec_moveq(CPUCRISState *env, DisasContext *dc)
 	tcg_gen_movi_tl(cpu_R[dc->op2], imm);
 	return 2;
 }
-static int dec_subq(CPUCRISState *env, DisasContext *dc)
+static int dec_subq(DisasContext *dc)
 {
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 5);
 
@@ -1430,7 +1438,7 @@ static int dec_subq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], tcg_const_tl(dc->op1), 4);
 	return 2;
 }
-static int dec_cmpq(CPUCRISState *env, DisasContext *dc)
+static int dec_cmpq(DisasContext *dc)
 {
 	uint32_t imm;
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 5);
@@ -1443,7 +1451,7 @@ static int dec_cmpq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], tcg_const_tl(imm), 4);
 	return 2;
 }
-static int dec_andq(CPUCRISState *env, DisasContext *dc)
+static int dec_andq(DisasContext *dc)
 {
 	uint32_t imm;
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 5);
@@ -1456,7 +1464,7 @@ static int dec_andq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], tcg_const_tl(imm), 4);
 	return 2;
 }
-static int dec_orq(CPUCRISState *env, DisasContext *dc)
+static int dec_orq(DisasContext *dc)
 {
 	uint32_t imm;
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 5);
@@ -1468,14 +1476,14 @@ static int dec_orq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], tcg_const_tl(imm), 4);
 	return 2;
 }
-static int dec_btstq(CPUCRISState *env, DisasContext *dc)
+static int dec_btstq(DisasContext *dc)
 {
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 4);
 	LOG_DIS("btstq %u, $r%d\n", dc->op1, dc->op2);
 
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_evaluate_flags(dc);
-        gen_helper_btst(cpu_PR[PR_CCS], cpu_env, cpu_R[dc->op2],
+	gen_helper_btst(cpu_PR[PR_CCS], cpu_R[dc->op2],
 			tcg_const_tl(dc->op1), cpu_PR[PR_CCS]);
 	cris_alu(dc, CC_OP_MOVE,
 		 cpu_R[dc->op2], cpu_R[dc->op2], cpu_R[dc->op2], 4);
@@ -1483,7 +1491,7 @@ static int dec_btstq(CPUCRISState *env, DisasContext *dc)
 	dc->flags_uptodate = 1;
 	return 2;
 }
-static int dec_asrq(CPUCRISState *env, DisasContext *dc)
+static int dec_asrq(DisasContext *dc)
 {
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 4);
 	LOG_DIS("asrq %u, $r%d\n", dc->op1, dc->op2);
@@ -1495,7 +1503,7 @@ static int dec_asrq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], 4);
 	return 2;
 }
-static int dec_lslq(CPUCRISState *env, DisasContext *dc)
+static int dec_lslq(DisasContext *dc)
 {
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 4);
 	LOG_DIS("lslq %u, $r%d\n", dc->op1, dc->op2);
@@ -1509,7 +1517,7 @@ static int dec_lslq(CPUCRISState *env, DisasContext *dc)
 		    cpu_R[dc->op2], cpu_R[dc->op2], 4);
 	return 2;
 }
-static int dec_lsrq(CPUCRISState *env, DisasContext *dc)
+static int dec_lsrq(DisasContext *dc)
 {
 	dc->op1 = EXTRACT_FIELD(dc->ir, 0, 4);
 	LOG_DIS("lsrq %u, $r%d\n", dc->op1, dc->op2);
@@ -1523,7 +1531,7 @@ static int dec_lsrq(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_move_r(CPUCRISState *env, DisasContext *dc)
+static int dec_move_r(DisasContext *dc)
 {
 	int size = memsize_zz(dc);
 
@@ -1551,7 +1559,7 @@ static int dec_move_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_scc_r(CPUCRISState *env, DisasContext *dc)
+static int dec_scc_r(DisasContext *dc)
 {
 	int cond = dc->op2;
 
@@ -1594,7 +1602,7 @@ static inline void cris_alu_free_temps(DisasContext *dc, int size, TCGv *t)
 	}
 }
 
-static int dec_and_r(CPUCRISState *env, DisasContext *dc)
+static int dec_and_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1611,7 +1619,7 @@ static int dec_and_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_lz_r(CPUCRISState *env, DisasContext *dc)
+static int dec_lz_r(DisasContext *dc)
 {
 	TCGv t0;
 	LOG_DIS("lz $r%u, $r%u\n",
@@ -1624,7 +1632,7 @@ static int dec_lz_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_lsl_r(CPUCRISState *env, DisasContext *dc)
+static int dec_lsl_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1641,7 +1649,7 @@ static int dec_lsl_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_lsr_r(CPUCRISState *env, DisasContext *dc)
+static int dec_lsr_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1658,7 +1666,7 @@ static int dec_lsr_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_asr_r(CPUCRISState *env, DisasContext *dc)
+static int dec_asr_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1675,7 +1683,7 @@ static int dec_asr_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_muls_r(CPUCRISState *env, DisasContext *dc)
+static int dec_muls_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1691,7 +1699,7 @@ static int dec_muls_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_mulu_r(CPUCRISState *env, DisasContext *dc)
+static int dec_mulu_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1708,7 +1716,7 @@ static int dec_mulu_r(CPUCRISState *env, DisasContext *dc)
 }
 
 
-static int dec_dstep_r(CPUCRISState *env, DisasContext *dc)
+static int dec_dstep_r(DisasContext *dc)
 {
 	LOG_DIS("dstep $r%u, $r%u\n", dc->op1, dc->op2);
 	cris_cc_mask(dc, CC_MASK_NZ);
@@ -1717,7 +1725,7 @@ static int dec_dstep_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_xor_r(CPUCRISState *env, DisasContext *dc)
+static int dec_xor_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1733,7 +1741,7 @@ static int dec_xor_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_bound_r(CPUCRISState *env, DisasContext *dc)
+static int dec_bound_r(DisasContext *dc)
 {
 	TCGv l0;
 	int size = memsize_zz(dc);
@@ -1747,7 +1755,7 @@ static int dec_bound_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_cmp_r(CPUCRISState *env, DisasContext *dc)
+static int dec_cmp_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1762,7 +1770,7 @@ static int dec_cmp_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_abs_r(CPUCRISState *env, DisasContext *dc)
+static int dec_abs_r(DisasContext *dc)
 {
 	TCGv t0;
 
@@ -1781,7 +1789,7 @@ static int dec_abs_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_add_r(CPUCRISState *env, DisasContext *dc)
+static int dec_add_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1796,7 +1804,7 @@ static int dec_add_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_addc_r(CPUCRISState *env, DisasContext *dc)
+static int dec_addc_r(DisasContext *dc)
 {
 	LOG_DIS("addc $r%u, $r%u\n",
 		    dc->op1, dc->op2);
@@ -1811,7 +1819,7 @@ static int dec_addc_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_mcp_r(CPUCRISState *env, DisasContext *dc)
+static int dec_mcp_r(DisasContext *dc)
 {
 	LOG_DIS("mcp $p%u, $r%u\n",
 		     dc->op2, dc->op1);
@@ -1838,7 +1846,7 @@ static char * swapmode_name(int mode, char *modename) {
 }
 #endif
 
-static int dec_swap_r(CPUCRISState *env, DisasContext *dc)
+static int dec_swap_r(DisasContext *dc)
 {
 	TCGv t0;
 #if DISAS_CRIS
@@ -1864,7 +1872,7 @@ static int dec_swap_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_or_r(CPUCRISState *env, DisasContext *dc)
+static int dec_or_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1878,7 +1886,7 @@ static int dec_or_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_addi_r(CPUCRISState *env, DisasContext *dc)
+static int dec_addi_r(DisasContext *dc)
 {
 	TCGv t0;
 	LOG_DIS("addi.%c $r%u, $r%u\n",
@@ -1891,7 +1899,7 @@ static int dec_addi_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_addi_acr(CPUCRISState *env, DisasContext *dc)
+static int dec_addi_acr(DisasContext *dc)
 {
 	TCGv t0;
 	LOG_DIS("addi.%c $r%u, $r%u, $acr\n",
@@ -1904,7 +1912,7 @@ static int dec_addi_acr(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_neg_r(CPUCRISState *env, DisasContext *dc)
+static int dec_neg_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1919,13 +1927,13 @@ static int dec_neg_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_btst_r(CPUCRISState *env, DisasContext *dc)
+static int dec_btst_r(DisasContext *dc)
 {
 	LOG_DIS("btst $r%u, $r%u\n",
 		    dc->op1, dc->op2);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_evaluate_flags(dc);
-        gen_helper_btst(cpu_PR[PR_CCS], cpu_env, cpu_R[dc->op2],
+	gen_helper_btst(cpu_PR[PR_CCS], cpu_R[dc->op2],
 			cpu_R[dc->op1], cpu_PR[PR_CCS]);
 	cris_alu(dc, CC_OP_MOVE, cpu_R[dc->op2],
 		 cpu_R[dc->op2], cpu_R[dc->op2], 4);
@@ -1934,7 +1942,7 @@ static int dec_btst_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_sub_r(CPUCRISState *env, DisasContext *dc)
+static int dec_sub_r(DisasContext *dc)
 {
 	TCGv t[2];
 	int size = memsize_zz(dc);
@@ -1949,7 +1957,7 @@ static int dec_sub_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Zero extension. From size to dword.  */
-static int dec_movu_r(CPUCRISState *env, DisasContext *dc)
+static int dec_movu_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -1966,7 +1974,7 @@ static int dec_movu_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Sign extension. From size to dword.  */
-static int dec_movs_r(CPUCRISState *env, DisasContext *dc)
+static int dec_movs_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -1985,7 +1993,7 @@ static int dec_movs_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* zero extension. From size to dword.  */
-static int dec_addu_r(CPUCRISState *env, DisasContext *dc)
+static int dec_addu_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -2004,7 +2012,7 @@ static int dec_addu_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Sign extension. From size to dword.  */
-static int dec_adds_r(CPUCRISState *env, DisasContext *dc)
+static int dec_adds_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -2023,7 +2031,7 @@ static int dec_adds_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Zero extension. From size to dword.  */
-static int dec_subu_r(CPUCRISState *env, DisasContext *dc)
+static int dec_subu_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -2042,7 +2050,7 @@ static int dec_subu_r(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Sign extension. From size to dword.  */
-static int dec_subs_r(CPUCRISState *env, DisasContext *dc)
+static int dec_subs_r(DisasContext *dc)
 {
 	TCGv t0;
 	int size = memsize_z(dc);
@@ -2060,7 +2068,7 @@ static int dec_subs_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_setclrf(CPUCRISState *env, DisasContext *dc)
+static int dec_setclrf(DisasContext *dc)
 {
 	uint32_t flags;
 	int set = (~dc->opcode >> 2) & 1;
@@ -2131,24 +2139,22 @@ static int dec_setclrf(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_move_rs(CPUCRISState *env, DisasContext *dc)
+static int dec_move_rs(DisasContext *dc)
 {
 	LOG_DIS("move $r%u, $s%u\n", dc->op1, dc->op2);
 	cris_cc_mask(dc, 0);
-        gen_helper_movl_sreg_reg(cpu_env, tcg_const_tl(dc->op2),
-                                 tcg_const_tl(dc->op1));
+	gen_helper_movl_sreg_reg(tcg_const_tl(dc->op2), tcg_const_tl(dc->op1));
 	return 2;
 }
-static int dec_move_sr(CPUCRISState *env, DisasContext *dc)
+static int dec_move_sr(DisasContext *dc)
 {
 	LOG_DIS("move $s%u, $r%u\n", dc->op2, dc->op1);
 	cris_cc_mask(dc, 0);
-        gen_helper_movl_reg_sreg(cpu_env, tcg_const_tl(dc->op1),
-                                 tcg_const_tl(dc->op2));
+	gen_helper_movl_reg_sreg(tcg_const_tl(dc->op1), tcg_const_tl(dc->op2));
 	return 2;
 }
 
-static int dec_move_rp(CPUCRISState *env, DisasContext *dc)
+static int dec_move_rp(DisasContext *dc)
 {
 	TCGv t[2];
 	LOG_DIS("move $r%u, $p%u\n", dc->op1, dc->op2);
@@ -2178,7 +2184,7 @@ static int dec_move_rp(CPUCRISState *env, DisasContext *dc)
 	tcg_temp_free(t[0]);
 	return 2;
 }
-static int dec_move_pr(CPUCRISState *env, DisasContext *dc)
+static int dec_move_pr(DisasContext *dc)
 {
 	TCGv t0;
 	LOG_DIS("move $p%u, $r%u\n", dc->op2, dc->op1);
@@ -2200,7 +2206,7 @@ static int dec_move_pr(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_move_mr(CPUCRISState *env, DisasContext *dc)
+static int dec_move_mr(DisasContext *dc)
 {
 	int memsize = memsize_zz(dc);
 	int insn_len;
@@ -2210,7 +2216,7 @@ static int dec_move_mr(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	if (memsize == 4) {
-                insn_len = dec_prep_move_m(env, dc, 0, 4, cpu_R[dc->op2]);
+		insn_len = dec_prep_move_m(dc, 0, 4, cpu_R[dc->op2]);
 		cris_cc_mask(dc, CC_MASK_NZ);
 		cris_update_cc_op(dc, CC_OP_MOVE, 4);
 		cris_update_cc_x(dc);
@@ -2220,7 +2226,7 @@ static int dec_move_mr(CPUCRISState *env, DisasContext *dc)
 		TCGv t0;
 
 		t0 = tcg_temp_new();
-                insn_len = dec_prep_move_m(env, dc, 0, memsize, t0);
+		insn_len = dec_prep_move_m(dc, 0, memsize, t0);
 		cris_cc_mask(dc, CC_MASK_NZ);
 		cris_alu(dc, CC_OP_MOVE,
 			    cpu_R[dc->op2], cpu_R[dc->op2], t0, memsize);
@@ -2242,7 +2248,7 @@ static inline void cris_alu_m_free_temps(TCGv *t)
 	tcg_temp_free(t[1]);
 }
 
-static int dec_movs_m(CPUCRISState *env, DisasContext *dc)
+static int dec_movs_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2254,7 +2260,7 @@ static int dec_movs_m(CPUCRISState *env, DisasContext *dc)
 
 	cris_alu_m_alloc_temps(t);
 	/* sign extend.  */
-        insn_len = dec_prep_alu_m(env, dc, 1, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 1, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_alu(dc, CC_OP_MOVE,
 		    cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
@@ -2263,7 +2269,7 @@ static int dec_movs_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_addu_m(CPUCRISState *env, DisasContext *dc)
+static int dec_addu_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2275,7 +2281,7 @@ static int dec_addu_m(CPUCRISState *env, DisasContext *dc)
 
 	cris_alu_m_alloc_temps(t);
 	/* sign extend.  */
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_ADD,
 		    cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
@@ -2284,7 +2290,7 @@ static int dec_addu_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_adds_m(CPUCRISState *env, DisasContext *dc)
+static int dec_adds_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2296,7 +2302,7 @@ static int dec_adds_m(CPUCRISState *env, DisasContext *dc)
 
 	cris_alu_m_alloc_temps(t);
 	/* sign extend.  */
-        insn_len = dec_prep_alu_m(env, dc, 1, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 1, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_ADD, cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2304,7 +2310,7 @@ static int dec_adds_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_subu_m(CPUCRISState *env, DisasContext *dc)
+static int dec_subu_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2316,7 +2322,7 @@ static int dec_subu_m(CPUCRISState *env, DisasContext *dc)
 
 	cris_alu_m_alloc_temps(t);
 	/* sign extend.  */
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_SUB, cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2324,7 +2330,7 @@ static int dec_subu_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_subs_m(CPUCRISState *env, DisasContext *dc)
+static int dec_subs_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2336,7 +2342,7 @@ static int dec_subs_m(CPUCRISState *env, DisasContext *dc)
 
 	cris_alu_m_alloc_temps(t);
 	/* sign extend.  */
-        insn_len = dec_prep_alu_m(env, dc, 1, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 1, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_SUB, cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2344,7 +2350,7 @@ static int dec_subs_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_movu_m(CPUCRISState *env, DisasContext *dc)
+static int dec_movu_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2356,7 +2362,7 @@ static int dec_movu_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_alu(dc, CC_OP_MOVE, cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2364,7 +2370,7 @@ static int dec_movu_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_cmpu_m(CPUCRISState *env, DisasContext *dc)
+static int dec_cmpu_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2375,7 +2381,7 @@ static int dec_cmpu_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_CMP, cpu_R[dc->op2], cpu_R[dc->op2], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2383,7 +2389,7 @@ static int dec_cmpu_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_cmps_m(CPUCRISState *env, DisasContext *dc)
+static int dec_cmps_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_z(dc);
@@ -2394,7 +2400,7 @@ static int dec_cmps_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 1, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 1, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_CMP,
 		    cpu_R[dc->op2], cpu_R[dc->op2], t[1],
@@ -2404,7 +2410,7 @@ static int dec_cmps_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_cmp_m(CPUCRISState *env, DisasContext *dc)
+static int dec_cmp_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2415,7 +2421,7 @@ static int dec_cmp_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_CMP,
 		    cpu_R[dc->op2], cpu_R[dc->op2], t[1],
@@ -2425,7 +2431,7 @@ static int dec_cmp_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_test_m(CPUCRISState *env, DisasContext *dc)
+static int dec_test_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2438,7 +2444,7 @@ static int dec_test_m(CPUCRISState *env, DisasContext *dc)
 	cris_evaluate_flags(dc);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	tcg_gen_andi_tl(cpu_PR[PR_CCS], cpu_PR[PR_CCS], ~3);
 
@@ -2449,7 +2455,7 @@ static int dec_test_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_and_m(CPUCRISState *env, DisasContext *dc)
+static int dec_and_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2460,7 +2466,7 @@ static int dec_and_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_alu(dc, CC_OP_AND, cpu_R[dc->op2], t[0], t[1], memsize_zz(dc));
 	do_postinc(dc, memsize);
@@ -2468,7 +2474,7 @@ static int dec_and_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_add_m(CPUCRISState *env, DisasContext *dc)
+static int dec_add_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2479,7 +2485,7 @@ static int dec_add_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_ADD,
 		 cpu_R[dc->op2], t[0], t[1], memsize_zz(dc));
@@ -2488,7 +2494,7 @@ static int dec_add_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_addo_m(CPUCRISState *env, DisasContext *dc)
+static int dec_addo_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2499,7 +2505,7 @@ static int dec_addo_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 1, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 1, memsize, t[0], t[1]);
 	cris_cc_mask(dc, 0);
 	cris_alu(dc, CC_OP_ADD, cpu_R[R_ACR], t[0], t[1], 4);
 	do_postinc(dc, memsize);
@@ -2507,7 +2513,7 @@ static int dec_addo_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_bound_m(CPUCRISState *env, DisasContext *dc)
+static int dec_bound_m(DisasContext *dc)
 {
 	TCGv l[2];
 	int memsize = memsize_zz(dc);
@@ -2519,7 +2525,7 @@ static int dec_bound_m(CPUCRISState *env, DisasContext *dc)
 
 	l[0] = tcg_temp_local_new();
 	l[1] = tcg_temp_local_new();
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, l[0], l[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, l[0], l[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_alu(dc, CC_OP_BOUND, cpu_R[dc->op2], l[0], l[1], 4);
 	do_postinc(dc, memsize);
@@ -2528,7 +2534,7 @@ static int dec_bound_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_addc_mr(CPUCRISState *env, DisasContext *dc)
+static int dec_addc_mr(DisasContext *dc)
 {
 	TCGv t[2];
 	int insn_len = 2;
@@ -2543,7 +2549,7 @@ static int dec_addc_mr(CPUCRISState *env, DisasContext *dc)
 	dc->flags_x = X_FLAG;
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, 4, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, 4, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_ADDC, cpu_R[dc->op2], t[0], t[1], 4);
 	do_postinc(dc, 4);
@@ -2551,7 +2557,7 @@ static int dec_addc_mr(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_sub_m(CPUCRISState *env, DisasContext *dc)
+static int dec_sub_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2562,7 +2568,7 @@ static int dec_sub_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2, dc->ir, dc->zzsize);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZVC);
 	cris_alu(dc, CC_OP_SUB, cpu_R[dc->op2], t[0], t[1], memsize);
 	do_postinc(dc, memsize);
@@ -2570,7 +2576,7 @@ static int dec_sub_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_or_m(CPUCRISState *env, DisasContext *dc)
+static int dec_or_m(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2581,7 +2587,7 @@ static int dec_or_m(CPUCRISState *env, DisasContext *dc)
 		    dc->op2, dc->pc);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, CC_MASK_NZ);
 	cris_alu(dc, CC_OP_OR,
 		    cpu_R[dc->op2], t[0], t[1], memsize_zz(dc));
@@ -2590,7 +2596,7 @@ static int dec_or_m(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_move_mp(CPUCRISState *env, DisasContext *dc)
+static int dec_move_mp(DisasContext *dc)
 {
 	TCGv t[2];
 	int memsize = memsize_zz(dc);
@@ -2603,7 +2609,7 @@ static int dec_move_mp(CPUCRISState *env, DisasContext *dc)
 		    dc->op2);
 
 	cris_alu_m_alloc_temps(t);
-        insn_len = dec_prep_alu_m(env, dc, 0, memsize, t[0], t[1]);
+	insn_len = dec_prep_alu_m(dc, 0, memsize, t[0], t[1]);
 	cris_cc_mask(dc, 0);
 	if (dc->op2 == PR_CCS) {
 		cris_evaluate_flags(dc);
@@ -2622,7 +2628,7 @@ static int dec_move_mp(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static int dec_move_pm(CPUCRISState *env, DisasContext *dc)
+static int dec_move_pm(DisasContext *dc)
 {
 	TCGv t0;
 	int memsize;
@@ -2648,7 +2654,7 @@ static int dec_move_pm(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_movem_mr(CPUCRISState *env, DisasContext *dc)
+static int dec_movem_mr(DisasContext *dc)
 {
 	TCGv_i64 tmp[16];
         TCGv tmp32;
@@ -2695,7 +2701,7 @@ static int dec_movem_mr(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_movem_rm(CPUCRISState *env, DisasContext *dc)
+static int dec_movem_rm(DisasContext *dc)
 {
 	TCGv tmp;
 	TCGv addr;
@@ -2724,7 +2730,7 @@ static int dec_movem_rm(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_move_rm(CPUCRISState *env, DisasContext *dc)
+static int dec_move_rm(DisasContext *dc)
 {
 	int memsize;
 
@@ -2743,7 +2749,7 @@ static int dec_move_rm(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_lapcq(CPUCRISState *env, DisasContext *dc)
+static int dec_lapcq(DisasContext *dc)
 {
 	LOG_DIS("lapcq %x, $r%u\n",
 		    dc->pc + dc->op1*2, dc->op2);
@@ -2752,7 +2758,7 @@ static int dec_lapcq(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_lapc_im(CPUCRISState *env, DisasContext *dc)
+static int dec_lapc_im(DisasContext *dc)
 {
 	unsigned int rd;
 	int32_t imm;
@@ -2761,7 +2767,7 @@ static int dec_lapc_im(CPUCRISState *env, DisasContext *dc)
 	rd = dc->op2;
 
 	cris_cc_mask(dc, 0);
-        imm = cris_fetch(env, dc, dc->pc + 2, 4, 0);
+	imm = cris_fetch(dc, dc->pc + 2, 4, 0);
 	LOG_DIS("lapc 0x%x, $r%u\n", imm + dc->pc, dc->op2);
 
 	pc = dc->pc;
@@ -2771,7 +2777,7 @@ static int dec_lapc_im(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Jump to special reg.  */
-static int dec_jump_p(CPUCRISState *env, DisasContext *dc)
+static int dec_jump_p(DisasContext *dc)
 {
 	LOG_DIS("jump $p%u\n", dc->op2);
 
@@ -2786,7 +2792,7 @@ static int dec_jump_p(CPUCRISState *env, DisasContext *dc)
 }
 
 /* Jump and save.  */
-static int dec_jas_r(CPUCRISState *env, DisasContext *dc)
+static int dec_jas_r(DisasContext *dc)
 {
 	LOG_DIS("jas $r%u, $p%u\n", dc->op1, dc->op2);
 	cris_cc_mask(dc, 0);
@@ -2800,11 +2806,11 @@ static int dec_jas_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_jas_im(CPUCRISState *env, DisasContext *dc)
+static int dec_jas_im(DisasContext *dc)
 {
 	uint32_t imm;
 
-        imm = cris_fetch(env, dc, dc->pc + 2, 4, 0);
+	imm = cris_fetch(dc, dc->pc + 2, 4, 0);
 
 	LOG_DIS("jas 0x%x\n", imm);
 	cris_cc_mask(dc, 0);
@@ -2816,11 +2822,11 @@ static int dec_jas_im(CPUCRISState *env, DisasContext *dc)
 	return 6;
 }
 
-static int dec_jasc_im(CPUCRISState *env, DisasContext *dc)
+static int dec_jasc_im(DisasContext *dc)
 {
 	uint32_t imm;
 
-        imm = cris_fetch(env, dc, dc->pc + 2, 4, 0);
+	imm = cris_fetch(dc, dc->pc + 2, 4, 0);
 
 	LOG_DIS("jasc 0x%x\n", imm);
 	cris_cc_mask(dc, 0);
@@ -2832,7 +2838,7 @@ static int dec_jasc_im(CPUCRISState *env, DisasContext *dc)
 	return 6;
 }
 
-static int dec_jasc_r(CPUCRISState *env, DisasContext *dc)
+static int dec_jasc_r(DisasContext *dc)
 {
 	LOG_DIS("jasc_r $r%u, $p%u\n", dc->op1, dc->op2);
 	cris_cc_mask(dc, 0);
@@ -2843,12 +2849,12 @@ static int dec_jasc_r(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_bcc_im(CPUCRISState *env, DisasContext *dc)
+static int dec_bcc_im(DisasContext *dc)
 {
 	int32_t offset;
 	uint32_t cond = dc->op2;
 
-        offset = cris_fetch(env, dc, dc->pc + 2, 2, 1);
+	offset = cris_fetch(dc, dc->pc + 2, 2, 1);
 
 	LOG_DIS("b%s %d pc=%x dst=%x\n",
 		    cc_name(cond), offset,
@@ -2860,12 +2866,12 @@ static int dec_bcc_im(CPUCRISState *env, DisasContext *dc)
 	return 4;
 }
 
-static int dec_bas_im(CPUCRISState *env, DisasContext *dc)
+static int dec_bas_im(DisasContext *dc)
 {
 	int32_t simm;
 
 
-        simm = cris_fetch(env, dc, dc->pc + 2, 4, 0);
+	simm = cris_fetch(dc, dc->pc + 2, 4, 0);
 
 	LOG_DIS("bas 0x%x, $p%u\n", dc->pc + simm, dc->op2);
 	cris_cc_mask(dc, 0);
@@ -2877,10 +2883,10 @@ static int dec_bas_im(CPUCRISState *env, DisasContext *dc)
 	return 6;
 }
 
-static int dec_basc_im(CPUCRISState *env, DisasContext *dc)
+static int dec_basc_im(DisasContext *dc)
 {
 	int32_t simm;
-        simm = cris_fetch(env, dc, dc->pc + 2, 4, 0);
+	simm = cris_fetch(dc, dc->pc + 2, 4, 0);
 
 	LOG_DIS("basc 0x%x, $p%u\n", dc->pc + simm, dc->op2);
 	cris_cc_mask(dc, 0);
@@ -2892,7 +2898,7 @@ static int dec_basc_im(CPUCRISState *env, DisasContext *dc)
 	return 6;
 }
 
-static int dec_rfe_etc(CPUCRISState *env, DisasContext *dc)
+static int dec_rfe_etc(DisasContext *dc)
 {
 	cris_cc_mask(dc, 0);
 
@@ -2908,14 +2914,14 @@ static int dec_rfe_etc(CPUCRISState *env, DisasContext *dc)
 			/* rfe.  */
 			LOG_DIS("rfe\n");
 			cris_evaluate_flags(dc);
-                        gen_helper_rfe(cpu_env);
+			gen_helper_rfe();
 			dc->is_jmp = DISAS_UPDATE;
 			break;
 		case 5:
 			/* rfn.  */
 			LOG_DIS("rfn\n");
 			cris_evaluate_flags(dc);
-                        gen_helper_rfn(cpu_env);
+			gen_helper_rfn();
 			dc->is_jmp = DISAS_UPDATE;
 			break;
 		case 6:
@@ -2939,17 +2945,17 @@ static int dec_rfe_etc(CPUCRISState *env, DisasContext *dc)
 	return 2;
 }
 
-static int dec_ftag_fidx_d_m(CPUCRISState *env, DisasContext *dc)
+static int dec_ftag_fidx_d_m(DisasContext *dc)
 {
 	return 2;
 }
 
-static int dec_ftag_fidx_i_m(CPUCRISState *env, DisasContext *dc)
+static int dec_ftag_fidx_i_m(DisasContext *dc)
 {
 	return 2;
 }
 
-static int dec_null(CPUCRISState *env, DisasContext *dc)
+static int dec_null(DisasContext *dc)
 {
 	printf ("unknown insn pc=%x opc=%x op1=%x op2=%x\n",
 		dc->pc, dc->opcode, dc->op1, dc->op2);
@@ -2963,7 +2969,7 @@ static struct decoder_info {
 		uint32_t bits;
 		uint32_t mask;
 	};
-        int (*dec)(CPUCRISState *env, DisasContext *dc);
+	int (*dec)(DisasContext *dc);
 } decinfo[] = {
 	/* Order matters here.  */
 	{DEC_MOVEQ, dec_moveq},
@@ -3069,17 +3075,16 @@ static struct decoder_info {
 	{{0, 0}, dec_null}
 };
 
-static unsigned int crisv32_decoder(CPUCRISState *env, DisasContext *dc)
+static unsigned int crisv32_decoder(DisasContext *dc)
 {
 	int insn_len = 2;
 	int i;
 
-	if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP | CPU_LOG_TB_OP_OPT))) {
+	if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP)))
 		tcg_gen_debug_insn_start(dc->pc);
-        }
 
 	/* Load a halfword onto the instruction register.  */
-        dc->ir = cris_fetch(env, dc, dc->pc, 2, 0);
+	dc->ir = cris_fetch(dc, dc->pc, 2, 0);
 
 	/* Now decode it.  */
 	dc->opcode   = EXTRACT_FIELD(dc->ir, 4, 11);
@@ -3093,7 +3098,7 @@ static unsigned int crisv32_decoder(CPUCRISState *env, DisasContext *dc)
 	for (i = 0; i < ARRAY_SIZE(decinfo); i++) {
 		if ((dc->opcode & decinfo[i].mask) == decinfo[i].bits)
 		{
-                        insn_len = decinfo[i].dec(env, dc);
+			insn_len = decinfo[i].dec(dc);
 			break;
 		}
 	}
@@ -3117,7 +3122,7 @@ static unsigned int crisv32_decoder(CPUCRISState *env, DisasContext *dc)
 	return insn_len;
 }
 
-static void check_breakpoint(CPUCRISState *env, DisasContext *dc)
+static void check_breakpoint(CPUState *env, DisasContext *dc)
 {
 	CPUBreakpoint *bp;
 
@@ -3171,7 +3176,7 @@ static void check_breakpoint(CPUCRISState *env, DisasContext *dc)
 
 /* generate intermediate code for basic block 'tb'.  */
 static void
-gen_intermediate_code_internal(CPUCRISState *env, TranslationBlock *tb,
+gen_intermediate_code_internal(CPUState *env, TranslationBlock *tb,
                                int search_pc)
 {
 	uint16_t *gen_opc_end;
@@ -3287,7 +3292,7 @@ gen_intermediate_code_internal(CPUCRISState *env, TranslationBlock *tb,
                     gen_io_start();
 		dc->clear_x = 1;
 
-                insn_len = dc->decoder(env, dc);
+		insn_len = dc->decoder(dc);
 		dc->ppc = dc->pc;
 		dc->pc += insn_len;
 		if (dc->clear_x)
@@ -3422,17 +3427,17 @@ gen_intermediate_code_internal(CPUCRISState *env, TranslationBlock *tb,
 #endif
 }
 
-void gen_intermediate_code (CPUCRISState *env, struct TranslationBlock *tb)
+void gen_intermediate_code (CPUState *env, struct TranslationBlock *tb)
 {
     gen_intermediate_code_internal(env, tb, 0);
 }
 
-void gen_intermediate_code_pc (CPUCRISState *env, struct TranslationBlock *tb)
+void gen_intermediate_code_pc (CPUState *env, struct TranslationBlock *tb)
 {
     gen_intermediate_code_internal(env, tb, 1);
 }
 
-void cpu_dump_state (CPUCRISState *env, FILE *f, fprintf_function cpu_fprintf,
+void cpu_dump_state (CPUState *env, FILE *f, fprintf_function cpu_fprintf,
                      int flags)
 {
 	int i;
@@ -3461,7 +3466,7 @@ void cpu_dump_state (CPUCRISState *env, FILE *f, fprintf_function cpu_fprintf,
 	}
 	srs = env->pregs[PR_SRS];
 	cpu_fprintf(f, "\nsupport function regs bank %x:\n", srs);
-	if (srs < ARRAY_SIZE(env->sregs)) {
+	if (srs < 256) {
 		for (i = 0; i < 16; i++) {
 			cpu_fprintf(f, "s%2.2d=%8.8x ",
 				    i, env->sregs[srs][i]);
@@ -3506,80 +3511,101 @@ static uint32_t vr_by_name(const char *name)
     return 32;
 }
 
-CRISCPU *cpu_cris_init(const char *cpu_model)
+CPUCRISState *cpu_cris_init (const char *cpu_model)
 {
-    CRISCPU *cpu;
-    CPUCRISState *env;
-    static int tcg_initialized = 0;
-    int i;
+	CPUCRISState *env;
+	static int tcg_initialized = 0;
+	int i;
 
-    cpu = CRIS_CPU(object_new(TYPE_CRIS_CPU));
-    env = &cpu->env;
+	env = qemu_mallocz(sizeof(CPUCRISState));
 
-    env->pregs[PR_VR] = vr_by_name(cpu_model);
+	env->pregs[PR_VR] = vr_by_name(cpu_model);
+	cpu_exec_init(env);
+	cpu_reset(env);
+	qemu_init_vcpu(env);
 
-    cpu_reset(CPU(cpu));
-    qemu_init_vcpu(env);
+	if (tcg_initialized)
+		return env;
 
-    if (tcg_initialized) {
-        return cpu;
-    }
-
-    tcg_initialized = 1;
+	tcg_initialized = 1;
 
 #define GEN_HELPER 2
 #include "helper.h"
 
-    if (env->pregs[PR_VR] < 32) {
-        cpu_crisv10_init(env);
-        return cpu;
-    }
+	if (env->pregs[PR_VR] < 32) {
+		cpu_crisv10_init(env);
+		return env; 
+	}
 
 
-    cpu_env = tcg_global_reg_new_ptr(TCG_AREG0, "env");
-    cc_x = tcg_global_mem_new(TCG_AREG0,
-                              offsetof(CPUCRISState, cc_x), "cc_x");
-    cc_src = tcg_global_mem_new(TCG_AREG0,
-                                offsetof(CPUCRISState, cc_src), "cc_src");
-    cc_dest = tcg_global_mem_new(TCG_AREG0,
-                                 offsetof(CPUCRISState, cc_dest),
-                                 "cc_dest");
-    cc_result = tcg_global_mem_new(TCG_AREG0,
-                                   offsetof(CPUCRISState, cc_result),
-                                   "cc_result");
-    cc_op = tcg_global_mem_new(TCG_AREG0,
-                               offsetof(CPUCRISState, cc_op), "cc_op");
-    cc_size = tcg_global_mem_new(TCG_AREG0,
-                                 offsetof(CPUCRISState, cc_size),
-                                 "cc_size");
-    cc_mask = tcg_global_mem_new(TCG_AREG0,
-                                 offsetof(CPUCRISState, cc_mask),
-                                 "cc_mask");
+	cpu_env = tcg_global_reg_new_ptr(TCG_AREG0, "env");
+	cc_x = tcg_global_mem_new(TCG_AREG0,
+				  offsetof(CPUState, cc_x), "cc_x");
+	cc_src = tcg_global_mem_new(TCG_AREG0,
+				    offsetof(CPUState, cc_src), "cc_src");
+	cc_dest = tcg_global_mem_new(TCG_AREG0,
+				     offsetof(CPUState, cc_dest),
+				     "cc_dest");
+	cc_result = tcg_global_mem_new(TCG_AREG0,
+				       offsetof(CPUState, cc_result),
+				       "cc_result");
+	cc_op = tcg_global_mem_new(TCG_AREG0,
+				   offsetof(CPUState, cc_op), "cc_op");
+	cc_size = tcg_global_mem_new(TCG_AREG0,
+				     offsetof(CPUState, cc_size),
+				     "cc_size");
+	cc_mask = tcg_global_mem_new(TCG_AREG0,
+				     offsetof(CPUState, cc_mask),
+				     "cc_mask");
 
-    env_pc = tcg_global_mem_new(TCG_AREG0,
-                                offsetof(CPUCRISState, pc),
-                                "pc");
-    env_btarget = tcg_global_mem_new(TCG_AREG0,
-                                     offsetof(CPUCRISState, btarget),
-                                     "btarget");
-    env_btaken = tcg_global_mem_new(TCG_AREG0,
-                                    offsetof(CPUCRISState, btaken),
-                                    "btaken");
-    for (i = 0; i < 16; i++) {
-        cpu_R[i] = tcg_global_mem_new(TCG_AREG0,
-                                      offsetof(CPUCRISState, regs[i]),
-                                      regnames[i]);
-    }
-    for (i = 0; i < 16; i++) {
-        cpu_PR[i] = tcg_global_mem_new(TCG_AREG0,
-                                       offsetof(CPUCRISState, pregs[i]),
-                                       pregnames[i]);
-    }
+	env_pc = tcg_global_mem_new(TCG_AREG0, 
+				    offsetof(CPUState, pc),
+				    "pc");
+	env_btarget = tcg_global_mem_new(TCG_AREG0,
+					 offsetof(CPUState, btarget),
+					 "btarget");
+	env_btaken = tcg_global_mem_new(TCG_AREG0,
+					 offsetof(CPUState, btaken),
+					 "btaken");
+	for (i = 0; i < 16; i++) {
+		cpu_R[i] = tcg_global_mem_new(TCG_AREG0,
+					      offsetof(CPUState, regs[i]),
+					      regnames[i]);
+	}
+	for (i = 0; i < 16; i++) {
+		cpu_PR[i] = tcg_global_mem_new(TCG_AREG0,
+					       offsetof(CPUState, pregs[i]),
+					       pregnames[i]);
+	}
 
-    return cpu;
+	return env;
 }
 
-void restore_state_to_opc(CPUCRISState *env, TranslationBlock *tb, int pc_pos)
+void cpu_reset (CPUCRISState *env)
+{
+	uint32_t vr;
+
+	if (qemu_loglevel_mask(CPU_LOG_RESET)) {
+		qemu_log("CPU Reset (CPU %d)\n", env->cpu_index);
+		log_cpu_state(env, 0);
+	}
+
+	vr = env->pregs[PR_VR];
+	memset(env, 0, offsetof(CPUCRISState, breakpoints));
+	env->pregs[PR_VR] = vr;
+	tlb_flush(env, 1);
+
+#if defined(CONFIG_USER_ONLY)
+	/* start in user mode with interrupts enabled.  */
+	env->pregs[PR_CCS] |= U_FLAG | I_FLAG | P_FLAG;
+#else
+	cris_mmu_init(env);
+	env->pregs[PR_CCS] = 0;
+#endif
+}
+
+void gen_pc_load(CPUState *env, struct TranslationBlock *tb,
+                 unsigned long searched_pc, int pc_pos, void *puc)
 {
 	env->pc = gen_opc_pc[pc_pos];
 }

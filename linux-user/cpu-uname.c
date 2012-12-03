@@ -1,7 +1,7 @@
 /*
  *  cpu to uname machine name map
  *
- *  Copyright (c) 2009 LoÃ¯c Minier
+ *  Copyright (c) 2009 Loïc Minier
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -35,7 +35,10 @@ const char *cpu_to_uname_machine(void *cpu_env)
      * armv7l; to get a list of CPU arch names from the linux source, use:
      *     grep arch_name: -A1 linux/arch/arm/mm/proc-*.S
      * see arch/arm/kernel/setup.c: setup_processor()
-     */
+     *
+     * to test by CPU id, compare cpu_env->cp15.c0_cpuid to ARM_CPUID_*
+     * defines and to test by CPU feature, use arm_feature(cpu_env,
+     * ARM_FEATURE_*) */
 
     /* in theory, endianness is configurable on some ARM CPUs, but this isn't
      * used in user mode emulation */

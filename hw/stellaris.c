@@ -4,7 +4,7 @@
  * Copyright (c) 2006 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licensed under the GPL.
+ * This code is licenced under the GPL.
  */
 
 #include "sysbus.h"
@@ -14,8 +14,8 @@
 #include "qemu-timer.h"
 #include "i2c.h"
 #include "net.h"
+#include "sysemu.h"
 #include "boards.h"
-#include "exec-memory.h"
 
 #define GPIO_A 0
 #define GPIO_B 1
@@ -45,7 +45,6 @@ typedef const struct {
 
 typedef struct gptm_state {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint32_t config;
     uint32_t mode[2];
     uint32_t control;
@@ -80,7 +79,7 @@ static void gptm_reload(gptm_state *s, int n, int reset)
 {
     int64_t tick;
     if (reset)
-        tick = qemu_get_clock_ns(vm_clock);
+        tick = qemu_get_clock(vm_clock);
     else
         tick = s->tick[n];
 
@@ -141,8 +140,7 @@ static void gptm_tick(void *opaque)
     gptm_update_irq(s);
 }
 
-static uint64_t gptm_read(void *opaque, hwaddr offset,
-                          unsigned size)
+static uint32_t gptm_read(void *opaque, target_phys_addr_t offset)
 {
     gptm_state *s = (gptm_state *)opaque;
 
@@ -190,8 +188,7 @@ static uint64_t gptm_read(void *opaque, hwaddr offset,
     }
 }
 
-static void gptm_write(void *opaque, hwaddr offset,
-                       uint64_t value, unsigned size)
+static void gptm_write(void *opaque, target_phys_addr_t offset, uint32_t value)
 {
     gptm_state *s = (gptm_state *)opaque;
     uint32_t oldval;
@@ -271,50 +268,95 @@ static void gptm_write(void *opaque, hwaddr offset,
     gptm_update_irq(s);
 }
 
-static const MemoryRegionOps gptm_ops = {
-    .read = gptm_read,
-    .write = gptm_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const gptm_readfn[] = {
+   gptm_read,
+   gptm_read,
+   gptm_read
 };
 
-static const VMStateDescription vmstate_stellaris_gptm = {
-    .name = "stellaris_gptm",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(config, gptm_state),
-        VMSTATE_UINT32_ARRAY(mode, gptm_state, 2),
-        VMSTATE_UINT32(control, gptm_state),
-        VMSTATE_UINT32(state, gptm_state),
-        VMSTATE_UINT32(mask, gptm_state),
-        VMSTATE_UNUSED(8),
-        VMSTATE_UINT32_ARRAY(load, gptm_state, 2),
-        VMSTATE_UINT32_ARRAY(match, gptm_state, 2),
-        VMSTATE_UINT32_ARRAY(prescale, gptm_state, 2),
-        VMSTATE_UINT32_ARRAY(match_prescale, gptm_state, 2),
-        VMSTATE_UINT32(rtc, gptm_state),
-        VMSTATE_INT64_ARRAY(tick, gptm_state, 2),
-        VMSTATE_TIMER_ARRAY(timer, gptm_state, 2),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUWriteMemoryFunc * const gptm_writefn[] = {
+   gptm_write,
+   gptm_write,
+   gptm_write
 };
+
+static void gptm_save(QEMUFile *f, void *opaque)
+{
+    gptm_state *s = (gptm_state *)opaque;
+
+    qemu_put_be32(f, s->config);
+    qemu_put_be32(f, s->mode[0]);
+    qemu_put_be32(f, s->mode[1]);
+    qemu_put_be32(f, s->control);
+    qemu_put_be32(f, s->state);
+    qemu_put_be32(f, s->mask);
+    qemu_put_be32(f, s->mode[0]);
+    qemu_put_be32(f, s->mode[0]);
+    qemu_put_be32(f, s->load[0]);
+    qemu_put_be32(f, s->load[1]);
+    qemu_put_be32(f, s->match[0]);
+    qemu_put_be32(f, s->match[1]);
+    qemu_put_be32(f, s->prescale[0]);
+    qemu_put_be32(f, s->prescale[1]);
+    qemu_put_be32(f, s->match_prescale[0]);
+    qemu_put_be32(f, s->match_prescale[1]);
+    qemu_put_be32(f, s->rtc);
+    qemu_put_be64(f, s->tick[0]);
+    qemu_put_be64(f, s->tick[1]);
+    qemu_put_timer(f, s->timer[0]);
+    qemu_put_timer(f, s->timer[1]);
+}
+
+static int gptm_load(QEMUFile *f, void *opaque, int version_id)
+{
+    gptm_state *s = (gptm_state *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->config = qemu_get_be32(f);
+    s->mode[0] = qemu_get_be32(f);
+    s->mode[1] = qemu_get_be32(f);
+    s->control = qemu_get_be32(f);
+    s->state = qemu_get_be32(f);
+    s->mask = qemu_get_be32(f);
+    s->mode[0] = qemu_get_be32(f);
+    s->mode[0] = qemu_get_be32(f);
+    s->load[0] = qemu_get_be32(f);
+    s->load[1] = qemu_get_be32(f);
+    s->match[0] = qemu_get_be32(f);
+    s->match[1] = qemu_get_be32(f);
+    s->prescale[0] = qemu_get_be32(f);
+    s->prescale[1] = qemu_get_be32(f);
+    s->match_prescale[0] = qemu_get_be32(f);
+    s->match_prescale[1] = qemu_get_be32(f);
+    s->rtc = qemu_get_be32(f);
+    s->tick[0] = qemu_get_be64(f);
+    s->tick[1] = qemu_get_be64(f);
+    qemu_get_timer(f, s->timer[0]);
+    qemu_get_timer(f, s->timer[1]);
+
+    return 0;
+}
 
 static int stellaris_gptm_init(SysBusDevice *dev)
 {
+    int iomemtype;
     gptm_state *s = FROM_SYSBUS(gptm_state, dev);
 
     sysbus_init_irq(dev, &s->irq);
     qdev_init_gpio_out(&dev->qdev, &s->trigger, 1);
 
-    memory_region_init_io(&s->iomem, &gptm_ops, s,
-                          "gptm", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(gptm_readfn,
+                                       gptm_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
 
     s->opaque[0] = s->opaque[1] = s;
-    s->timer[0] = qemu_new_timer_ns(vm_clock, gptm_tick, &s->opaque[0]);
-    s->timer[1] = qemu_new_timer_ns(vm_clock, gptm_tick, &s->opaque[1]);
-    vmstate_register(&dev->qdev, -1, &vmstate_stellaris_gptm, s);
+    s->timer[0] = qemu_new_timer(vm_clock, gptm_tick, &s->opaque[0]);
+    s->timer[1] = qemu_new_timer(vm_clock, gptm_tick, &s->opaque[1]);
+    register_savevm(&dev->qdev, "stellaris_gptm", -1, 1,
+                    gptm_save, gptm_load, s);
     return 0;
 }
 
@@ -322,14 +364,12 @@ static int stellaris_gptm_init(SysBusDevice *dev)
 /* System controller.  */
 
 typedef struct {
-    MemoryRegion iomem;
     uint32_t pborctl;
     uint32_t ldopctl;
     uint32_t int_status;
     uint32_t int_mask;
     uint32_t resc;
     uint32_t rcc;
-    uint32_t rcc2;
     uint32_t rcgc[3];
     uint32_t scgc[3];
     uint32_t dcgc[3];
@@ -384,34 +424,7 @@ static uint32_t pllcfg_fury[16] = {
     0xb11c /* 8.192 Mhz */
 };
 
-#define DID0_VER_MASK        0x70000000
-#define DID0_VER_0           0x00000000
-#define DID0_VER_1           0x10000000
-
-#define DID0_CLASS_MASK      0x00FF0000
-#define DID0_CLASS_SANDSTORM 0x00000000
-#define DID0_CLASS_FURY      0x00010000
-
-static int ssys_board_class(const ssys_state *s)
-{
-    uint32_t did0 = s->board->did0;
-    switch (did0 & DID0_VER_MASK) {
-    case DID0_VER_0:
-        return DID0_CLASS_SANDSTORM;
-    case DID0_VER_1:
-        switch (did0 & DID0_CLASS_MASK) {
-        case DID0_CLASS_SANDSTORM:
-        case DID0_CLASS_FURY:
-            return did0 & DID0_CLASS_MASK;
-        }
-        /* for unknown classes, fall through */
-    default:
-        hw_error("ssys_board_class: Unknown class 0x%08x\n", did0);
-    }
-}
-
-static uint64_t ssys_read(void *opaque, hwaddr offset,
-                          unsigned size)
+static uint32_t ssys_read(void *opaque, target_phys_addr_t offset)
 {
     ssys_state *s = (ssys_state *)opaque;
 
@@ -454,18 +467,12 @@ static uint64_t ssys_read(void *opaque, hwaddr offset,
         {
             int xtal;
             xtal = (s->rcc >> 6) & 0xf;
-            switch (ssys_board_class(s)) {
-            case DID0_CLASS_FURY:
+            if (s->board->did0 & (1 << 16)) {
                 return pllcfg_fury[xtal];
-            case DID0_CLASS_SANDSTORM:
+            } else {
                 return pllcfg_sandstorm[xtal];
-            default:
-                hw_error("ssys_read: Unhandled class for PLLCFG read.\n");
-                return 0;
             }
         }
-    case 0x070: /* RCC2 */
-        return s->rcc2;
     case 0x100: /* RCGC0 */
         return s->rcgc[0];
     case 0x104: /* RCGC1 */
@@ -498,25 +505,12 @@ static uint64_t ssys_read(void *opaque, hwaddr offset,
     }
 }
 
-static bool ssys_use_rcc2(ssys_state *s)
-{
-    return (s->rcc2 >> 31) & 0x1;
-}
-
-/*
- * Caculate the sys. clock period in ms.
- */
 static void ssys_calculate_system_clock(ssys_state *s)
 {
-    if (ssys_use_rcc2(s)) {
-        system_clock_scale = 5 * (((s->rcc2 >> 23) & 0x3f) + 1);
-    } else {
-        system_clock_scale = 5 * (((s->rcc >> 23) & 0xf) + 1);
-    }
+    system_clock_scale = 5 * (((s->rcc >> 23) & 0xf) + 1);
 }
 
-static void ssys_write(void *opaque, hwaddr offset,
-                       uint64_t value, unsigned size)
+static void ssys_write(void *opaque, target_phys_addr_t offset, uint32_t value)
 {
     ssys_state *s = (ssys_state *)opaque;
 
@@ -547,18 +541,6 @@ static void ssys_write(void *opaque, hwaddr offset,
             s->int_status |= (1 << 6);
         }
         s->rcc = value;
-        ssys_calculate_system_clock(s);
-        break;
-    case 0x070: /* RCC2 */
-        if (ssys_board_class(s) == DID0_CLASS_SANDSTORM) {
-            break;
-        }
-
-        if ((s->rcc2 & (1 << 13)) != 0 && (value & (1 << 13)) == 0) {
-            /* PLL enable.  */
-            s->int_status |= (1 << 6);
-        }
-        s->rcc2 = value;
         ssys_calculate_system_clock(s);
         break;
     case 0x100: /* RCGC0 */
@@ -600,10 +582,16 @@ static void ssys_write(void *opaque, hwaddr offset,
     ssys_update(s);
 }
 
-static const MemoryRegionOps ssys_ops = {
-    .read = ssys_read,
-    .write = ssys_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const ssys_readfn[] = {
+   ssys_read,
+   ssys_read,
+   ssys_read
+};
+
+static CPUWriteMemoryFunc * const ssys_writefn[] = {
+   ssys_write,
+   ssys_write,
+   ssys_write
 };
 
 static void ssys_reset(void *opaque)
@@ -612,67 +600,83 @@ static void ssys_reset(void *opaque)
 
     s->pborctl = 0x7ffd;
     s->rcc = 0x078e3ac0;
-
-    if (ssys_board_class(s) == DID0_CLASS_SANDSTORM) {
-        s->rcc2 = 0;
-    } else {
-        s->rcc2 = 0x07802810;
-    }
     s->rcgc[0] = 1;
     s->scgc[0] = 1;
     s->dcgc[0] = 1;
-    ssys_calculate_system_clock(s);
 }
 
-static int stellaris_sys_post_load(void *opaque, int version_id)
+static void ssys_save(QEMUFile *f, void *opaque)
 {
-    ssys_state *s = opaque;
+    ssys_state *s = (ssys_state *)opaque;
 
+    qemu_put_be32(f, s->pborctl);
+    qemu_put_be32(f, s->ldopctl);
+    qemu_put_be32(f, s->int_mask);
+    qemu_put_be32(f, s->int_status);
+    qemu_put_be32(f, s->resc);
+    qemu_put_be32(f, s->rcc);
+    qemu_put_be32(f, s->rcgc[0]);
+    qemu_put_be32(f, s->rcgc[1]);
+    qemu_put_be32(f, s->rcgc[2]);
+    qemu_put_be32(f, s->scgc[0]);
+    qemu_put_be32(f, s->scgc[1]);
+    qemu_put_be32(f, s->scgc[2]);
+    qemu_put_be32(f, s->dcgc[0]);
+    qemu_put_be32(f, s->dcgc[1]);
+    qemu_put_be32(f, s->dcgc[2]);
+    qemu_put_be32(f, s->clkvclr);
+    qemu_put_be32(f, s->ldoarst);
+}
+
+static int ssys_load(QEMUFile *f, void *opaque, int version_id)
+{
+    ssys_state *s = (ssys_state *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->pborctl = qemu_get_be32(f);
+    s->ldopctl = qemu_get_be32(f);
+    s->int_mask = qemu_get_be32(f);
+    s->int_status = qemu_get_be32(f);
+    s->resc = qemu_get_be32(f);
+    s->rcc = qemu_get_be32(f);
+    s->rcgc[0] = qemu_get_be32(f);
+    s->rcgc[1] = qemu_get_be32(f);
+    s->rcgc[2] = qemu_get_be32(f);
+    s->scgc[0] = qemu_get_be32(f);
+    s->scgc[1] = qemu_get_be32(f);
+    s->scgc[2] = qemu_get_be32(f);
+    s->dcgc[0] = qemu_get_be32(f);
+    s->dcgc[1] = qemu_get_be32(f);
+    s->dcgc[2] = qemu_get_be32(f);
+    s->clkvclr = qemu_get_be32(f);
+    s->ldoarst = qemu_get_be32(f);
     ssys_calculate_system_clock(s);
 
     return 0;
 }
 
-static const VMStateDescription vmstate_stellaris_sys = {
-    .name = "stellaris_sys",
-    .version_id = 2,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .post_load = stellaris_sys_post_load,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(pborctl, ssys_state),
-        VMSTATE_UINT32(ldopctl, ssys_state),
-        VMSTATE_UINT32(int_mask, ssys_state),
-        VMSTATE_UINT32(int_status, ssys_state),
-        VMSTATE_UINT32(resc, ssys_state),
-        VMSTATE_UINT32(rcc, ssys_state),
-        VMSTATE_UINT32_V(rcc2, ssys_state, 2),
-        VMSTATE_UINT32_ARRAY(rcgc, ssys_state, 3),
-        VMSTATE_UINT32_ARRAY(scgc, ssys_state, 3),
-        VMSTATE_UINT32_ARRAY(dcgc, ssys_state, 3),
-        VMSTATE_UINT32(clkvclr, ssys_state),
-        VMSTATE_UINT32(ldoarst, ssys_state),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
 static int stellaris_sys_init(uint32_t base, qemu_irq irq,
                               stellaris_board_info * board,
                               uint8_t *macaddr)
 {
+    int iomemtype;
     ssys_state *s;
 
-    s = (ssys_state *)g_malloc0(sizeof(ssys_state));
+    s = (ssys_state *)qemu_mallocz(sizeof(ssys_state));
     s->irq = irq;
     s->board = board;
     /* Most devices come preprogrammed with a MAC address in the user data. */
     s->user0 = macaddr[0] | (macaddr[1] << 8) | (macaddr[2] << 16);
     s->user1 = macaddr[3] | (macaddr[4] << 8) | (macaddr[5] << 16);
 
-    memory_region_init_io(&s->iomem, &ssys_ops, s, "ssys", 0x00001000);
-    memory_region_add_subregion(get_system_memory(), base, &s->iomem);
+    iomemtype = cpu_register_io_memory(ssys_readfn,
+                                       ssys_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(base, 0x00001000, iomemtype);
     ssys_reset(s);
-    vmstate_register(NULL, -1, &vmstate_stellaris_sys, s);
+    register_savevm(NULL, "stellaris_sys", -1, 1, ssys_save, ssys_load, s);
     return 0;
 }
 
@@ -683,7 +687,6 @@ typedef struct {
     SysBusDevice busdev;
     i2c_bus *bus;
     qemu_irq irq;
-    MemoryRegion iomem;
     uint32_t msa;
     uint32_t mcs;
     uint32_t mdr;
@@ -701,8 +704,7 @@ typedef struct {
 #define STELLARIS_I2C_MCS_IDLE    0x20
 #define STELLARIS_I2C_MCS_BUSBSY  0x40
 
-static uint64_t stellaris_i2c_read(void *opaque, hwaddr offset,
-                                   unsigned size)
+static uint32_t stellaris_i2c_read(void *opaque, target_phys_addr_t offset)
 {
     stellaris_i2c_state *s = (stellaris_i2c_state *)opaque;
 
@@ -738,8 +740,8 @@ static void stellaris_i2c_update(stellaris_i2c_state *s)
     qemu_set_irq(s->irq, level);
 }
 
-static void stellaris_i2c_write(void *opaque, hwaddr offset,
-                                uint64_t value, unsigned size)
+static void stellaris_i2c_write(void *opaque, target_phys_addr_t offset,
+                                uint32_t value)
 {
     stellaris_i2c_state *s = (stellaris_i2c_state *)opaque;
 
@@ -830,44 +832,67 @@ static void stellaris_i2c_reset(stellaris_i2c_state *s)
     stellaris_i2c_update(s);
 }
 
-static const MemoryRegionOps stellaris_i2c_ops = {
-    .read = stellaris_i2c_read,
-    .write = stellaris_i2c_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const stellaris_i2c_readfn[] = {
+   stellaris_i2c_read,
+   stellaris_i2c_read,
+   stellaris_i2c_read
 };
 
-static const VMStateDescription vmstate_stellaris_i2c = {
-    .name = "stellaris_i2c",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(msa, stellaris_i2c_state),
-        VMSTATE_UINT32(mcs, stellaris_i2c_state),
-        VMSTATE_UINT32(mdr, stellaris_i2c_state),
-        VMSTATE_UINT32(mtpr, stellaris_i2c_state),
-        VMSTATE_UINT32(mimr, stellaris_i2c_state),
-        VMSTATE_UINT32(mris, stellaris_i2c_state),
-        VMSTATE_UINT32(mcr, stellaris_i2c_state),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUWriteMemoryFunc * const stellaris_i2c_writefn[] = {
+   stellaris_i2c_write,
+   stellaris_i2c_write,
+   stellaris_i2c_write
 };
+
+static void stellaris_i2c_save(QEMUFile *f, void *opaque)
+{
+    stellaris_i2c_state *s = (stellaris_i2c_state *)opaque;
+
+    qemu_put_be32(f, s->msa);
+    qemu_put_be32(f, s->mcs);
+    qemu_put_be32(f, s->mdr);
+    qemu_put_be32(f, s->mtpr);
+    qemu_put_be32(f, s->mimr);
+    qemu_put_be32(f, s->mris);
+    qemu_put_be32(f, s->mcr);
+}
+
+static int stellaris_i2c_load(QEMUFile *f, void *opaque, int version_id)
+{
+    stellaris_i2c_state *s = (stellaris_i2c_state *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->msa = qemu_get_be32(f);
+    s->mcs = qemu_get_be32(f);
+    s->mdr = qemu_get_be32(f);
+    s->mtpr = qemu_get_be32(f);
+    s->mimr = qemu_get_be32(f);
+    s->mris = qemu_get_be32(f);
+    s->mcr = qemu_get_be32(f);
+
+    return 0;
+}
 
 static int stellaris_i2c_init(SysBusDevice * dev)
 {
     stellaris_i2c_state *s = FROM_SYSBUS(stellaris_i2c_state, dev);
     i2c_bus *bus;
+    int iomemtype;
 
     sysbus_init_irq(dev, &s->irq);
     bus = i2c_init_bus(&dev->qdev, "i2c");
     s->bus = bus;
 
-    memory_region_init_io(&s->iomem, &stellaris_i2c_ops, s,
-                          "i2c", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(stellaris_i2c_readfn,
+                                       stellaris_i2c_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
     /* ??? For now we only implement the master interface.  */
     stellaris_i2c_reset(s);
-    vmstate_register(&dev->qdev, -1, &vmstate_stellaris_i2c, s);
+    register_savevm(&dev->qdev, "stellaris_i2c", -1, 1,
+                    stellaris_i2c_save, stellaris_i2c_load, s);
     return 0;
 }
 
@@ -888,7 +913,6 @@ static int stellaris_i2c_init(SysBusDevice * dev)
 typedef struct
 {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     uint32_t actss;
     uint32_t ris;
     uint32_t im;
@@ -989,8 +1013,7 @@ static void stellaris_adc_reset(stellaris_adc_state *s)
     }
 }
 
-static uint64_t stellaris_adc_read(void *opaque, hwaddr offset,
-                                   unsigned size)
+static uint32_t stellaris_adc_read(void *opaque, target_phys_addr_t offset)
 {
     stellaris_adc_state *s = (stellaris_adc_state *)opaque;
 
@@ -1037,8 +1060,8 @@ static uint64_t stellaris_adc_read(void *opaque, hwaddr offset,
     }
 }
 
-static void stellaris_adc_write(void *opaque, hwaddr offset,
-                                uint64_t value, unsigned size)
+static void stellaris_adc_write(void *opaque, target_phys_addr_t offset,
+                                uint32_t value)
 {
     stellaris_adc_state *s = (stellaris_adc_state *)opaque;
 
@@ -1052,7 +1075,7 @@ static void stellaris_adc_write(void *opaque, hwaddr offset,
             return;
         case 0x04: /* SSCTL */
             if (value != 6) {
-                hw_error("ADC: Unimplemented sequence %" PRIx64 "\n",
+                hw_error("ADC: Unimplemented sequence %x\n",
                           value);
             }
             s->ssctl[n] = value;
@@ -1095,62 +1118,151 @@ static void stellaris_adc_write(void *opaque, hwaddr offset,
     stellaris_adc_update(s);
 }
 
-static const MemoryRegionOps stellaris_adc_ops = {
-    .read = stellaris_adc_read,
-    .write = stellaris_adc_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const stellaris_adc_readfn[] = {
+   stellaris_adc_read,
+   stellaris_adc_read,
+   stellaris_adc_read
 };
 
-static const VMStateDescription vmstate_stellaris_adc = {
-    .name = "stellaris_adc",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(actss, stellaris_adc_state),
-        VMSTATE_UINT32(ris, stellaris_adc_state),
-        VMSTATE_UINT32(im, stellaris_adc_state),
-        VMSTATE_UINT32(emux, stellaris_adc_state),
-        VMSTATE_UINT32(ostat, stellaris_adc_state),
-        VMSTATE_UINT32(ustat, stellaris_adc_state),
-        VMSTATE_UINT32(sspri, stellaris_adc_state),
-        VMSTATE_UINT32(sac, stellaris_adc_state),
-        VMSTATE_UINT32(fifo[0].state, stellaris_adc_state),
-        VMSTATE_UINT32_ARRAY(fifo[0].data, stellaris_adc_state, 16),
-        VMSTATE_UINT32(ssmux[0], stellaris_adc_state),
-        VMSTATE_UINT32(ssctl[0], stellaris_adc_state),
-        VMSTATE_UINT32(fifo[1].state, stellaris_adc_state),
-        VMSTATE_UINT32_ARRAY(fifo[1].data, stellaris_adc_state, 16),
-        VMSTATE_UINT32(ssmux[1], stellaris_adc_state),
-        VMSTATE_UINT32(ssctl[1], stellaris_adc_state),
-        VMSTATE_UINT32(fifo[2].state, stellaris_adc_state),
-        VMSTATE_UINT32_ARRAY(fifo[2].data, stellaris_adc_state, 16),
-        VMSTATE_UINT32(ssmux[2], stellaris_adc_state),
-        VMSTATE_UINT32(ssctl[2], stellaris_adc_state),
-        VMSTATE_UINT32(fifo[3].state, stellaris_adc_state),
-        VMSTATE_UINT32_ARRAY(fifo[3].data, stellaris_adc_state, 16),
-        VMSTATE_UINT32(ssmux[3], stellaris_adc_state),
-        VMSTATE_UINT32(ssctl[3], stellaris_adc_state),
-        VMSTATE_UINT32(noise, stellaris_adc_state),
-        VMSTATE_END_OF_LIST()
-    }
+static CPUWriteMemoryFunc * const stellaris_adc_writefn[] = {
+   stellaris_adc_write,
+   stellaris_adc_write,
+   stellaris_adc_write
 };
+
+static void stellaris_adc_save(QEMUFile *f, void *opaque)
+{
+    stellaris_adc_state *s = (stellaris_adc_state *)opaque;
+    int i;
+    int j;
+
+    qemu_put_be32(f, s->actss);
+    qemu_put_be32(f, s->ris);
+    qemu_put_be32(f, s->im);
+    qemu_put_be32(f, s->emux);
+    qemu_put_be32(f, s->ostat);
+    qemu_put_be32(f, s->ustat);
+    qemu_put_be32(f, s->sspri);
+    qemu_put_be32(f, s->sac);
+    for (i = 0; i < 4; i++) {
+        qemu_put_be32(f, s->fifo[i].state);
+        for (j = 0; j < 16; j++) {
+            qemu_put_be32(f, s->fifo[i].data[j]);
+        }
+        qemu_put_be32(f, s->ssmux[i]);
+        qemu_put_be32(f, s->ssctl[i]);
+    }
+    qemu_put_be32(f, s->noise);
+}
+
+static int stellaris_adc_load(QEMUFile *f, void *opaque, int version_id)
+{
+    stellaris_adc_state *s = (stellaris_adc_state *)opaque;
+    int i;
+    int j;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->actss = qemu_get_be32(f);
+    s->ris = qemu_get_be32(f);
+    s->im = qemu_get_be32(f);
+    s->emux = qemu_get_be32(f);
+    s->ostat = qemu_get_be32(f);
+    s->ustat = qemu_get_be32(f);
+    s->sspri = qemu_get_be32(f);
+    s->sac = qemu_get_be32(f);
+    for (i = 0; i < 4; i++) {
+        s->fifo[i].state = qemu_get_be32(f);
+        for (j = 0; j < 16; j++) {
+            s->fifo[i].data[j] = qemu_get_be32(f);
+        }
+        s->ssmux[i] = qemu_get_be32(f);
+        s->ssctl[i] = qemu_get_be32(f);
+    }
+    s->noise = qemu_get_be32(f);
+
+    return 0;
+}
 
 static int stellaris_adc_init(SysBusDevice *dev)
 {
     stellaris_adc_state *s = FROM_SYSBUS(stellaris_adc_state, dev);
+    int iomemtype;
     int n;
 
     for (n = 0; n < 4; n++) {
         sysbus_init_irq(dev, &s->irq[n]);
     }
 
-    memory_region_init_io(&s->iomem, &stellaris_adc_ops, s,
-                          "adc", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(stellaris_adc_readfn,
+                                       stellaris_adc_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, 0x1000, iomemtype);
     stellaris_adc_reset(s);
     qdev_init_gpio_in(&dev->qdev, stellaris_adc_trigger, 1);
-    vmstate_register(&dev->qdev, -1, &vmstate_stellaris_adc, s);
+    register_savevm(&dev->qdev, "stellaris_adc", -1, 1,
+                    stellaris_adc_save, stellaris_adc_load, s);
+    return 0;
+}
+
+/* Some boards have both an OLED controller and SD card connected to
+   the same SSI port, with the SD card chip select connected to a
+   GPIO pin.  Technically the OLED chip select is connected to the SSI
+   Fss pin.  We do not bother emulating that as both devices should
+   never be selected simultaneously, and our OLED controller ignores stray
+   0xff commands that occur when deselecting the SD card.  */
+
+typedef struct {
+    SSISlave ssidev;
+    qemu_irq irq;
+    int current_dev;
+    SSIBus *bus[2];
+} stellaris_ssi_bus_state;
+
+static void stellaris_ssi_bus_select(void *opaque, int irq, int level)
+{
+    stellaris_ssi_bus_state *s = (stellaris_ssi_bus_state *)opaque;
+
+    s->current_dev = level;
+}
+
+static uint32_t stellaris_ssi_bus_transfer(SSISlave *dev, uint32_t val)
+{
+    stellaris_ssi_bus_state *s = FROM_SSI_SLAVE(stellaris_ssi_bus_state, dev);
+
+    return ssi_transfer(s->bus[s->current_dev], val);
+}
+
+static void stellaris_ssi_bus_save(QEMUFile *f, void *opaque)
+{
+    stellaris_ssi_bus_state *s = (stellaris_ssi_bus_state *)opaque;
+
+    qemu_put_be32(f, s->current_dev);
+}
+
+static int stellaris_ssi_bus_load(QEMUFile *f, void *opaque, int version_id)
+{
+    stellaris_ssi_bus_state *s = (stellaris_ssi_bus_state *)opaque;
+
+    if (version_id != 1)
+        return -EINVAL;
+
+    s->current_dev = qemu_get_be32(f);
+
+    return 0;
+}
+
+static int stellaris_ssi_bus_init(SSISlave *dev)
+{
+    stellaris_ssi_bus_state *s = FROM_SSI_SLAVE(stellaris_ssi_bus_state, dev);
+
+    s->bus[0] = ssi_create_bus(&dev->qdev, "ssi0");
+    s->bus[1] = ssi_create_bus(&dev->qdev, "ssi1");
+    qdev_init_gpio_in(&dev->qdev, stellaris_ssi_bus_select, 1);
+
+    register_savevm(&dev->qdev, "stellaris_ssi_bus", -1, 1,
+                    stellaris_ssi_bus_save, stellaris_ssi_bus_load, s);
     return 0;
 }
 
@@ -1188,7 +1300,6 @@ static void stellaris_init(const char *kernel_filename, const char *cpu_model,
         0x40024000, 0x40025000, 0x40026000};
     static const int gpio_irq[7] = {0, 1, 2, 3, 4, 30, 31};
 
-    MemoryRegion *address_space_mem = get_system_memory();
     qemu_irq *pic;
     DeviceState *gpio_dev[7];
     qemu_irq gpio_in[7][8];
@@ -1203,8 +1314,7 @@ static void stellaris_init(const char *kernel_filename, const char *cpu_model,
 
     flash_size = ((board->dc0 & 0xffff) + 1) << 1;
     sram_size = (board->dc0 >> 18) + 1;
-    pic = armv7m_init(address_space_mem,
-                      flash_size, sram_size, kernel_filename, cpu_model);
+    pic = armv7m_init(flash_size, sram_size, kernel_filename, cpu_model);
 
     if (board->dc1 & (1 << 16)) {
         dev = sysbus_create_varargs("stellaris-adc", 0x40038000,
@@ -1224,11 +1334,11 @@ static void stellaris_init(const char *kernel_filename, const char *cpu_model,
         }
     }
 
-    stellaris_sys_init(0x400fe000, pic[28], board, nd_table[0].macaddr.a);
+    stellaris_sys_init(0x400fe000, pic[28], board, nd_table[0].macaddr);
 
     for (i = 0; i < 7; i++) {
         if (board->dc4 & (1 << i)) {
-            gpio_dev[i] = sysbus_create_simple("pl061_luminary", gpio_addr[i],
+            gpio_dev[i] = sysbus_create_simple("pl061", gpio_addr[i],
                                                pic[gpio_irq[i]]);
             for (j = 0; j < 8; j++) {
                 gpio_in[i][j] = qdev_get_gpio_in(gpio_dev[i], j);
@@ -1254,25 +1364,19 @@ static void stellaris_init(const char *kernel_filename, const char *cpu_model,
     if (board->dc2 & (1 << 4)) {
         dev = sysbus_create_simple("pl022", 0x40008000, pic[7]);
         if (board->peripherals & BP_OLED_SSI) {
+            DeviceState *mux;
             void *bus;
-            DeviceState *sddev;
-            DeviceState *ssddev;
 
-            /* Some boards have both an OLED controller and SD card connected to
-             * the same SSI port, with the SD card chip select connected to a
-             * GPIO pin.  Technically the OLED chip select is connected to the
-             * SSI Fss pin.  We do not bother emulating that as both devices
-             * should never be selected simultaneously, and our OLED controller
-             * ignores stray 0xff commands that occur when deselecting the SD
-             * card.
-             */
             bus = qdev_get_child_bus(dev, "ssi");
+            mux = ssi_create_slave(bus, "evb6965-ssi");
+            gpio_out[GPIO_D][0] = qdev_get_gpio_in(mux, 0);
 
-            sddev = ssi_create_slave(bus, "ssi-sd");
-            ssddev = ssi_create_slave(bus, "ssd0323");
-            gpio_out[GPIO_D][0] = qemu_irq_split(qdev_get_gpio_in(sddev, 0),
-                                                 qdev_get_gpio_in(ssddev, 0));
-            gpio_out[GPIO_C][7] = qdev_get_gpio_in(ssddev, 1);
+            bus = qdev_get_child_bus(mux, "ssi0");
+            ssi_create_slave(bus, "ssi-sd");
+
+            bus = qdev_get_child_bus(mux, "ssi1");
+            dev = ssi_create_slave(bus, "ssd0323");
+            gpio_out[GPIO_C][7] = qdev_get_gpio_in(dev, 0);
 
             /* Make sure the select pin is high.  */
             qemu_irq_raise(gpio_out[GPIO_D][0]);
@@ -1313,17 +1417,19 @@ static void stellaris_init(const char *kernel_filename, const char *cpu_model,
 }
 
 /* FIXME: Figure out how to generate these from stellaris_boards.  */
-static void lm3s811evb_init(QEMUMachineInitArgs *args)
+static void lm3s811evb_init(ram_addr_t ram_size,
+                     const char *boot_device,
+                     const char *kernel_filename, const char *kernel_cmdline,
+                     const char *initrd_filename, const char *cpu_model)
 {
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
     stellaris_init(kernel_filename, cpu_model, &stellaris_boards[0]);
 }
 
-static void lm3s6965evb_init(QEMUMachineInitArgs *args)
+static void lm3s6965evb_init(ram_addr_t ram_size,
+                     const char *boot_device,
+                     const char *kernel_filename, const char *kernel_cmdline,
+                     const char *initrd_filename, const char *cpu_model)
 {
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
     stellaris_init(kernel_filename, cpu_model, &stellaris_boards[1]);
 }
 
@@ -1347,53 +1453,22 @@ static void stellaris_machine_init(void)
 
 machine_init(stellaris_machine_init);
 
-static void stellaris_i2c_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
-
-    sdc->init = stellaris_i2c_init;
-}
-
-static TypeInfo stellaris_i2c_info = {
-    .name          = "stellaris-i2c",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(stellaris_i2c_state),
-    .class_init    = stellaris_i2c_class_init,
+static SSISlaveInfo stellaris_ssi_bus_info = {
+    .qdev.name = "evb6965-ssi",
+    .qdev.size = sizeof(stellaris_ssi_bus_state),
+    .init = stellaris_ssi_bus_init,
+    .transfer = stellaris_ssi_bus_transfer
 };
 
-static void stellaris_gptm_class_init(ObjectClass *klass, void *data)
+static void stellaris_register_devices(void)
 {
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
-
-    sdc->init = stellaris_gptm_init;
+    sysbus_register_dev("stellaris-i2c", sizeof(stellaris_i2c_state),
+                        stellaris_i2c_init);
+    sysbus_register_dev("stellaris-gptm", sizeof(gptm_state),
+                        stellaris_gptm_init);
+    sysbus_register_dev("stellaris-adc", sizeof(stellaris_adc_state),
+                        stellaris_adc_init);
+    ssi_register_slave(&stellaris_ssi_bus_info);
 }
 
-static TypeInfo stellaris_gptm_info = {
-    .name          = "stellaris-gptm",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(gptm_state),
-    .class_init    = stellaris_gptm_class_init,
-};
-
-static void stellaris_adc_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
-
-    sdc->init = stellaris_adc_init;
-}
-
-static TypeInfo stellaris_adc_info = {
-    .name          = "stellaris-adc",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(stellaris_adc_state),
-    .class_init    = stellaris_adc_class_init,
-};
-
-static void stellaris_register_types(void)
-{
-    type_register_static(&stellaris_i2c_info);
-    type_register_static(&stellaris_gptm_info);
-    type_register_static(&stellaris_adc_info);
-}
-
-type_init(stellaris_register_types)
+device_init(stellaris_register_devices)

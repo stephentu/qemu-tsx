@@ -1,7 +1,12 @@
 #include "hw.h"
+#include "mips.h"
 #include "net.h"
-#include "trace.h"
-#include "sysbus.h"
+#include "isa.h"
+
+//#define DEBUG_MIPSNET_SEND
+//#define DEBUG_MIPSNET_RECEIVE
+//#define DEBUG_MIPSNET_DATA
+//#define DEBUG_MIPSNET_IRQ
 
 /* MIPSnet register offsets */
 
@@ -20,8 +25,6 @@
 #define MAX_ETH_FRAME_SIZE	1514
 
 typedef struct MIPSnetState {
-    SysBusDevice busdev;
-
     uint32_t busy;
     uint32_t rx_count;
     uint32_t rx_read;
@@ -30,7 +33,7 @@ typedef struct MIPSnetState {
     uint32_t intctl;
     uint8_t rx_buffer[MAX_ETH_FRAME_SIZE];
     uint8_t tx_buffer[MAX_ETH_FRAME_SIZE];
-    MemoryRegion io;
+    int io_base;
     qemu_irq irq;
     NICState *nic;
     NICConf conf;
@@ -51,7 +54,9 @@ static void mipsnet_reset(MIPSnetState *s)
 static void mipsnet_update_irq(MIPSnetState *s)
 {
     int isr = !!s->intctl;
-    trace_mipsnet_irq(isr, s->intctl);
+#ifdef DEBUG_MIPSNET_IRQ
+    printf("mipsnet: Set IRQ to %d (%02x)\n", isr, s->intctl);
+#endif
     qemu_set_irq(s->irq, isr);
 }
 
@@ -62,7 +67,7 @@ static int mipsnet_buffer_full(MIPSnetState *s)
     return 0;
 }
 
-static int mipsnet_can_receive(NetClientState *nc)
+static int mipsnet_can_receive(VLANClientState *nc)
 {
     MIPSnetState *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
@@ -71,11 +76,13 @@ static int mipsnet_can_receive(NetClientState *nc)
     return !mipsnet_buffer_full(s);
 }
 
-static ssize_t mipsnet_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+static ssize_t mipsnet_receive(VLANClientState *nc, const uint8_t *buf, size_t size)
 {
     MIPSnetState *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
-    trace_mipsnet_receive(size);
+#ifdef DEBUG_MIPSNET_RECEIVE
+    printf("mipsnet: receiving len=%zu\n", size);
+#endif
     if (!mipsnet_can_receive(nc))
         return -1;
 
@@ -96,8 +103,7 @@ static ssize_t mipsnet_receive(NetClientState *nc, const uint8_t *buf, size_t si
     return size;
 }
 
-static uint64_t mipsnet_ioport_read(void *opaque, hwaddr addr,
-                                    unsigned int size)
+static uint32_t mipsnet_ioport_read(void *opaque, uint32_t addr)
 {
     MIPSnetState *s = opaque;
     int ret = 0;
@@ -138,17 +144,20 @@ static uint64_t mipsnet_ioport_read(void *opaque, hwaddr addr,
     default:
         break;
     }
-    trace_mipsnet_read(addr, ret);
+#ifdef DEBUG_MIPSNET_DATA
+    printf("mipsnet: read addr=0x%02x val=0x%02x\n", addr, ret);
+#endif
     return ret;
 }
 
-static void mipsnet_ioport_write(void *opaque, hwaddr addr,
-                                 uint64_t val, unsigned int size)
+static void mipsnet_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     MIPSnetState *s = opaque;
 
     addr &= 0x3f;
-    trace_mipsnet_write(addr, val);
+#ifdef DEBUG_MIPSNET_DATA
+    printf("mipsnet: write addr=0x%02x val=0x%02x\n", addr, val);
+#endif
     switch (addr) {
     case MIPSNET_TX_DATA_COUNT:
 	s->tx_count = (val <= MAX_ETH_FRAME_SIZE) ? val : 0;
@@ -172,7 +181,9 @@ static void mipsnet_ioport_write(void *opaque, hwaddr addr,
         s->tx_buffer[s->tx_written++] = val;
         if (s->tx_written == s->tx_count) {
             /* Send buffer. */
-            trace_mipsnet_send(s->tx_count);
+#ifdef DEBUG_MIPSNET_SEND
+            printf("mipsnet: sending len=%d\n", s->tx_count);
+#endif
             qemu_send_packet(&s->nic->nc, s->tx_buffer, s->tx_count);
             s->tx_count = s->tx_written = 0;
             s->intctl |= MIPSNET_INTCTL_TXDONE;
@@ -191,94 +202,87 @@ static void mipsnet_ioport_write(void *opaque, hwaddr addr,
     }
 }
 
-static const VMStateDescription vmstate_mipsnet = {
-    .name = "mipsnet",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
-        VMSTATE_UINT32(busy, MIPSnetState),
-        VMSTATE_UINT32(rx_count, MIPSnetState),
-        VMSTATE_UINT32(rx_read, MIPSnetState),
-        VMSTATE_UINT32(tx_count, MIPSnetState),
-        VMSTATE_UINT32(tx_written, MIPSnetState),
-        VMSTATE_UINT32(intctl, MIPSnetState),
-        VMSTATE_BUFFER(rx_buffer, MIPSnetState),
-        VMSTATE_BUFFER(tx_buffer, MIPSnetState),
-        VMSTATE_END_OF_LIST()
-    }
-};
+static void mipsnet_save(QEMUFile *f, void *opaque)
+{
+    MIPSnetState *s = opaque;
 
-static void mipsnet_cleanup(NetClientState *nc)
+    qemu_put_be32s(f, &s->busy);
+    qemu_put_be32s(f, &s->rx_count);
+    qemu_put_be32s(f, &s->rx_read);
+    qemu_put_be32s(f, &s->tx_count);
+    qemu_put_be32s(f, &s->tx_written);
+    qemu_put_be32s(f, &s->intctl);
+    qemu_put_buffer(f, s->rx_buffer, MAX_ETH_FRAME_SIZE);
+    qemu_put_buffer(f, s->tx_buffer, MAX_ETH_FRAME_SIZE);
+}
+
+static int mipsnet_load(QEMUFile *f, void *opaque, int version_id)
+{
+    MIPSnetState *s = opaque;
+
+    if (version_id > 0)
+        return -EINVAL;
+
+    qemu_get_be32s(f, &s->busy);
+    qemu_get_be32s(f, &s->rx_count);
+    qemu_get_be32s(f, &s->rx_read);
+    qemu_get_be32s(f, &s->tx_count);
+    qemu_get_be32s(f, &s->tx_written);
+    qemu_get_be32s(f, &s->intctl);
+    qemu_get_buffer(f, s->rx_buffer, MAX_ETH_FRAME_SIZE);
+    qemu_get_buffer(f, s->tx_buffer, MAX_ETH_FRAME_SIZE);
+
+    return 0;
+}
+
+static void mipsnet_cleanup(VLANClientState *nc)
 {
     MIPSnetState *s = DO_UPCAST(NICState, nc, nc)->opaque;
 
-    s->nic = NULL;
+    unregister_savevm(NULL, "mipsnet", s);
+
+    isa_unassign_ioport(s->io_base, 36);
+
+    qemu_free(s);
 }
 
 static NetClientInfo net_mipsnet_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_TYPE_NIC,
     .size = sizeof(NICState),
     .can_receive = mipsnet_can_receive,
     .receive = mipsnet_receive,
     .cleanup = mipsnet_cleanup,
 };
 
-static const MemoryRegionOps mipsnet_ioport_ops = {
-    .read = mipsnet_ioport_read,
-    .write = mipsnet_ioport_write,
-    .impl.min_access_size = 1,
-    .impl.max_access_size = 4,
-};
-
-static int mipsnet_sysbus_init(SysBusDevice *dev)
+void mipsnet_init (int base, qemu_irq irq, NICInfo *nd)
 {
-    MIPSnetState *s = DO_UPCAST(MIPSnetState, busdev, dev);
+    MIPSnetState *s;
 
-    memory_region_init_io(&s->io, &mipsnet_ioport_ops, s, "mipsnet-io", 36);
-    sysbus_init_mmio(dev, &s->io);
-    sysbus_init_irq(dev, &s->irq);
+    qemu_check_nic_model(nd, "mipsnet");
 
-    s->nic = qemu_new_nic(&net_mipsnet_info, &s->conf,
-                          object_get_typename(OBJECT(dev)), dev->qdev.id, s);
-    qemu_format_nic_info_str(&s->nic->nc, s->conf.macaddr.a);
+    s = qemu_mallocz(sizeof(MIPSnetState));
 
-    return 0;
-}
+    register_ioport_write(base, 36, 1, mipsnet_ioport_write, s);
+    register_ioport_read(base, 36, 1, mipsnet_ioport_read, s);
+    register_ioport_write(base, 36, 2, mipsnet_ioport_write, s);
+    register_ioport_read(base, 36, 2, mipsnet_ioport_read, s);
+    register_ioport_write(base, 36, 4, mipsnet_ioport_write, s);
+    register_ioport_read(base, 36, 4, mipsnet_ioport_read, s);
 
-static void mipsnet_sysbus_reset(DeviceState *dev)
-{
-    MIPSnetState *s = DO_UPCAST(MIPSnetState, busdev.qdev, dev);
+    s->io_base = base;
+    s->irq = irq;
+
+    if (nd) {
+        memcpy(s->conf.macaddr.a, nd->macaddr, sizeof(nd->macaddr));
+        s->conf.vlan = nd->vlan;
+        s->conf.peer = nd->netdev;
+
+        s->nic = qemu_new_nic(&net_mipsnet_info, &s->conf,
+                              nd->model, nd->name, s);
+
+        qemu_format_nic_info_str(&s->nic->nc, s->conf.macaddr.a);
+    }
+
     mipsnet_reset(s);
+    register_savevm(NULL, "mipsnet", 0, 0, mipsnet_save, mipsnet_load, s);
 }
-
-static Property mipsnet_properties[] = {
-    DEFINE_NIC_PROPERTIES(MIPSnetState, conf),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void mipsnet_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = mipsnet_sysbus_init;
-    dc->desc = "MIPS Simulator network device";
-    dc->reset = mipsnet_sysbus_reset;
-    dc->vmsd = &vmstate_mipsnet;
-    dc->props = mipsnet_properties;
-}
-
-static TypeInfo mipsnet_info = {
-    .name          = "mipsnet",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(MIPSnetState),
-    .class_init    = mipsnet_class_init,
-};
-
-static void mipsnet_register_types(void)
-{
-    type_register_static(&mipsnet_info);
-}
-
-type_init(mipsnet_register_types)

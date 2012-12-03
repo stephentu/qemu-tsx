@@ -9,8 +9,6 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
@@ -19,6 +17,7 @@
 
 typedef struct ModuleEntry
 {
+    module_init_type type;
     void (*init)(void);
     QTAILQ_ENTRY(ModuleEntry) node;
 } ModuleEntry;
@@ -60,7 +59,7 @@ void register_module_init(void (*fn)(void), module_init_type type)
     ModuleEntry *e;
     ModuleTypeList *l;
 
-    e = g_malloc0(sizeof(*e));
+    e = qemu_mallocz(sizeof(*e));
     e->init = fn;
 
     l = find_type(type);

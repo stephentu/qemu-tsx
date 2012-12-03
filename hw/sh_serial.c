@@ -27,7 +27,6 @@
 #include "hw.h"
 #include "sh.h"
 #include "qemu-char.h"
-#include "exec-memory.h"
 
 //#define DEBUG_SERIAL
 
@@ -40,9 +39,6 @@
 #define SH_RX_FIFO_LENGTH (16)
 
 typedef struct {
-    MemoryRegion iomem;
-    MemoryRegion iomem_p4;
-    MemoryRegion iomem_a7;
     uint8_t smr;
     uint8_t brr;
     uint8_t scr;
@@ -78,8 +74,7 @@ static void sh_serial_clear_fifo(sh_serial_state * s)
     s->rx_tail = 0;
 }
 
-static void sh_serial_write(void *opaque, hwaddr offs,
-                            uint64_t val, unsigned size)
+static void sh_serial_write(void *opaque, uint32_t offs, uint32_t val)
 {
     sh_serial_state *s = opaque;
     unsigned char ch;
@@ -110,7 +105,7 @@ static void sh_serial_write(void *opaque, hwaddr offs,
     case 0x0c: /* FTDR / TDR */
         if (s->chr) {
             ch = val;
-            qemu_chr_fe_write(s->chr, &ch, 1);
+            qemu_chr_write(s->chr, &ch, 1);
 	}
 	s->dr = val;
 	s->flags &= ~SH_SERIAL_FLAG_TDE;
@@ -186,13 +181,11 @@ static void sh_serial_write(void *opaque, hwaddr offs,
         }
     }
 
-    fprintf(stderr, "sh_serial: unsupported write to 0x%02"
-            HWADDR_PRIx "\n", offs);
+    fprintf(stderr, "sh_serial: unsupported write to 0x%02x\n", offs);
     abort();
 }
 
-static uint64_t sh_serial_read(void *opaque, hwaddr offs,
-                               unsigned size)
+static uint32_t sh_serial_read(void *opaque, uint32_t offs)
 {
     sh_serial_state *s = opaque;
     uint32_t ret = ~0;
@@ -288,8 +281,7 @@ static uint64_t sh_serial_read(void *opaque, hwaddr offs,
 #endif
 
     if (ret & ~((1 << 16) - 1)) {
-        fprintf(stderr, "sh_serial: unsupported read from 0x%02"
-                HWADDR_PRIx "\n", offs);
+        fprintf(stderr, "sh_serial: unsupported read from 0x%02x\n", offs);
         abort();
     }
 
@@ -346,24 +338,30 @@ static void sh_serial_event(void *opaque, int event)
         sh_serial_receive_break(s);
 }
 
-static const MemoryRegionOps sh_serial_ops = {
-    .read = sh_serial_read,
-    .write = sh_serial_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const sh_serial_readfn[] = {
+    &sh_serial_read,
+    &sh_serial_read,
+    &sh_serial_read,
 };
 
-void sh_serial_init(MemoryRegion *sysmem,
-                    hwaddr base, int feat,
-                    uint32_t freq, CharDriverState *chr,
-                    qemu_irq eri_source,
-                    qemu_irq rxi_source,
-                    qemu_irq txi_source,
-                    qemu_irq tei_source,
-                    qemu_irq bri_source)
+static CPUWriteMemoryFunc * const sh_serial_writefn[] = {
+    &sh_serial_write,
+    &sh_serial_write,
+    &sh_serial_write,
+};
+
+void sh_serial_init (target_phys_addr_t base, int feat,
+		     uint32_t freq, CharDriverState *chr,
+		     qemu_irq eri_source,
+		     qemu_irq rxi_source,
+		     qemu_irq txi_source,
+		     qemu_irq tei_source,
+		     qemu_irq bri_source)
 {
     sh_serial_state *s;
+    int s_io_memory;
 
-    s = g_malloc0(sizeof(sh_serial_state));
+    s = qemu_mallocz(sizeof(sh_serial_state));
 
     s->feat = feat;
     s->flags = SH_SERIAL_FLAG_TEND | SH_SERIAL_FLAG_TDE;
@@ -383,16 +381,11 @@ void sh_serial_init(MemoryRegion *sysmem,
 
     sh_serial_clear_fifo(s);
 
-    memory_region_init_io(&s->iomem, &sh_serial_ops, s,
-                          "serial", 0x100000000ULL);
-
-    memory_region_init_alias(&s->iomem_p4, "serial-p4", &s->iomem,
-                             0, 0x28);
-    memory_region_add_subregion(sysmem, P4ADDR(base), &s->iomem_p4);
-
-    memory_region_init_alias(&s->iomem_a7, "serial-a7", &s->iomem,
-                             0, 0x28);
-    memory_region_add_subregion(sysmem, A7ADDR(base), &s->iomem_a7);
+    s_io_memory = cpu_register_io_memory(sh_serial_readfn,
+					 sh_serial_writefn, s,
+                                         DEVICE_NATIVE_ENDIAN);
+    cpu_register_physical_memory(P4ADDR(base), 0x28, s_io_memory);
+    cpu_register_physical_memory(A7ADDR(base), 0x28, s_io_memory);
 
     s->chr = chr;
 

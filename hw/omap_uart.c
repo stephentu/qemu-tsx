@@ -20,13 +20,12 @@
 #include "qemu-char.h"
 #include "hw.h"
 #include "omap.h"
-#include "serial.h"
-#include "exec-memory.h"
+/* We use pc-style serial ports.  */
+#include "pc.h"
 
 /* UARTs */
 struct omap_uart_s {
-    MemoryRegion iomem;
-    hwaddr base;
+    target_phys_addr_t base;
     SerialState *serial; /* TODO */
     struct omap_target_agent_s *ta;
     omap_clk fclk;
@@ -50,33 +49,34 @@ void omap_uart_reset(struct omap_uart_s *s)
     s->clksel = 0;
 }
 
-struct omap_uart_s *omap_uart_init(hwaddr base,
+struct omap_uart_s *omap_uart_init(target_phys_addr_t base,
                 qemu_irq irq, omap_clk fclk, omap_clk iclk,
                 qemu_irq txdma, qemu_irq rxdma,
                 const char *label, CharDriverState *chr)
 {
     struct omap_uart_s *s = (struct omap_uart_s *)
-            g_malloc0(sizeof(struct omap_uart_s));
+            qemu_mallocz(sizeof(struct omap_uart_s));
 
     s->base = base;
     s->fclk = fclk;
     s->irq = irq;
-    s->serial = serial_mm_init(get_system_memory(), base, 2, irq,
-                               omap_clk_getrate(fclk)/16,
-                               chr ?: qemu_chr_new(label, "null", NULL),
-                               DEVICE_NATIVE_ENDIAN);
+#ifdef TARGET_WORDS_BIGENDIAN
+    s->serial = serial_mm_init(base, 2, irq, omap_clk_getrate(fclk)/16,
+                               chr ?: qemu_chr_open(label, "null", NULL), 1,
+                               1);
+#else
+    s->serial = serial_mm_init(base, 2, irq, omap_clk_getrate(fclk)/16,
+                               chr ?: qemu_chr_open(label, "null", NULL), 1,
+                               0);
+#endif
     return s;
 }
 
-static uint64_t omap_uart_read(void *opaque, hwaddr addr,
-                               unsigned size)
+static uint32_t omap_uart_read(void *opaque, target_phys_addr_t addr)
 {
     struct omap_uart_s *s = (struct omap_uart_s *) opaque;
 
-    if (size == 4) {
-        return omap_badwidth_read8(opaque, addr);
-    }
-
+    addr &= 0xff;
     switch (addr) {
     case 0x20:	/* MDR1 */
         return s->mdr[0];
@@ -106,15 +106,12 @@ static uint64_t omap_uart_read(void *opaque, hwaddr addr,
     return 0;
 }
 
-static void omap_uart_write(void *opaque, hwaddr addr,
-                            uint64_t value, unsigned size)
+static void omap_uart_write(void *opaque, target_phys_addr_t addr,
+                uint32_t value)
 {
     struct omap_uart_s *s = (struct omap_uart_s *) opaque;
 
-    if (size == 4) {
-        return omap_badwidth_write8(opaque, addr, value);
-    }
-
+    addr &= 0xff;
     switch (addr) {
     case 0x20:	/* MDR1 */
         s->mdr[0] = value & 0x7f;
@@ -152,27 +149,32 @@ static void omap_uart_write(void *opaque, hwaddr addr,
     }
 }
 
-static const MemoryRegionOps omap_uart_ops = {
-    .read = omap_uart_read,
-    .write = omap_uart_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const omap_uart_readfn[] = {
+    omap_uart_read,
+    omap_uart_read,
+    omap_badwidth_read8,
 };
 
-struct omap_uart_s *omap2_uart_init(MemoryRegion *sysmem,
-                struct omap_target_agent_s *ta,
+static CPUWriteMemoryFunc * const omap_uart_writefn[] = {
+    omap_uart_write,
+    omap_uart_write,
+    omap_badwidth_write8,
+};
+
+struct omap_uart_s *omap2_uart_init(struct omap_target_agent_s *ta,
                 qemu_irq irq, omap_clk fclk, omap_clk iclk,
                 qemu_irq txdma, qemu_irq rxdma,
                 const char *label, CharDriverState *chr)
 {
-    hwaddr base = omap_l4_attach(ta, 0, NULL);
+    target_phys_addr_t base = omap_l4_attach(ta, 0, 0);
     struct omap_uart_s *s = omap_uart_init(base, irq,
                     fclk, iclk, txdma, rxdma, label, chr);
-
-    memory_region_init_io(&s->iomem, &omap_uart_ops, s, "omap.uart", 0x100);
+    int iomemtype = cpu_register_io_memory(omap_uart_readfn,
+                    omap_uart_writefn, s, DEVICE_NATIVE_ENDIAN);
 
     s->ta = ta;
 
-    memory_region_add_subregion(sysmem, base + 0x20, &s->iomem);
+    cpu_register_physical_memory(base + 0x20, 0x100, iomemtype);
 
     return s;
 }
@@ -180,8 +182,15 @@ struct omap_uart_s *omap2_uart_init(MemoryRegion *sysmem,
 void omap_uart_attach(struct omap_uart_s *s, CharDriverState *chr)
 {
     /* TODO: Should reuse or destroy current s->serial */
-    s->serial = serial_mm_init(get_system_memory(), s->base, 2, s->irq,
+#ifdef TARGET_WORDS_BIGENDIAN
+    s->serial = serial_mm_init(s->base, 2, s->irq,
                                omap_clk_getrate(s->fclk) / 16,
-                               chr ?: qemu_chr_new("null", "null", NULL),
-                               DEVICE_NATIVE_ENDIAN);
+                               chr ?: qemu_chr_open("null", "null", NULL), 1,
+                               1);
+#else
+    s->serial = serial_mm_init(s->base, 2, s->irq,
+                               omap_clk_getrate(s->fclk) / 16,
+                               chr ?: qemu_chr_open("null", "null", NULL), 1,
+                               0);
+#endif
 }

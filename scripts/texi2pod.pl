@@ -36,7 +36,6 @@ $fnno = 1;
 $inf = "";
 $ibase = "";
 @ipath = ();
-$encoding = undef;
 
 while ($_ = shift) {
     if (/^-D(.*)$/) {
@@ -97,12 +96,6 @@ while(<$inf>) {
     # Look for filename and title markers.
     /^\@setfilename\s+([^.]+)/ and $fn = $1, next;
     /^\@settitle\s+([^.]+)/ and $tl = postprocess($1), next;
-
-    # Look for document encoding
-    /^\@documentencoding\s+([^.]+)/ and do {
-        $encoding = $1 unless defined $encoding;
-        next;
-    };
 
     # Identify a man title but keep only the one we are interested in.
     /^\@c\s+man\s+title\s+([A-Za-z0-9-]+)\s+(.+)/ and do {
@@ -342,8 +335,6 @@ $inf = pop @instack;
 }
 
 die "No filename or title\n" unless defined $fn && defined $tl;
-
-print "=encoding $encoding\n\n" if defined $encoding;
 
 $sects{NAME} = "$fn \- $tl\n";
 $sects{FOOTNOTES} .= "=back\n" if exists $sects{FOOTNOTES};

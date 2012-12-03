@@ -30,7 +30,6 @@
 #include "audiodev.h"
 #include "audio/audio.h"
 #include "pci.h"
-#include "dma.h"
 
 /* Missing stuff:
    SCTRL_P[12](END|ST)INC
@@ -269,7 +268,6 @@ struct chan {
 typedef struct ES1370State {
     PCIDevice dev;
     QEMUSoundCard card;
-    MemoryRegion io;
     struct chan chan[NB_CHANNELS];
     SWVoiceOut *dac_voice[2];
     SWVoiceIn *adc_voice;
@@ -410,7 +408,7 @@ static void es1370_update_voices (ES1370State *s, uint32_t ctl, uint32_t sctl)
 
         if ((old_fmt != new_fmt) || (old_freq != new_freq)) {
             d->shift = (new_fmt & 1) + (new_fmt >> 1);
-            ldebug ("channel %zu, freq = %d, nchannels %d, fmt %d, shift %d\n",
+            ldebug ("channel %d, freq = %d, nchannels %d, fmt %d, shift %d\n",
                     i,
                     new_freq,
                     1 << (new_fmt & 1),
@@ -578,7 +576,7 @@ IO_WRITE_PROTO (es1370_writel)
         d++;
     case ES1370_REG_DAC1_SCOUNT:
         d->scount = (val & 0xffff) | (d->scount & ~0xffff);
-        ldebug ("chan %td CURR_SAMP_CT %d, SAMP_CT %d\n",
+        ldebug ("chan %d CURR_SAMP_CT %d, SAMP_CT %d\n",
                 d - &s->chan[0], val >> 16, (val & 0xffff));
         break;
 
@@ -588,7 +586,7 @@ IO_WRITE_PROTO (es1370_writel)
         d++;
     case ES1370_REG_DAC1_FRAMEADR:
         d->frame_addr = val;
-        ldebug ("chan %td frame address %#x\n", d - &s->chan[0], val);
+        ldebug ("chan %d frame address %#x\n", d - &s->chan[0], val);
         break;
 
     case ES1370_REG_PHANTOM_FRAMECNT:
@@ -605,7 +603,7 @@ IO_WRITE_PROTO (es1370_writel)
     case ES1370_REG_DAC1_FRAMECNT:
         d->frame_cnt = val;
         d->leftover = 0;
-        ldebug ("chan %td frame count %d, buffer size %d\n",
+        ldebug ("chan %d frame count %d, buffer size %d\n",
                 d - &s->chan[0], val >> 16, val & 0xffff);
         break;
 
@@ -745,10 +743,9 @@ IO_READ_PROTO (es1370_readl)
         {
             uint32_t size = ((d->frame_cnt & 0xffff) + 1) << 2;
             uint32_t curr = ((d->frame_cnt >> 16) + 1) << 2;
-            if (curr > size) {
+            if (curr > size)
                 dolog ("read framecnt curr %d, size %d %d\n", curr, size,
                        curr > size);
-            }
         }
 #endif
         break;
@@ -778,6 +775,7 @@ IO_READ_PROTO (es1370_readl)
     return val;
 }
 
+
 static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
                                    int max, int *irq)
 {
@@ -789,7 +787,7 @@ static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
     int cnt = d->frame_cnt >> 16;
     int size = d->frame_cnt & 0xffff;
     int left = ((size - cnt + 1) << 2) + d->leftover;
-    int transferred = 0;
+    int transfered = 0;
     int temp = audio_MIN (max, audio_MIN (left, csc_bytes));
     int index = d - &s->chan[0];
 
@@ -804,11 +802,11 @@ static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
             if (!acquired)
                 break;
 
-            pci_dma_write (&s->dev, addr, tmpbuf, acquired);
+            cpu_physical_memory_write (addr, tmpbuf, acquired);
 
             temp -= acquired;
             addr += acquired;
-            transferred += acquired;
+            transfered += acquired;
         }
     }
     else {
@@ -818,17 +816,17 @@ static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
             int copied, to_copy;
 
             to_copy = audio_MIN ((size_t) temp, sizeof (tmpbuf));
-            pci_dma_read (&s->dev, addr, tmpbuf, to_copy);
+            cpu_physical_memory_read (addr, tmpbuf, to_copy);
             copied = AUD_write (voice, tmpbuf, to_copy);
             if (!copied)
                 break;
             temp -= copied;
             addr += copied;
-            transferred += copied;
+            transfered += copied;
         }
     }
 
-    if (csc_bytes == transferred) {
+    if (csc_bytes == transfered) {
         *irq = 1;
         d->scount = sc | (sc << 16);
         ldebug ("sc = %d, rate = %f\n",
@@ -837,10 +835,10 @@ static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
     }
     else {
         *irq = 0;
-        d->scount = sc | (((csc_bytes - transferred - 1) >> d->shift) << 16);
+        d->scount = sc | (((csc_bytes - transfered - 1) >> d->shift) << 16);
     }
 
-    cnt += (transferred + d->leftover) >> 2;
+    cnt += (transfered + d->leftover) >> 2;
 
     if (s->sctl & loop_sel) {
         /* Bah, how stupid is that having a 0 represent true value?
@@ -854,7 +852,7 @@ static void es1370_transfer_audio (ES1370State *s, struct chan *d, int loop_sel,
             d->frame_cnt |= cnt << 16;
     }
 
-    d->leftover = (transferred + d->leftover) & 3;
+    d->leftover = (transfered + d->leftover) & 3;
 }
 
 static void es1370_run_channel (ES1370State *s, size_t chan, int free_or_avail)
@@ -908,46 +906,23 @@ static void es1370_adc_callback (void *opaque, int avail)
     es1370_run_channel (s, ADC_CHANNEL, avail);
 }
 
-static uint64_t es1370_read(void *opaque, hwaddr addr,
-                            unsigned size)
+static void es1370_map (PCIDevice *pci_dev, int region_num,
+                        pcibus_t addr, pcibus_t size, int type)
 {
-    switch (size) {
-    case 1:
-        return es1370_readb(opaque, addr);
-    case 2:
-        return es1370_readw(opaque, addr);
-    case 4:
-        return es1370_readl(opaque, addr);
-    default:
-        return -1;
-    }
-}
+    ES1370State *s = DO_UPCAST (ES1370State, dev, pci_dev);
 
-static void es1370_write(void *opaque, hwaddr addr, uint64_t val,
-                      unsigned size)
-{
-    switch (size) {
-    case 1:
-        es1370_writeb(opaque, addr, val);
-        break;
-    case 2:
-        es1370_writew(opaque, addr, val);
-        break;
-    case 4:
-        es1370_writel(opaque, addr, val);
-        break;
-    }
-}
+    (void) region_num;
+    (void) size;
+    (void) type;
 
-static const MemoryRegionOps es1370_io_ops = {
-    .read = es1370_read,
-    .write = es1370_write,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
+    register_ioport_write (addr, 0x40 * 4, 1, es1370_writeb, s);
+    register_ioport_write (addr, 0x40 * 2, 2, es1370_writew, s);
+    register_ioport_write (addr, 0x40, 4, es1370_writel, s);
+
+    register_ioport_read (addr, 0x40 * 4, 1, es1370_readb, s);
+    register_ioport_read (addr, 0x40 * 2, 2, es1370_readw, s);
+    register_ioport_read (addr, 0x40, 4, es1370_readl, s);
+}
 
 static const VMStateDescription vmstate_es1370_channel = {
     .name = "es1370_channel",
@@ -955,12 +930,12 @@ static const VMStateDescription vmstate_es1370_channel = {
     .minimum_version_id = 2,
     .minimum_version_id_old = 2,
     .fields      = (VMStateField []) {
-        VMSTATE_UINT32 (shift, struct chan),
-        VMSTATE_UINT32 (leftover, struct chan),
-        VMSTATE_UINT32 (scount, struct chan),
-        VMSTATE_UINT32 (frame_addr, struct chan),
-        VMSTATE_UINT32 (frame_cnt, struct chan),
-        VMSTATE_END_OF_LIST ()
+        VMSTATE_UINT32(shift, struct chan),
+        VMSTATE_UINT32(leftover, struct chan),
+        VMSTATE_UINT32(scount, struct chan),
+        VMSTATE_UINT32(frame_addr, struct chan),
+        VMSTATE_UINT32(frame_cnt, struct chan),
+        VMSTATE_END_OF_LIST()
     }
 };
 
@@ -1000,15 +975,15 @@ static const VMStateDescription vmstate_es1370 = {
     .minimum_version_id_old = 2,
     .post_load = es1370_post_load,
     .fields      = (VMStateField []) {
-        VMSTATE_PCI_DEVICE (dev, ES1370State),
-        VMSTATE_STRUCT_ARRAY (chan, ES1370State, NB_CHANNELS, 2,
-                              vmstate_es1370_channel, struct chan),
-        VMSTATE_UINT32 (ctl, ES1370State),
-        VMSTATE_UINT32 (status, ES1370State),
-        VMSTATE_UINT32 (mempage, ES1370State),
-        VMSTATE_UINT32 (codec, ES1370State),
-        VMSTATE_UINT32 (sctl, ES1370State),
-        VMSTATE_END_OF_LIST ()
+        VMSTATE_PCI_DEVICE(dev, ES1370State),
+        VMSTATE_STRUCT_ARRAY(chan, ES1370State, NB_CHANNELS, 2,
+                             vmstate_es1370_channel, struct chan),
+        VMSTATE_UINT32(ctl, ES1370State),
+        VMSTATE_UINT32(status, ES1370State),
+        VMSTATE_UINT32(mempage, ES1370State),
+        VMSTATE_UINT32(codec, ES1370State),
+        VMSTATE_UINT32(sctl, ES1370State),
+        VMSTATE_END_OF_LIST()
     }
 };
 
@@ -1023,32 +998,37 @@ static int es1370_initfn (PCIDevice *dev)
     ES1370State *s = DO_UPCAST (ES1370State, dev, dev);
     uint8_t *c = s->dev.config;
 
+    pci_config_set_vendor_id (c, PCI_VENDOR_ID_ENSONIQ);
+    pci_config_set_device_id (c, PCI_DEVICE_ID_ENSONIQ_ES1370);
     c[PCI_STATUS + 1] = PCI_STATUS_DEVSEL_SLOW >> 8;
+    pci_config_set_class (c, PCI_CLASS_MULTIMEDIA_AUDIO);
 
-#if 0
+#if 1
+    c[PCI_SUBSYSTEM_VENDOR_ID] = 0x42;
+    c[PCI_SUBSYSTEM_VENDOR_ID + 1] = 0x49;
+    c[PCI_SUBSYSTEM_ID] = 0x4c;
+    c[PCI_SUBSYSTEM_ID + 1] = 0x4c;
+#else
+    c[PCI_SUBSYSTEM_VENDOR_ID] = 0x74;
+    c[PCI_SUBSYSTEM_VENDOR_ID + 1] = 0x12;
+    c[PCI_SUBSYSTEM_ID] = 0x71;
+    c[PCI_SUBSYSTEM_ID + 1] = 0x13;
     c[PCI_CAPABILITY_LIST] = 0xdc;
     c[PCI_INTERRUPT_LINE] = 10;
     c[0xdc] = 0x00;
 #endif
 
+    /* TODO: RST# value should be 0. */
     c[PCI_INTERRUPT_PIN] = 1;
     c[PCI_MIN_GNT] = 0x0c;
     c[PCI_MAX_LAT] = 0x80;
 
-    memory_region_init_io (&s->io, &es1370_io_ops, s, "es1370", 256);
-    pci_register_bar (&s->dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
+    pci_register_bar (&s->dev, 0, 256, PCI_BASE_ADDRESS_SPACE_IO, es1370_map);
     qemu_register_reset (es1370_on_reset, s);
 
     AUD_register_card ("es1370", &s->card);
     es1370_reset (s);
     return 0;
-}
-
-static void es1370_exitfn (PCIDevice *dev)
-{
-    ES1370State *s = DO_UPCAST (ES1370State, dev, dev);
-
-    memory_region_destroy (&s->io);
 }
 
 int es1370_init (PCIBus *bus)
@@ -1057,33 +1037,17 @@ int es1370_init (PCIBus *bus)
     return 0;
 }
 
-static void es1370_class_init (ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS (klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS (klass);
-
-    k->init = es1370_initfn;
-    k->exit = es1370_exitfn;
-    k->vendor_id = PCI_VENDOR_ID_ENSONIQ;
-    k->device_id = PCI_DEVICE_ID_ENSONIQ_ES1370;
-    k->class_id = PCI_CLASS_MULTIMEDIA_AUDIO;
-    k->subsystem_vendor_id = 0x4942;
-    k->subsystem_id = 0x4c4c;
-    dc->desc = "ENSONIQ AudioPCI ES1370";
-    dc->vmsd = &vmstate_es1370;
-}
-
-static TypeInfo es1370_info = {
-    .name          = "ES1370",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof (ES1370State),
-    .class_init    = es1370_class_init,
+static PCIDeviceInfo es1370_info = {
+    .qdev.name    = "ES1370",
+    .qdev.desc    = "ENSONIQ AudioPCI ES1370",
+    .qdev.size    = sizeof (ES1370State),
+    .qdev.vmsd    = &vmstate_es1370,
+    .init         = es1370_initfn,
 };
 
-static void es1370_register_types (void)
+static void es1370_register (void)
 {
-    type_register_static (&es1370_info);
+    pci_qdev_register (&es1370_info);
 }
-
-type_init (es1370_register_types)
+device_init (es1370_register);
 

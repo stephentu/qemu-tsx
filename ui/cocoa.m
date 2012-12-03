@@ -23,7 +23,6 @@
  */
 
 #import <Cocoa/Cocoa.h>
-#include <crt_externs.h>
 
 #include "qemu-common.h"
 #include "console.h"
@@ -62,7 +61,9 @@ typedef struct {
     int bitsPerPixel;
 } QEMUScreen;
 
+int qemu_main(int argc, char **argv); // main defined in qemu/vl.c
 NSWindow *normalWindow;
+id cocoaView;
 static DisplayChangeListener *dcl;
 
 int gArgc;
@@ -276,8 +277,6 @@ static int cocoa_keycode_to_qemu(int keycode)
 - (float) cdy;
 - (QEMUScreen) gscreen;
 @end
-
-QemuCocoaView *cocoaView;
 
 @implementation QemuCocoaView
 - (id)initWithFrame:(NSRect)frameRect
@@ -772,7 +771,7 @@ QemuCocoaView *cocoaView;
               modalForWindow:normalWindow modalDelegate:self
               didEndSelector:@selector(openPanelDidEnd:returnCode:contextInfo:) contextInfo:NULL];
     } else {
-        // or launch QEMU, with the global args
+        // or Launch Qemu, with the global args
         [self startEmulationWithArgc:gArgc argv:(char **)gArgv];
     }
 }
@@ -795,7 +794,7 @@ QemuCocoaView *cocoaView;
     COCOA_DEBUG("QemuCocoaAppController: startEmulationWithArgc\n");
 
     int status;
-    status = qemu_main(argc, argv, *_NSGetEnviron());
+    status = qemu_main(argc, argv);
     exit(status);
 }
 
@@ -810,8 +809,6 @@ QemuCocoaView *cocoaView;
         char *img = (char*)[ [ sheet filename ] cStringUsingEncoding:NSASCIIStringEncoding];
 
         char **argv = (char**)malloc( sizeof(char*)*3 );
-
-        [sheet close];
 
         asprintf(&argv[0], "%s", bin);
         asprintf(&argv[1], "-hda");
@@ -868,21 +865,10 @@ int main (int argc, const char * argv[]) {
 
     /* In case we don't need to display a window, let's not do that */
     for (i = 1; i < argc; i++) {
-        const char *opt = argv[i];
-
-        if (opt[0] == '-') {
-            /* Treat --foo the same as -foo.  */
-            if (opt[1] == '-') {
-                opt++;
-            }
-            if (!strcmp(opt, "-h") || !strcmp(opt, "-help") ||
-                !strcmp(opt, "-vnc") ||
-                !strcmp(opt, "-nographic") ||
-                !strcmp(opt, "-version") ||
-                !strcmp(opt, "-curses") ||
-                !strcmp(opt, "-qtest")) {
-                return qemu_main(gArgc, gArgv, *_NSGetEnviron());
-            }
+        if (!strcmp(argv[i], "-vnc") ||
+            !strcmp(argv[i], "-nographic") ||
+            !strcmp(argv[i], "-curses")) {
+                return qemu_main(gArgc, gArgv);
         }
     }
 
@@ -1007,18 +993,18 @@ static void cocoa_refresh(DisplayState *ds)
 static void cocoa_cleanup(void)
 {
     COCOA_DEBUG("qemu_cocoa: cocoa_cleanup\n");
-    g_free(dcl);
+	qemu_free(dcl);
 }
 
 void cocoa_display_init(DisplayState *ds, int full_screen)
 {
     COCOA_DEBUG("qemu_cocoa: cocoa_display_init\n");
 
-    dcl = g_malloc0(sizeof(DisplayChangeListener));
-
+	dcl = qemu_mallocz(sizeof(DisplayChangeListener));
+	
     // register vga output callbacks
-    dcl->dpy_gfx_update = cocoa_update;
-    dcl->dpy_gfx_resize = cocoa_resize;
+    dcl->dpy_update = cocoa_update;
+    dcl->dpy_resize = cocoa_resize;
     dcl->dpy_refresh = cocoa_refresh;
 
 	register_displaychangelistener(ds, dcl);

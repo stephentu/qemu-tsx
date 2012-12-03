@@ -21,39 +21,23 @@
 
 #include "qxl.h"
 
-static void qxl_blit(PCIQXLDevice *qxl, QXLRect *rect)
+static void qxl_flip(PCIQXLDevice *qxl, QXLRect *rect)
 {
-    uint8_t *src;
-    uint8_t *dst = ds_get_data(qxl->vga.ds);
+    uint8_t *src = qxl->guest_primary.data;
+    uint8_t *dst = qxl->guest_primary.flipped;
     int len, i;
 
-    if (is_buffer_shared(qxl->vga.ds->surface)) {
-        return;
-    }
-    if (!qxl->guest_primary.data) {
-        trace_qxl_render_blit_guest_primary_initialized();
-        qxl->guest_primary.data = memory_region_get_ram_ptr(&qxl->vga.vram);
-    }
-    trace_qxl_render_blit(qxl->guest_primary.qxl_stride,
-            rect->left, rect->right, rect->top, rect->bottom);
-    src = qxl->guest_primary.data;
-    if (qxl->guest_primary.qxl_stride < 0) {
-        /* qxl surface is upside down, walk src scanlines
-         * in reverse order to flip it */
-        src += (qxl->guest_primary.surface.height - rect->top - 1) *
-            qxl->guest_primary.abs_stride;
-    } else {
-        src += rect->top * qxl->guest_primary.abs_stride;
-    }
-    dst += rect->top  * qxl->guest_primary.abs_stride;
+    src += (qxl->guest_primary.surface.height - rect->top - 1) *
+        qxl->guest_primary.stride;
+    dst += rect->top  * qxl->guest_primary.stride;
     src += rect->left * qxl->guest_primary.bytes_pp;
     dst += rect->left * qxl->guest_primary.bytes_pp;
     len  = (rect->right - rect->left) * qxl->guest_primary.bytes_pp;
 
     for (i = rect->top; i < rect->bottom; i++) {
         memcpy(dst, src, len);
-        dst += qxl->guest_primary.abs_stride;
-        src += qxl->guest_primary.qxl_stride;
+        dst += qxl->guest_primary.stride;
+        src -= qxl->guest_primary.stride;
     }
 }
 
@@ -61,8 +45,7 @@ void qxl_render_resize(PCIQXLDevice *qxl)
 {
     QXLSurfaceCreate *sc = &qxl->guest_primary.surface;
 
-    qxl->guest_primary.qxl_stride = sc->stride;
-    qxl->guest_primary.abs_stride = abs(sc->stride);
+    qxl->guest_primary.stride = sc->stride;
     qxl->guest_primary.resized++;
     switch (sc->format) {
     case SPICE_SURFACE_FMT_16_555:
@@ -87,109 +70,82 @@ void qxl_render_resize(PCIQXLDevice *qxl)
     }
 }
 
-static void qxl_set_rect_to_surface(PCIQXLDevice *qxl, QXLRect *area)
-{
-    area->left   = 0;
-    area->right  = qxl->guest_primary.surface.width;
-    area->top    = 0;
-    area->bottom = qxl->guest_primary.surface.height;
-}
-
-static void qxl_render_update_area_unlocked(PCIQXLDevice *qxl)
+void qxl_render_update(PCIQXLDevice *qxl)
 {
     VGACommonState *vga = &qxl->vga;
+    QXLRect dirty[32], update;
+    void *ptr;
     int i;
 
     if (qxl->guest_primary.resized) {
         qxl->guest_primary.resized = 0;
-        qxl->guest_primary.data = memory_region_get_ram_ptr(&qxl->vga.vram);
-        qxl_set_rect_to_surface(qxl, &qxl->dirty[0]);
-        qxl->num_dirty_rects = 1;
-        trace_qxl_render_guest_primary_resized(
+
+        if (qxl->guest_primary.flipped) {
+            qemu_free(qxl->guest_primary.flipped);
+            qxl->guest_primary.flipped = NULL;
+        }
+        qemu_free_displaysurface(vga->ds);
+
+        qxl->guest_primary.data = qemu_get_ram_ptr(qxl->vga.vram_offset);
+        if (qxl->guest_primary.stride < 0) {
+            /* spice surface is upside down -> need extra buffer to flip */
+            qxl->guest_primary.stride = -qxl->guest_primary.stride;
+            qxl->guest_primary.flipped = qemu_malloc(qxl->guest_primary.surface.width *
+                                                     qxl->guest_primary.stride);
+            ptr = qxl->guest_primary.flipped;
+        } else {
+            ptr = qxl->guest_primary.data;
+        }
+        dprint(qxl, 1, "%s: %dx%d, stride %d, bpp %d, depth %d, flip %s\n",
+               __FUNCTION__,
                qxl->guest_primary.surface.width,
                qxl->guest_primary.surface.height,
-               qxl->guest_primary.qxl_stride,
+               qxl->guest_primary.stride,
                qxl->guest_primary.bytes_pp,
-               qxl->guest_primary.bits_pp);
-        if (qxl->guest_primary.qxl_stride > 0) {
-            qemu_free_displaysurface(vga->ds);
+               qxl->guest_primary.bits_pp,
+               qxl->guest_primary.flipped ? "yes" : "no");
+        vga->ds->surface =
             qemu_create_displaysurface_from(qxl->guest_primary.surface.width,
                                             qxl->guest_primary.surface.height,
                                             qxl->guest_primary.bits_pp,
-                                            qxl->guest_primary.abs_stride,
-                                            qxl->guest_primary.data);
-        } else {
-            qemu_resize_displaysurface(vga->ds,
-                    qxl->guest_primary.surface.width,
-                    qxl->guest_primary.surface.height);
-        }
-        dpy_gfx_resize(vga->ds);
+                                            qxl->guest_primary.stride,
+                                            ptr);
+        dpy_resize(vga->ds);
     }
-    for (i = 0; i < qxl->num_dirty_rects; i++) {
-        if (qemu_spice_rect_is_empty(qxl->dirty+i)) {
-            break;
-        }
-        qxl_blit(qxl, qxl->dirty+i);
-        dpy_gfx_update(vga->ds,
-                       qxl->dirty[i].left, qxl->dirty[i].top,
-                       qxl->dirty[i].right - qxl->dirty[i].left,
-                       qxl->dirty[i].bottom - qxl->dirty[i].top);
-    }
-    qxl->num_dirty_rects = 0;
-}
 
-/*
- * use ssd.lock to protect render_update_cookie_num.
- * qxl_render_update is called by io thread or vcpu thread, and the completion
- * callbacks are called by spice_server thread, defering to bh called from the
- * io thread.
- */
-void qxl_render_update(PCIQXLDevice *qxl)
-{
-    QXLCookie *cookie;
-
-    qemu_mutex_lock(&qxl->ssd.lock);
-
-    if (!runstate_is_running() || !qxl->guest_primary.commands) {
-        qxl_render_update_area_unlocked(qxl);
-        qemu_mutex_unlock(&qxl->ssd.lock);
+    if (!qxl->guest_primary.commands) {
         return;
     }
-
     qxl->guest_primary.commands = 0;
-    qxl->render_update_cookie_num++;
-    qemu_mutex_unlock(&qxl->ssd.lock);
-    cookie = qxl_cookie_new(QXL_COOKIE_TYPE_RENDER_UPDATE_AREA,
-                            0);
-    qxl_set_rect_to_surface(qxl, &cookie->u.render.area);
-    qxl_spice_update_area(qxl, 0, &cookie->u.render.area, NULL,
-                          0, 1 /* clear_dirty_region */, QXL_ASYNC, cookie);
-}
 
-void qxl_render_update_area_bh(void *opaque)
-{
-    PCIQXLDevice *qxl = opaque;
+    update.left   = 0;
+    update.right  = qxl->guest_primary.surface.width;
+    update.top    = 0;
+    update.bottom = qxl->guest_primary.surface.height;
 
-    qemu_mutex_lock(&qxl->ssd.lock);
-    qxl_render_update_area_unlocked(qxl);
-    qemu_mutex_unlock(&qxl->ssd.lock);
-}
+    memset(dirty, 0, sizeof(dirty));
+    qxl->ssd.worker->update_area(qxl->ssd.worker, 0, &update,
+                                 dirty, ARRAY_SIZE(dirty), 1);
 
-void qxl_render_update_area_done(PCIQXLDevice *qxl, QXLCookie *cookie)
-{
-    qemu_mutex_lock(&qxl->ssd.lock);
-    trace_qxl_render_update_area_done(cookie);
-    qemu_bh_schedule(qxl->update_area_bh);
-    qxl->render_update_cookie_num--;
-    qemu_mutex_unlock(&qxl->ssd.lock);
-    g_free(cookie);
+    for (i = 0; i < ARRAY_SIZE(dirty); i++) {
+        if (qemu_spice_rect_is_empty(dirty+i)) {
+            break;
+        }
+        if (qxl->guest_primary.flipped) {
+            qxl_flip(qxl, dirty+i);
+        }
+        dpy_update(vga->ds,
+                   dirty[i].left, dirty[i].top,
+                   dirty[i].right - dirty[i].left,
+                   dirty[i].bottom - dirty[i].top);
+    }
 }
 
 static QEMUCursor *qxl_cursor(PCIQXLDevice *qxl, QXLCursor *cursor)
 {
     QEMUCursor *c;
     uint8_t *image, *mask;
-    size_t size;
+    int size;
 
     c = cursor_alloc(cursor->header.width, cursor->header.height);
     c->hot_x = cursor->header.hot_spot_x;
@@ -224,18 +180,15 @@ fail:
 
 
 /* called from spice server thread context only */
-int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
+void qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
 {
     QXLCursorCmd *cmd = qxl_phys2virt(qxl, ext->cmd.data, ext->group_id);
     QXLCursor *cursor;
     QEMUCursor *c;
+    int x = -1, y = -1;
 
-    if (!cmd) {
-        return 1;
-    }
-
-    if (!dpy_cursor_define_supported(qxl->ssd.ds)) {
-        return 0;
+    if (!qxl->ssd.ds->mouse_set || !qxl->ssd.ds->cursor_define) {
+        return;
     }
 
     if (qxl->debug > 1 && cmd->type != QXL_CURSOR_MOVE) {
@@ -245,33 +198,29 @@ int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
     }
     switch (cmd->type) {
     case QXL_CURSOR_SET:
+        x = cmd->u.set.position.x;
+        y = cmd->u.set.position.y;
         cursor = qxl_phys2virt(qxl, cmd->u.set.shape, ext->group_id);
-        if (!cursor) {
-            return 1;
-        }
         if (cursor->chunk.data_size != cursor->data_size) {
             fprintf(stderr, "%s: multiple chunks\n", __FUNCTION__);
-            return 1;
+            return;
         }
         c = qxl_cursor(qxl, cursor);
         if (c == NULL) {
             c = cursor_builtin_left_ptr();
         }
-        qemu_mutex_lock(&qxl->ssd.lock);
-        if (qxl->ssd.cursor) {
-            cursor_put(qxl->ssd.cursor);
-        }
-        qxl->ssd.cursor = c;
-        qxl->ssd.mouse_x = cmd->u.set.position.x;
-        qxl->ssd.mouse_y = cmd->u.set.position.y;
-        qemu_mutex_unlock(&qxl->ssd.lock);
+        qemu_mutex_lock_iothread();
+        qxl->ssd.ds->cursor_define(c);
+        qxl->ssd.ds->mouse_set(x, y, 1);
+        qemu_mutex_unlock_iothread();
+        cursor_put(c);
         break;
     case QXL_CURSOR_MOVE:
-        qemu_mutex_lock(&qxl->ssd.lock);
-        qxl->ssd.mouse_x = cmd->u.position.x;
-        qxl->ssd.mouse_y = cmd->u.position.y;
-        qemu_mutex_unlock(&qxl->ssd.lock);
+        x = cmd->u.position.x;
+        y = cmd->u.position.y;
+        qemu_mutex_lock_iothread();
+        qxl->ssd.ds->mouse_set(x, y, 1);
+        qemu_mutex_unlock_iothread();
         break;
     }
-    return 0;
 }

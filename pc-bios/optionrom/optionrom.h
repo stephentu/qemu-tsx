@@ -97,41 +97,30 @@
 
 #define BOOT_ROM_START					\
 	OPTION_ROM_START				\
+	push		%eax;				\
+	push		%ds;				\
+							\
+	/* setup ds so we can access the IVT */		\
+	xor		%ax, %ax;			\
+	mov		%ax, %ds;			\
+							\
+	/* install our int 19 handler */		\
+	movw		$int19_handler, (0x19*4);	\
+	mov		%cs, (0x19*4+2);		\
+							\
+	pop		%ds;				\
+	pop		%eax;				\
 	lret;						\
-	.org 		0x18;				\
-	.short		0;				\
-	.short		_pnph;				\
-    _pnph:						\
-	.ascii		"$PnP";				\
-	.byte		0x01;				\
-	.byte		( _pnph_len / 16 );		\
-	.short		0x0000;				\
-	.byte		0x00;				\
-	.byte		0x00;				\
-	.long		0x00000000;			\
-	.short		_manufacturer;			\
-	.short		_product;			\
-	.long		0x00000000;			\
-	.short		0x0000;				\
-	.short		0x0000;				\
-	.short		_bev;				\
-	.short		0x0000;				\
-	.short		0x0000;				\
-	.equ		_pnph_len, . - _pnph;		\
-    _bev:;						\
+							\
+    int19_handler:;					\
 	/* DS = CS */					\
 	movw		%cs, %ax;			\
 	movw		%ax, %ds;
 
 #define OPTION_ROM_END					\
-	.byte		0;				\
-	.align		512, 0;				\
+    .align 512, 0;					\
     _end:
 
 #define BOOT_ROM_END					\
-    _manufacturer:;					\
-	.asciz "QEMU";					\
-    _product:;						\
-	.asciz BOOT_ROM_PRODUCT;			\
 	OPTION_ROM_END
 

@@ -11,7 +11,6 @@
 #include "mips.h"
 #include "mips_cpudevs.h"
 #include "pc.h"
-#include "serial.h"
 #include "isa.h"
 #include "net.h"
 #include "sysemu.h"
@@ -23,9 +22,7 @@
 #include "loader.h"
 #include "elf.h"
 #include "mc146818rtc.h"
-#include "i8254.h"
 #include "blockdev.h"
-#include "exec-memory.h"
 
 #define MAX_IDE_BUS 2
 
@@ -33,7 +30,7 @@ static const int ide_iobase[2] = { 0x1f0, 0x170 };
 static const int ide_iobase2[2] = { 0x3f6, 0x376 };
 static const int ide_irq[2] = { 14, 15 };
 
-static ISADevice *pit; /* PIT i8254 */
+static PITState *pit; /* PIT i8254 */
 
 /* i8254 PIT is attached to the IRQ0 at PIC i8259 */
 
@@ -44,8 +41,8 @@ static struct _loaderparams {
     const char *initrd_filename;
 } loaderparams;
 
-static void mips_qemu_write (void *opaque, hwaddr addr,
-                             uint64_t val, unsigned size)
+static void mips_qemu_writel (void *opaque, target_phys_addr_t addr,
+			      uint32_t val)
 {
     if ((addr & 0xffff) == 0 && val == 42)
         qemu_system_reset_request ();
@@ -53,20 +50,27 @@ static void mips_qemu_write (void *opaque, hwaddr addr,
         qemu_system_shutdown_request ();
 }
 
-static uint64_t mips_qemu_read (void *opaque, hwaddr addr,
-                                unsigned size)
+static uint32_t mips_qemu_readl (void *opaque, target_phys_addr_t addr)
 {
     return 0;
 }
 
-static const MemoryRegionOps mips_qemu_ops = {
-    .read = mips_qemu_read,
-    .write = mips_qemu_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUWriteMemoryFunc * const mips_qemu_write[] = {
+    &mips_qemu_writel,
+    &mips_qemu_writel,
+    &mips_qemu_writel,
 };
 
+static CPUReadMemoryFunc * const mips_qemu_read[] = {
+    &mips_qemu_readl,
+    &mips_qemu_readl,
+    &mips_qemu_readl,
+};
+
+static int mips_qemu_iomemtype = 0;
+
 typedef struct ResetData {
-    MIPSCPU *cpu;
+    CPUState *env;
     uint64_t vector;
 } ResetData;
 
@@ -122,7 +126,7 @@ static int64_t load_kernel(void)
 
     /* Store command line.  */
     params_size = 264;
-    params_buf = g_malloc(params_size);
+    params_buf = qemu_malloc(params_size);
 
     params_buf[0] = tswap32(ram_size);
     params_buf[1] = tswap32(0x12345678);
@@ -144,33 +148,27 @@ static int64_t load_kernel(void)
 static void main_cpu_reset(void *opaque)
 {
     ResetData *s = (ResetData *)opaque;
-    CPUMIPSState *env = &s->cpu->env;
+    CPUState *env = s->env;
 
-    cpu_reset(CPU(s->cpu));
+    cpu_reset(env);
     env->active_tc.PC = s->vector;
 }
 
 static const int sector_len = 32 * 1024;
 static
-void mips_r4k_init(QEMUMachineInitArgs *args)
+void mips_r4k_init (ram_addr_t ram_size,
+                    const char *boot_device,
+                    const char *kernel_filename, const char *kernel_cmdline,
+                    const char *initrd_filename, const char *cpu_model)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
     char *filename;
-    MemoryRegion *address_space_mem = get_system_memory();
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
-    MemoryRegion *bios;
-    MemoryRegion *iomem = g_new(MemoryRegion, 1);
+    ram_addr_t ram_offset;
+    ram_addr_t bios_offset;
     int bios_size;
-    MIPSCPU *cpu;
-    CPUMIPSState *env;
+    CPUState *env;
     ResetData *reset_info;
     int i;
     qemu_irq *i8259;
-    ISABus *isa_bus;
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     DriveInfo *dinfo;
     int be;
@@ -183,15 +181,13 @@ void mips_r4k_init(QEMUMachineInitArgs *args)
         cpu_model = "24Kf";
 #endif
     }
-    cpu = cpu_mips_init(cpu_model);
-    if (cpu == NULL) {
+    env = cpu_init(cpu_model);
+    if (!env) {
         fprintf(stderr, "Unable to find CPU definition\n");
         exit(1);
     }
-    env = &cpu->env;
-
-    reset_info = g_malloc0(sizeof(ResetData));
-    reset_info->cpu = cpu;
+    reset_info = qemu_mallocz(sizeof(ResetData));
+    reset_info->env = env;
     reset_info->vector = env->active_tc.PC;
     qemu_register_reset(main_cpu_reset, reset_info);
 
@@ -202,13 +198,16 @@ void mips_r4k_init(QEMUMachineInitArgs *args)
                 ((unsigned int)ram_size / (1 << 20)));
         exit(1);
     }
-    memory_region_init_ram(ram, "mips_r4k.ram", ram_size);
-    vmstate_register_ram_global(ram);
+    ram_offset = qemu_ram_alloc(NULL, "mips_r4k.ram", ram_size);
 
-    memory_region_add_subregion(address_space_mem, 0, ram);
+    cpu_register_physical_memory(0, ram_size, ram_offset | IO_MEM_RAM);
 
-    memory_region_init_io(iomem, &mips_qemu_ops, NULL, "mips-qemu", 0x10000);
-    memory_region_add_subregion(address_space_mem, 0x1fbf0000, iomem);
+    if (!mips_qemu_iomemtype) {
+        mips_qemu_iomemtype = cpu_register_io_memory(mips_qemu_read,
+                                                     mips_qemu_write, NULL,
+                                                     DEVICE_NATIVE_ENDIAN);
+    }
+    cpu_register_physical_memory(0x1fbf0000, 0x10000, mips_qemu_iomemtype);
 
     /* Try to load a BIOS image. If this fails, we continue regardless,
        but initialize the hardware ourselves. When a kernel gets
@@ -228,16 +227,15 @@ void mips_r4k_init(QEMUMachineInitArgs *args)
     be = 0;
 #endif
     if ((bios_size > 0) && (bios_size <= BIOS_SIZE)) {
-        bios = g_new(MemoryRegion, 1);
-        memory_region_init_ram(bios, "mips_r4k.bios", BIOS_SIZE);
-        vmstate_register_ram_global(bios);
-        memory_region_set_readonly(bios, true);
-        memory_region_add_subregion(get_system_memory(), 0x1fc00000, bios);
+        bios_offset = qemu_ram_alloc(NULL, "mips_r4k.bios", BIOS_SIZE);
+	cpu_register_physical_memory(0x1fc00000, BIOS_SIZE,
+                                     bios_offset | IO_MEM_ROM);
 
         load_image_targphys(filename, 0x1fc00000, BIOS_SIZE);
     } else if ((dinfo = drive_get(IF_PFLASH, 0, 0)) != NULL) {
         uint32_t mips_rom = 0x00400000;
-        if (!pflash_cfi01_register(0x1fc00000, NULL, "mips_r4k.bios", mips_rom,
+        bios_offset = qemu_ram_alloc(NULL, "mips_r4k.bios", mips_rom);
+        if (!pflash_cfi01_register(0x1fc00000, bios_offset,
                                    dinfo->bdrv, sector_len,
                                    mips_rom / sector_len,
                                    4, 0, 0, 0, 0, be)) {
@@ -250,7 +248,7 @@ void mips_r4k_init(QEMUMachineInitArgs *args)
 		bios_name);
     }
     if (filename) {
-        g_free(filename);
+        qemu_free(filename);
     }
 
     if (kernel_filename) {
@@ -266,36 +264,44 @@ void mips_r4k_init(QEMUMachineInitArgs *args)
     cpu_mips_clock_init(env);
 
     /* The PIC is attached to the MIPS CPU INT0 pin */
-    isa_bus = isa_bus_new(NULL, get_system_io());
-    i8259 = i8259_init(isa_bus, env->irq[2]);
-    isa_bus_irqs(isa_bus, i8259);
+    i8259 = i8259_init(env->irq[2]);
+    isa_bus_new(NULL);
+    isa_bus_irqs(i8259);
 
-    rtc_init(isa_bus, 2000, NULL);
+    rtc_init(2000, NULL);
 
     /* Register 64 KB of ISA IO space at 0x14000000 */
     isa_mmio_init(0x14000000, 0x00010000);
     isa_mem_base = 0x10000000;
 
-    pit = pit_init(isa_bus, 0x40, 0, NULL);
+    pit = pit_init(0x40, i8259[0]);
 
     for(i = 0; i < MAX_SERIAL_PORTS; i++) {
         if (serial_hds[i]) {
-            serial_isa_init(isa_bus, i, serial_hds[i]);
+            serial_isa_init(i, serial_hds[i]);
         }
     }
 
-    isa_vga_init(isa_bus);
+    isa_vga_init();
 
-    if (nd_table[0].used)
-        isa_ne2000_init(isa_bus, 0x300, 9, &nd_table[0]);
+    if (nd_table[0].vlan)
+        isa_ne2000_init(0x300, 9, &nd_table[0]);
 
-    ide_drive_get(hd, MAX_IDE_BUS);
+    if (drive_get_max_bus(IF_IDE) >= MAX_IDE_BUS) {
+        fprintf(stderr, "qemu: too many IDE bus\n");
+        exit(1);
+    }
+
+    for(i = 0; i < MAX_IDE_BUS * MAX_IDE_DEVS; i++) {
+        hd[i] = drive_get(IF_IDE, i / MAX_IDE_DEVS, i % MAX_IDE_DEVS);
+    }
+
     for(i = 0; i < MAX_IDE_BUS; i++)
-        isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i], ide_irq[i],
+        isa_ide_init(ide_iobase[i], ide_iobase2[i], ide_irq[i],
                      hd[MAX_IDE_DEVS * i],
 		     hd[MAX_IDE_DEVS * i + 1]);
 
-    isa_create_simple(isa_bus, "i8042");
+    isa_create_simple("i8042");
 }
 
 static QEMUMachine mips_machine = {

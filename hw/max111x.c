@@ -5,9 +5,6 @@
  * Written by Andrzej Zaborowski <balrog@zabor.org>
  *
  * This code is licensed under the GNU GPLv2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "ssi.h"
@@ -18,7 +15,7 @@ typedef struct {
     uint8_t tb1, rb2, rb3;
     int cycle;
 
-    uint8_t input[8];
+    int input[8];
     int inputs, com;
 } MAX111xState;
 
@@ -97,23 +94,36 @@ static uint32_t max111x_transfer(SSISlave *dev, uint32_t value)
     return max111x_read(s);
 }
 
-static const VMStateDescription vmstate_max111x = {
-    .name = "max111x",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
-        VMSTATE_SSI_SLAVE(ssidev, MAX111xState),
-        VMSTATE_UINT8(tb1, MAX111xState),
-        VMSTATE_UINT8(rb2, MAX111xState),
-        VMSTATE_UINT8(rb3, MAX111xState),
-        VMSTATE_INT32_EQUAL(inputs, MAX111xState),
-        VMSTATE_INT32(com, MAX111xState),
-        VMSTATE_ARRAY_INT32_UNSAFE(input, MAX111xState, inputs,
-                                   vmstate_info_uint8, uint8_t),
-        VMSTATE_END_OF_LIST()
-    }
-};
+static void max111x_save(QEMUFile *f, void *opaque)
+{
+    MAX111xState *s = (MAX111xState *) opaque;
+    int i;
+
+    qemu_put_8s(f, &s->tb1);
+    qemu_put_8s(f, &s->rb2);
+    qemu_put_8s(f, &s->rb3);
+    qemu_put_be32(f, s->inputs);
+    qemu_put_be32(f, s->com);
+    for (i = 0; i < s->inputs; i ++)
+        qemu_put_byte(f, s->input[i]);
+}
+
+static int max111x_load(QEMUFile *f, void *opaque, int version_id)
+{
+    MAX111xState *s = (MAX111xState *) opaque;
+    int i;
+
+    qemu_get_8s(f, &s->tb1);
+    qemu_get_8s(f, &s->rb2);
+    qemu_get_8s(f, &s->rb3);
+    if (s->inputs != qemu_get_be32(f))
+        return -EINVAL;
+    s->com = qemu_get_be32(f);
+    for (i = 0; i < s->inputs; i ++)
+        s->input[i] = qemu_get_byte(f);
+
+    return 0;
+}
 
 static int max111x_init(SSISlave *dev, int inputs)
 {
@@ -133,7 +143,8 @@ static int max111x_init(SSISlave *dev, int inputs)
     s->input[7] = 0x80;
     s->com = 0;
 
-    vmstate_register(&dev->qdev, -1, &vmstate_max111x, s);
+    register_savevm(&dev->qdev, "max111x", -1, 0,
+                    max111x_save, max111x_load, s);
     return 0;
 }
 
@@ -154,40 +165,24 @@ void max111x_set_input(DeviceState *dev, int line, uint8_t value)
     s->input[line] = value;
 }
 
-static void max1110_class_init(ObjectClass *klass, void *data)
-{
-    SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
-
-    k->init = max1110_init;
-    k->transfer = max111x_transfer;
-}
-
-static TypeInfo max1110_info = {
-    .name          = "max1110",
-    .parent        = TYPE_SSI_SLAVE,
-    .instance_size = sizeof(MAX111xState),
-    .class_init    = max1110_class_init,
+static SSISlaveInfo max1110_info = {
+    .qdev.name = "max1110",
+    .qdev.size = sizeof(MAX111xState),
+    .init = max1110_init,
+    .transfer = max111x_transfer
 };
 
-static void max1111_class_init(ObjectClass *klass, void *data)
-{
-    SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
-
-    k->init = max1111_init;
-    k->transfer = max111x_transfer;
-}
-
-static TypeInfo max1111_info = {
-    .name          = "max1111",
-    .parent        = TYPE_SSI_SLAVE,
-    .instance_size = sizeof(MAX111xState),
-    .class_init    = max1111_class_init,
+static SSISlaveInfo max1111_info = {
+    .qdev.name = "max1111",
+    .qdev.size = sizeof(MAX111xState),
+    .init = max1111_init,
+    .transfer = max111x_transfer
 };
 
-static void max111x_register_types(void)
+static void max111x_register_devices(void)
 {
-    type_register_static(&max1110_info);
-    type_register_static(&max1111_info);
+    ssi_register_slave(&max1110_info);
+    ssi_register_slave(&max1111_info);
 }
 
-type_init(max111x_register_types)
+device_init(max111x_register_devices)

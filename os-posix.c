@@ -31,7 +31,6 @@
 /*needed for MAP_POPULATE before including qemu-options.h */
 #include <sys/mman.h>
 #include <pwd.h>
-#include <grp.h>
 #include <libgen.h>
 
 /* Needed early for CONFIG_BSD etc. */
@@ -44,8 +43,8 @@
 #include <sys/prctl.h>
 #endif
 
-#ifdef __FreeBSD__
-#include <sys/sysctl.h>
+#ifdef CONFIG_EVENTFD
+#include <sys/eventfd.h>
 #endif
 
 static struct passwd *user_pwd;
@@ -62,9 +61,14 @@ void os_setup_early_signal_handling(void)
     sigaction(SIGPIPE, &act, NULL);
 }
 
-static void termsig_handler(int signal, siginfo_t *info, void *c)
+static void termsig_handler(int signal)
 {
-    qemu_system_killed(info->si_signo, info->si_pid);
+    qemu_system_shutdown_request();
+}
+
+static void sigchld_handler(int signal)
+{
+    waitpid(-1, NULL, WNOHANG);
 }
 
 void os_setup_signal_handling(void)
@@ -72,11 +76,14 @@ void os_setup_signal_handling(void)
     struct sigaction act;
 
     memset(&act, 0, sizeof(act));
-    act.sa_sigaction = termsig_handler;
-    act.sa_flags = SA_SIGINFO;
+    act.sa_handler = termsig_handler;
     sigaction(SIGINT,  &act, NULL);
     sigaction(SIGHUP,  &act, NULL);
     sigaction(SIGTERM, &act, NULL);
+
+    act.sa_handler = sigchld_handler;
+    act.sa_flags = SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &act, NULL);
 }
 
 /* Find a likely location for support files using the location of the binary.
@@ -127,12 +134,12 @@ char *os_find_datadir(const char *argv0)
 
     max_len = strlen(dir) +
         MAX(strlen(SHARE_SUFFIX), strlen(BUILD_SUFFIX)) + 1;
-    res = g_malloc0(max_len);
+    res = qemu_mallocz(max_len);
     snprintf(res, max_len, "%s%s", dir, SHARE_SUFFIX);
     if (access(res, R_OK)) {
         snprintf(res, max_len, "%s%s", dir, BUILD_SUFFIX);
         if (access(res, R_OK)) {
-            g_free(res);
+            qemu_free(res);
             res = NULL;
         }
     }
@@ -148,7 +155,8 @@ void os_set_proc_name(const char *s)
     char name[16];
     if (!s)
         return;
-    pstrcpy(name, sizeof(name), s);
+    name[sizeof(name) - 1] = 0;
+    strncpy(name, s, sizeof(name));
     /* Could rewrite argv[0] too, but that's a bit more complicated.
        This simple way is enough for `top'. */
     if (prctl(PR_SET_NAME, name)) {
@@ -187,12 +195,8 @@ void os_parse_cmd_args(int index, const char *optarg)
     case QEMU_OPTION_daemonize:
         daemonize = 1;
         break;
-#if defined(CONFIG_LINUX)
-    case QEMU_OPTION_enablefips:
-        fips_set_state(true);
-        break;
-#endif
     }
+    return;
 }
 
 static void change_process_uid(void)
@@ -200,11 +204,6 @@ static void change_process_uid(void)
     if (user_pwd) {
         if (setgid(user_pwd->pw_gid) < 0) {
             fprintf(stderr, "Failed to setgid(%d)\n", user_pwd->pw_gid);
-            exit(1);
-        }
-        if (initgroups(user_pwd->pw_name, user_pwd->pw_gid) < 0) {
-            fprintf(stderr, "Failed to initgroups(\"%s\", %d)\n",
-                    user_pwd->pw_name, user_pwd->pw_gid);
             exit(1);
         }
         if (setuid(user_pwd->pw_uid) < 0) {
@@ -335,6 +334,34 @@ void os_set_line_buffering(void)
     setvbuf(stdout, NULL, _IOLBF, 0);
 }
 
+/*
+ * Creates an eventfd that looks like a pipe and has EFD_CLOEXEC set.
+ */
+int qemu_eventfd(int fds[2])
+{
+#ifdef CONFIG_EVENTFD
+    int ret;
+
+    ret = eventfd(0, 0);
+    if (ret >= 0) {
+        fds[0] = ret;
+        qemu_set_cloexec(ret);
+        if ((fds[1] = dup(ret)) == -1) {
+            close(ret);
+            return -1;
+        }
+        qemu_set_cloexec(fds[1]);
+        return 0;
+    }
+
+    if (errno != ENOSYS) {
+        return -1;
+    }
+#endif
+
+    return qemu_pipe(fds);
+}
+
 int qemu_create_pidfile(const char *filename)
 {
     char buffer[128];
@@ -346,20 +373,12 @@ int qemu_create_pidfile(const char *filename)
         return -1;
     }
     if (lockf(fd, F_TLOCK, 0) == -1) {
-        close(fd);
         return -1;
     }
-    len = snprintf(buffer, sizeof(buffer), FMT_pid "\n", getpid());
+    len = snprintf(buffer, sizeof(buffer), "%ld\n", (long)getpid());
     if (write(fd, buffer, len) != len) {
-        close(fd);
         return -1;
     }
 
-    /* keep pidfile open & locked forever */
     return 0;
-}
-
-bool is_daemonized(void)
-{
-    return daemonize;
 }

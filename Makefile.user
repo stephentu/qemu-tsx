@@ -9,8 +9,6 @@ include $(SRC_PATH)/rules.mak
 $(call set-vpath, $(SRC_PATH))
 
 QEMU_CFLAGS+=-I..
-QEMU_CFLAGS += -I$(SRC_PATH)/include
-QEMU_CFLAGS += -DCONFIG_USER_ONLY
 
 include $(SRC_PATH)/Makefile.objs
 
@@ -19,6 +17,7 @@ all: $(user-obj-y)
 	@true
 
 clean:
-	for d in . trace; do \
-	rm -f $$d/*.o $$d/*.d $$d/*.a $$d/*~; \
-	done
+	rm -f *.o *.d *.a *~
+
+# Include automatically generated dependency files
+-include $(wildcard *.d */*.d)

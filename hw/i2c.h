@@ -15,43 +15,36 @@ enum i2c_event {
     I2C_NACK /* Masker NACKed a receive byte.  */
 };
 
-typedef struct I2CSlave I2CSlave;
+/* Master to slave.  */
+typedef int (*i2c_send_cb)(i2c_slave *s, uint8_t data);
+/* Slave to master.  */
+typedef int (*i2c_recv_cb)(i2c_slave *s);
+/* Notify the slave of a bus state change.  */
+typedef void (*i2c_event_cb)(i2c_slave *s, enum i2c_event event);
 
-#define TYPE_I2C_SLAVE "i2c-slave"
-#define I2C_SLAVE(obj) \
-     OBJECT_CHECK(I2CSlave, (obj), TYPE_I2C_SLAVE)
-#define I2C_SLAVE_CLASS(klass) \
-     OBJECT_CLASS_CHECK(I2CSlaveClass, (klass), TYPE_I2C_SLAVE)
-#define I2C_SLAVE_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(I2CSlaveClass, (obj), TYPE_I2C_SLAVE)
+typedef int (*i2c_slave_initfn)(i2c_slave *dev);
 
-typedef struct I2CSlaveClass
-{
-    DeviceClass parent_class;
+typedef struct {
+    DeviceInfo qdev;
 
     /* Callbacks provided by the device.  */
-    int (*init)(I2CSlave *dev);
+    i2c_slave_initfn init;
+    i2c_event_cb event;
+    i2c_recv_cb recv;
+    i2c_send_cb send;
+} I2CSlaveInfo;
 
-    /* Master to slave.  */
-    int (*send)(I2CSlave *s, uint8_t data);
-
-    /* Slave to master.  */
-    int (*recv)(I2CSlave *s);
-
-    /* Notify the slave of a bus state change.  */
-    void (*event)(I2CSlave *s, enum i2c_event event);
-} I2CSlaveClass;
-
-struct I2CSlave
+struct i2c_slave
 {
     DeviceState qdev;
+    I2CSlaveInfo *info;
 
     /* Remaining fields for internal use by the I2C code.  */
     uint8_t address;
 };
 
 i2c_bus *i2c_init_bus(DeviceState *parent, const char *name);
-void i2c_set_slave_address(I2CSlave *dev, uint8_t address);
+void i2c_set_slave_address(i2c_slave *dev, uint8_t address);
 int i2c_bus_busy(i2c_bus *bus);
 int i2c_start_transfer(i2c_bus *bus, uint8_t address, int recv);
 void i2c_end_transfer(i2c_bus *bus);
@@ -59,10 +52,17 @@ void i2c_nack(i2c_bus *bus);
 int i2c_send(i2c_bus *bus, uint8_t data);
 int i2c_recv(i2c_bus *bus);
 
-#define I2C_SLAVE_FROM_QDEV(dev) DO_UPCAST(I2CSlave, qdev, dev)
+#define I2C_SLAVE_FROM_QDEV(dev) DO_UPCAST(i2c_slave, qdev, dev)
 #define FROM_I2C_SLAVE(type, dev) DO_UPCAST(type, i2c, dev)
 
+void i2c_register_slave(I2CSlaveInfo *type);
+
 DeviceState *i2c_create_slave(i2c_bus *bus, const char *name, uint8_t addr);
+
+/* max7310.c */
+void max7310_reset(i2c_slave *i2c);
+qemu_irq *max7310_gpio_in_get(i2c_slave *i2c);
+void max7310_gpio_out_set(i2c_slave *i2c, int line, qemu_irq handler);
 
 /* wm8750.c */
 void wm8750_data_req_set(DeviceState *dev,
@@ -74,19 +74,9 @@ void wm8750_dac_commit(void *opaque);
 void wm8750_set_bclk_in(void *opaque, int new_hz);
 
 /* tmp105.c */
-void tmp105_set(I2CSlave *i2c, int temp);
+void tmp105_set(i2c_slave *i2c, int temp);
 
 /* lm832x.c */
-void lm832x_key_event(DeviceState *dev, int key, int state);
-
-extern const VMStateDescription vmstate_i2c_slave;
-
-#define VMSTATE_I2C_SLAVE(_field, _state) {                          \
-    .name       = (stringify(_field)),                               \
-    .size       = sizeof(I2CSlave),                                  \
-    .vmsd       = &vmstate_i2c_slave,                                \
-    .flags      = VMS_STRUCT,                                        \
-    .offset     = vmstate_offset_value(_state, _field, I2CSlave),    \
-}
+void lm832x_key_event(i2c_slave *i2c, int key, int state);
 
 #endif

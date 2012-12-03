@@ -9,9 +9,8 @@
 
 /* sh7750.c */
 struct SH7750State;
-struct MemoryRegion;
 
-struct SH7750State *sh7750_init(CPUSH4State * cpu, struct MemoryRegion *sysmem);
+struct SH7750State *sh7750_init(CPUState * cpu);
 
 typedef struct {
     /* The callback will be triggered if any of the designated lines change */
@@ -31,16 +30,14 @@ int sh7750_register_io_device(struct SH7750State *s,
 #define TMU012_FEAT_TOCR   (1 << 0)
 #define TMU012_FEAT_3CHAN  (1 << 1)
 #define TMU012_FEAT_EXTCLK (1 << 2)
-void tmu012_init(struct MemoryRegion *sysmem, hwaddr base,
-                 int feat, uint32_t freq,
+void tmu012_init(target_phys_addr_t base, int feat, uint32_t freq,
 		 qemu_irq ch0_irq, qemu_irq ch1_irq,
 		 qemu_irq ch2_irq0, qemu_irq ch2_irq1);
 
 
 /* sh_serial.c */
 #define SH_SERIAL_FEAT_SCIF (1 << 0)
-void sh_serial_init(MemoryRegion *sysmem,
-                    hwaddr base, int feat,
+void sh_serial_init (target_phys_addr_t base, int feat,
 		     uint32_t freq, CharDriverState *chr,
 		     qemu_irq eri_source,
 		     qemu_irq rxi_source,

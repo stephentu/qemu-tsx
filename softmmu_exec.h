@@ -1,14 +1,4 @@
-/*
- *  Software MMU support
- *
- * Generate inline load/store functions for all MMU modes (typically
- * at least _user and _kernel) as well as _data versions, for all data
- * sizes.
- *
- * Used by target op helpers.
- *
- * MMU mode suffixes are defined in target cpu.h.
- */
+/* Common softmmu definitions and inline routines.  */
 
 /* XXX: find something cleaner.
  * Furthermore, this is false for 64 bits targets

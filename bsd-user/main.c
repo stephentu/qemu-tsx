@@ -29,7 +29,7 @@
 #include "qemu.h"
 #include "qemu-common.h"
 /* For tb_lock */
-#include "cpu.h"
+#include "exec-all.h"
 #include "tcg.h"
 #include "qemu-timer.h"
 #include "envlist.h"
@@ -41,7 +41,6 @@ int singlestep;
 unsigned long mmap_min_addr;
 unsigned long guest_base;
 int have_guest_base;
-unsigned long reserved_va;
 #endif
 
 static const char *interp_prefix = CONFIG_QEMU_INTERP_PREFIX;
@@ -64,18 +63,18 @@ void gemu_log(const char *fmt, ...)
 }
 
 #if defined(TARGET_I386)
-int cpu_get_pic_interrupt(CPUX86State *env)
+int cpu_get_pic_interrupt(CPUState *env)
 {
     return -1;
 }
 #endif
 
 /* These are no-ops because we are not threadsafe.  */
-static inline void cpu_exec_start(CPUArchState *env)
+static inline void cpu_exec_start(CPUState *env)
 {
 }
 
-static inline void cpu_exec_end(CPUArchState *env)
+static inline void cpu_exec_end(CPUState *env)
 {
 }
 
@@ -110,7 +109,7 @@ void cpu_list_unlock(void)
 /***********************************************************/
 /* CPUX86 core interface */
 
-void cpu_smm_update(CPUX86State *env)
+void cpu_smm_update(CPUState *env)
 {
 }
 
@@ -238,7 +237,7 @@ void cpu_loop(CPUX86State *env)
             break;
 #ifndef TARGET_ABI32
         case EXCP_SYSCALL:
-            /* syscall from syscall instruction */
+            /* syscall from syscall intruction */
             if (bsd_type == target_freebsd)
                 env->regs[R_EAX] = do_freebsd_syscall(env,
                                                       env->regs[R_EAX],
@@ -681,7 +680,7 @@ static void usage(void)
            "-g port           wait gdb connection to port\n"
            "-L path           set the elf interpreter prefix (default=%s)\n"
            "-s size           set the stack size in bytes (default=%ld)\n"
-           "-cpu model        select CPU (-cpu help for list)\n"
+           "-cpu model        select CPU (-cpu ? for list)\n"
            "-drop-ld-preload  drop LD_PRELOAD for target process\n"
            "-E var=value      sets/modifies targets environment variable(s)\n"
            "-U var            unsets targets environment variable(s)\n"
@@ -691,8 +690,7 @@ static void usage(void)
            "-bsd type         select emulated BSD type FreeBSD/NetBSD/OpenBSD (default)\n"
            "\n"
            "Debug options:\n"
-           "-d options   activate log (default logfile=%s)\n"
-           "-D logfile   override default logfile location\n"
+           "-d options   activate log (logfile=%s)\n"
            "-p pagesize  set the host page size to 'pagesize'\n"
            "-singlestep  always run in singlestep mode\n"
            "-strace      log system calls\n"
@@ -714,7 +712,7 @@ static void usage(void)
     exit(1);
 }
 
-THREAD CPUArchState *thread_env;
+THREAD CPUState *thread_env;
 
 /* Assumes contents are already zeroed.  */
 void init_task_state(TaskState *ts)
@@ -733,12 +731,10 @@ int main(int argc, char **argv)
 {
     const char *filename;
     const char *cpu_model;
-    const char *log_file = DEBUG_LOGFILE;
-    const char *log_mask = NULL;
     struct target_pt_regs regs1, *regs = &regs1;
     struct image_info info1, *info = &info1;
     TaskState ts1, *ts = &ts1;
-    CPUArchState *env;
+    CPUState *env;
     int optind;
     const char *r;
     int gdbstub_port = 0;
@@ -749,7 +745,8 @@ int main(int argc, char **argv)
     if (argc <= 1)
         usage();
 
-    module_call_init(MODULE_INIT_QOM);
+    /* init debug */
+    cpu_set_log_filename(DEBUG_LOGFILE);
 
     if ((envlist = envlist_create()) == NULL) {
         (void) fprintf(stderr, "Unable to allocate envlist\n");
@@ -778,15 +775,22 @@ int main(int argc, char **argv)
         if (!strcmp(r, "-")) {
             break;
         } else if (!strcmp(r, "d")) {
-            if (optind >= argc) {
+            int mask;
+            const CPULogItem *item;
+
+            if (optind >= argc)
                 break;
+
+            r = argv[optind++];
+            mask = cpu_str_to_log_mask(r);
+            if (!mask) {
+                printf("Log items (comma separated):\n");
+                for(item = cpu_log_items; item->mask != 0; item++) {
+                    printf("%-10s %s\n", item->name, item->help);
+                }
+                exit(1);
             }
-            log_mask = argv[optind++];
-        } else if (!strcmp(r, "D")) {
-            if (optind >= argc) {
-                break;
-            }
-            log_file = argv[optind++];
+            cpu_set_log(mask);
         } else if (!strcmp(r, "E")) {
             r = argv[optind++];
             if (envlist_setenv(envlist, r) != 0)
@@ -825,7 +829,7 @@ int main(int argc, char **argv)
             qemu_uname_release = argv[optind++];
         } else if (!strcmp(r, "cpu")) {
             cpu_model = argv[optind++];
-            if (is_help_option(cpu_model)) {
+            if (strcmp(cpu_model, "?") == 0) {
 /* XXX: implement xxx_cpu_list for targets that still miss it */
 #if defined(cpu_list)
                     cpu_list(stdout, &fprintf);
@@ -859,27 +863,8 @@ int main(int argc, char **argv)
             usage();
         }
     }
-
-    /* init debug */
-    cpu_set_log_filename(log_file);
-    if (log_mask) {
-        int mask;
-        const CPULogItem *item;
-
-        mask = cpu_str_to_log_mask(log_mask);
-        if (!mask) {
-            printf("Log items (comma separated):\n");
-            for (item = cpu_log_items; item->mask != 0; item++) {
-                printf("%-10s %s\n", item->name, item->help);
-            }
-            exit(1);
-        }
-        cpu_set_log(mask);
-    }
-
-    if (optind >= argc) {
+    if (optind >= argc)
         usage();
-    }
     filename = argv[optind];
 
     /* Zero out regs */
@@ -908,8 +893,7 @@ int main(int argc, char **argv)
         cpu_model = "any";
 #endif
     }
-    tcg_exec_init(0);
-    cpu_exec_init_all();
+    cpu_exec_init_all(0);
     /* NOTE: we need to init the CPU at this stage to get
        qemu_host_page_size */
     env = cpu_init(cpu_model);
@@ -918,7 +902,7 @@ int main(int argc, char **argv)
         exit(1);
     }
 #if defined(TARGET_I386) || defined(TARGET_SPARC) || defined(TARGET_PPC)
-    cpu_reset(ENV_GET_CPU(env));
+    cpu_reset(env);
 #endif
     thread_env = env;
 

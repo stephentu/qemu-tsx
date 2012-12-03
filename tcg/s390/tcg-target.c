@@ -252,9 +252,7 @@ static const int tcg_target_call_iarg_regs[] = {
 
 static const int tcg_target_call_oarg_regs[] = {
     TCG_REG_R2,
-#if TCG_TARGET_REG_BITS == 32
-    TCG_REG_R3
-#endif
+    TCG_REG_R3,
 };
 
 #define S390_CC_EQ      8
@@ -268,7 +266,7 @@ static const int tcg_target_call_oarg_regs[] = {
 #define S390_CC_ALWAYS  15
 
 /* Condition codes that result from a COMPARE and COMPARE LOGICAL.  */
-static const uint8_t tcg_cond_to_s390_cond[] = {
+static const uint8_t tcg_cond_to_s390_cond[10] = {
     [TCG_COND_EQ]  = S390_CC_EQ,
     [TCG_COND_NE]  = S390_CC_NE,
     [TCG_COND_LT]  = S390_CC_LT,
@@ -284,7 +282,7 @@ static const uint8_t tcg_cond_to_s390_cond[] = {
 /* Condition codes that result from a LOAD AND TEST.  Here, we have no
    unsigned instruction variation, however since the test is vs zero we
    can re-map the outcomes appropriately.  */
-static const uint8_t tcg_cond_to_ltr_cond[] = {
+static const uint8_t tcg_cond_to_ltr_cond[10] = {
     [TCG_COND_EQ]  = S390_CC_EQ,
     [TCG_COND_NE]  = S390_CC_NE,
     [TCG_COND_LT]  = S390_CC_LT,
@@ -301,22 +299,18 @@ static const uint8_t tcg_cond_to_ltr_cond[] = {
 
 #include "../../softmmu_defs.h"
 
-/* helper signature: helper_ld_mmu(CPUState *env, target_ulong addr,
-   int mmu_idx) */
-static const void * const qemu_ld_helpers[4] = {
-    helper_ldb_mmu,
-    helper_ldw_mmu,
-    helper_ldl_mmu,
-    helper_ldq_mmu,
+static void *qemu_ld_helpers[4] = {
+    __ldb_mmu,
+    __ldw_mmu,
+    __ldl_mmu,
+    __ldq_mmu,
 };
 
-/* helper signature: helper_st_mmu(CPUState *env, target_ulong addr,
-   uintxx_t val, int mmu_idx) */
-static const void * const qemu_st_helpers[4] = {
-    helper_stb_mmu,
-    helper_stw_mmu,
-    helper_stl_mmu,
-    helper_stq_mmu,
+static void *qemu_st_helpers[4] = {
+    __stb_mmu,
+    __stw_mmu,
+    __stl_mmu,
+    __stq_mmu,
 };
 #endif
 
@@ -354,6 +348,11 @@ static void patch_reloc(uint8_t *code_ptr, int type,
         tcg_abort();
         break;
     }
+}
+
+static int tcg_target_get_call_iarg_regs_count(int flags)
+{
+    return sizeof(tcg_target_call_iarg_regs) / sizeof(int);
 }
 
 /* parse target specific constraints */
@@ -1113,7 +1112,7 @@ static void tgen64_xori(TCGContext *s, TCGReg dest, tcg_target_ulong val)
 static int tgen_cmp(TCGContext *s, TCGType type, TCGCond c, TCGReg r1,
                     TCGArg c2, int c2const)
 {
-    bool is_unsigned = is_unsigned_cond(c);
+    bool is_unsigned = (c > TCG_COND_GT);
     if (c2const) {
         if (c2 == 0) {
             if (type == TCG_TYPE_I32) {
@@ -1438,9 +1437,9 @@ static void tcg_prepare_qemu_ldst(TCGContext* s, TCGReg data_reg,
     tgen64_andi_tmp(s, arg1, (CPU_TLB_SIZE - 1) << CPU_TLB_ENTRY_BITS);
 
     if (is_store) {
-        ofs = offsetof(CPUArchState, tlb_table[mem_index][0].addr_write);
+        ofs = offsetof(CPUState, tlb_table[mem_index][0].addr_write);
     } else {
-        ofs = offsetof(CPUArchState, tlb_table[mem_index][0].addr_read);
+        ofs = offsetof(CPUState, tlb_table[mem_index][0].addr_read);
     }
     assert(ofs < 0x80000);
 
@@ -1482,25 +1481,9 @@ static void tcg_prepare_qemu_ldst(TCGContext* s, TCGReg data_reg,
             tcg_abort();
         }
         tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_R4, mem_index);
-        /* XXX/FIXME: suboptimal */
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[3],
-                    tcg_target_call_iarg_regs[2]);
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[2],
-                    tcg_target_call_iarg_regs[1]);
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[1],
-                    tcg_target_call_iarg_regs[0]);
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[0],
-                    TCG_AREG0);
         tgen_calli(s, (tcg_target_ulong)qemu_st_helpers[s_bits]);
     } else {
         tcg_out_movi(s, TCG_TYPE_I32, arg1, mem_index);
-        /* XXX/FIXME: suboptimal */
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[2],
-                    tcg_target_call_iarg_regs[1]);
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[1],
-                    tcg_target_call_iarg_regs[0]);
-        tcg_out_mov(s, TCG_TYPE_I64, tcg_target_call_iarg_regs[0],
-                    TCG_AREG0);
         tgen_calli(s, (tcg_target_ulong)qemu_ld_helpers[s_bits]);
 
         /* sign extension */
@@ -1530,7 +1513,7 @@ static void tcg_prepare_qemu_ldst(TCGContext* s, TCGReg data_reg,
     *(label1_ptr + 1) = ((unsigned long)s->code_ptr -
                          (unsigned long)label1_ptr) >> 1;
 
-    ofs = offsetof(CPUArchState, tlb_table[mem_index][0].addend);
+    ofs = offsetof(CPUState, tlb_table[mem_index][0].addend);
     assert(ofs < 0x80000);
 
     tcg_out_mem(s, 0, RXY_AG, arg0, arg1, TCG_AREG0, ofs);
@@ -2037,6 +2020,11 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc,
         break;
 #endif /* TCG_TARGET_REG_BITS == 64 */
 
+    case INDEX_op_jmp:
+        /* This one is obsolete and never emitted.  */
+        tcg_abort();
+        break;
+
     default:
         fprintf(stderr,"unimplemented opc 0x%x\n",opc);
         tcg_abort();
@@ -2047,6 +2035,7 @@ static const TCGTargetOpDef s390_op_defs[] = {
     { INDEX_op_exit_tb, { } },
     { INDEX_op_goto_tb, { } },
     { INDEX_op_call, { "ri" } },
+    { INDEX_op_jmp, { "ri" } },
     { INDEX_op_br, { } },
 
     { INDEX_op_mov_i32, { "r", "r" } },
@@ -2302,8 +2291,6 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_CALL_STACK);
 
     tcg_add_target_add_op_defs(s390_op_defs);
-    tcg_set_frame(s, TCG_AREG0, offsetof(CPUArchState, temp_buf),
-                  CPU_TEMP_BUF_NLONGS * sizeof(long));
 }
 
 static void tcg_target_qemu_prologue(TCGContext *s)
@@ -2319,9 +2306,8 @@ static void tcg_target_qemu_prologue(TCGContext *s)
         tcg_regset_set_reg(s->reserved_regs, TCG_GUEST_BASE_REG);
     }
 
-    tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);
-    /* br %r3 (go to TB) */
-    tcg_out_insn(s, RR, BCR, S390_CC_ALWAYS, tcg_target_call_iarg_regs[1]);
+    /* br %r2 (go to TB) */
+    tcg_out_insn(s, RR, BCR, S390_CC_ALWAYS, TCG_REG_R2);
 
     tb_ret_addr = s->code_ptr;
 
@@ -2330,4 +2316,9 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
     /* br %r14 (return) */
     tcg_out_insn(s, RR, BCR, S390_CC_ALWAYS, TCG_REG_R14);
+}
+
+static inline void tcg_out_addi(TCGContext *s, int reg, tcg_target_long val)
+{
+    tcg_abort();
 }

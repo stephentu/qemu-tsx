@@ -97,9 +97,6 @@ my $dbg_values = 0;
 my $dbg_possible = 0;
 my $dbg_type = 0;
 my $dbg_attr = 0;
-my $dbg_adv_dcs = 0;
-my $dbg_adv_checking = 0;
-my $dbg_adv_apw = 0;
 for my $key (keys %debug) {
 	## no critic
 	eval "\${dbg_$key} = '$debug{$key}';";
@@ -862,7 +859,7 @@ sub annotate_values {
 				$av_preprocessor = 0;
 			}
 
-		} elsif ($cur =~ /^(\(\s*$Type\s*)\)/ && $av_pending eq '_') {
+		} elsif ($cur =~ /^(\(\s*$Type\s*)\)/) {
 			print "CAST($1)\n" if ($dbg_values > 1);
 			push(@av_paren_type, $type);
 			$type = 'C';
@@ -1498,7 +1495,7 @@ sub process {
 		next if ($realfile !~ /\.(h|c|pl)$/);
 
 # in QEMU, no tabs are allowed
-		if ($rawline =~ /^\+.*\t/) {
+		if ($rawline =~ /\t/) {
 			my $herevet = "$here\n" . cat_vet($rawline) . "\n";
 			ERROR("code indent should never use tabs\n" . $herevet);
 			$rpt_cleaners = 1;
@@ -1904,13 +1901,13 @@ sub process {
 # printk should use KERN_* levels.  Note that follow on printk's on the
 # same line do not need a level, so we use the current block context
 # to try and find and validate the current printk.  In summary the current
-# printk includes all preceding printk's which have no newline on the end.
+# printk includes all preceeding printk's which have no newline on the end.
 # we assume the first bad printk is the one to report.
 		if ($line =~ /\bprintk\((?!KERN_)\s*"/) {
 			my $ok = 0;
 			for (my $ln = $linenr - 1; $ln >= $first_line; $ln--) {
 				#print "CHECK<$lines[$ln - 1]\n";
-				# we have a preceding printk if it ends
+				# we have a preceeding printk if it ends
 				# with "\n" ignore it, else it is to blame
 				if ($lines[$ln - 1] =~ m{\bprintk\(}) {
 					if ($rawlines[$ln - 1] !~ m{\\n"}) {
@@ -2002,7 +1999,7 @@ sub process {
 			for (my $n = 0; $n < $#elements; $n += 2) {
 				$off += length($elements[$n]);
 
-				# Pick up the preceding and succeeding characters.
+				# Pick up the preceeding and succeeding characters.
 				my $ca = substr($opline, 0, $off);
 				my $cc = '';
 				if (length($opline) >= ($off + length($elements[$n + 1]))) {
@@ -2071,10 +2068,8 @@ sub process {
 					}
 
 				# , must have a space on the right.
-                                # not required when having a single },{ on one line
 				} elsif ($op eq ',') {
-					if ($ctx !~ /.x[WEC]/ && $cc !~ /^}/ &&
-                                            ($elements[$n] . $elements[$n + 2]) !~ " *}{") {
+					if ($ctx !~ /.x[WEC]/ && $cc !~ /^}/) {
 						ERROR("space required after that '$op' $at\n" . $hereptr);
 					}
 
@@ -2207,6 +2202,12 @@ sub process {
 		    $line !~ /for\s*\(.*;\s+\)/ &&
 		    $line !~ /:\s+\)/) {
 			ERROR("space prohibited before that close parenthesis ')'\n" . $herecurr);
+		}
+
+#goto labels aren't indented, allow a single space however
+		if ($line=~/^.\s+[A-Za-z\d_]+:(?![0-9]+)/ and
+		   !($line=~/^. [A-Za-z\d_]+:/) and !($line=~/^.\s+default:/)) {
+			WARN("labels should not be indented\n" . $herecurr);
 		}
 
 # Return is not a function.
@@ -2489,11 +2490,8 @@ sub process {
 		if ($line =~ /(^.*)\bif\b/ && $line !~ /\#\s*if/) {
 			my ($level, $endln, @chunks) =
 				ctx_statement_full($linenr, $realcnt, 1);
-                        if ($dbg_adv_apw) {
-                            print "APW: chunks<$#chunks> linenr<$linenr> endln<$endln> level<$level>\n";
-                            print "APW: <<$chunks[1][0]>><<$chunks[1][1]>>\n"
-                                if $#chunks >= 1;
-                        }
+			#print "chunks<$#chunks> linenr<$linenr> endln<$endln> level<$level>\n";
+			#print "APW: <<$chunks[1][0]>><<$chunks[1][1]>>\n";
 			if ($#chunks >= 0 && $level == 0) {
 				my $allowed = 0;
 				my $seen = 0;
@@ -2518,70 +2516,56 @@ sub process {
 
 					$seen++ if ($block =~ /^\s*{/);
 
-                                        print "APW: cond<$cond> block<$block> allowed<$allowed>\n"
-                                            if $dbg_adv_apw;
+					#print "cond<$cond> block<$block> allowed<$allowed>\n";
 					if (statement_lines($cond) > 1) {
-                                            print "APW: ALLOWED: cond<$cond>\n"
-                                                if $dbg_adv_apw;
-                                            $allowed = 1;
+						#print "APW: ALLOWED: cond<$cond>\n";
+						$allowed = 1;
 					}
 					if ($block =~/\b(?:if|for|while)\b/) {
-                                            print "APW: ALLOWED: block<$block>\n"
-                                                if $dbg_adv_apw;
-                                            $allowed = 1;
+						#print "APW: ALLOWED: block<$block>\n";
+						$allowed = 1;
 					}
 					if (statement_block_size($block) > 1) {
-                                            print "APW: ALLOWED: lines block<$block>\n"
-                                                if $dbg_adv_apw;
-                                            $allowed = 1;
+						#print "APW: ALLOWED: lines block<$block>\n";
+						$allowed = 1;
 					}
 				}
-				if ($seen != ($#chunks + 1)) {
+				if (!$seen) {
 					WARN("braces {} are necessary for all arms of this statement\n" . $herectx);
 				}
 			}
 		}
 		if (!defined $suppress_ifbraces{$linenr - 1} &&
 					$line =~ /\b(if|while|for|else)\b/ &&
-					$line !~ /\#\s*if/ &&
 					$line !~ /\#\s*else/) {
 			my $allowed = 0;
 
-                        # Check the pre-context.
-                        if (substr($line, 0, $-[0]) =~ /(\}\s*)$/) {
-                            my $pre = $1;
-
-                            if ($line !~ /else/) {
-                                print "APW: ALLOWED: pre<$pre> line<$line>\n"
-                                    if $dbg_adv_apw;
-                                $allowed = 1;
-                            }
-                        }
+			# Check the pre-context.
+			if (substr($line, 0, $-[0]) =~ /(\}\s*)$/) {
+				#print "APW: ALLOWED: pre<$1>\n";
+				$allowed = 1;
+			}
 
 			my ($level, $endln, @chunks) =
 				ctx_statement_full($linenr, $realcnt, $-[0]);
 
 			# Check the condition.
 			my ($cond, $block) = @{$chunks[0]};
-                        print "CHECKING<$linenr> cond<$cond> block<$block>\n"
-                            if $dbg_adv_checking;
+			#print "CHECKING<$linenr> cond<$cond> block<$block>\n";
 			if (defined $cond) {
 				substr($block, 0, length($cond), '');
 			}
 			if (statement_lines($cond) > 1) {
-                            print "APW: ALLOWED: cond<$cond>\n"
-                                if $dbg_adv_apw;
-                            $allowed = 1;
+				#print "APW: ALLOWED: cond<$cond>\n";
+				$allowed = 1;
 			}
 			if ($block =~/\b(?:if|for|while)\b/) {
-                            print "APW: ALLOWED: block<$block>\n"
-                                if $dbg_adv_apw;
-                            $allowed = 1;
+				#print "APW: ALLOWED: block<$block>\n";
+				$allowed = 1;
 			}
 			if (statement_block_size($block) > 1) {
-                            print "APW: ALLOWED: lines block<$block>\n"
-                                if $dbg_adv_apw;
-                            $allowed = 1;
+				#print "APW: ALLOWED: lines block<$block>\n";
+				$allowed = 1;
 			}
 			# Check the post-context.
 			if (defined $chunks[1]) {
@@ -2590,13 +2574,10 @@ sub process {
 					substr($block, 0, length($cond), '');
 				}
 				if ($block =~ /^\s*\{/) {
-                                    print "APW: ALLOWED: chunk-1 block<$block>\n"
-                                        if $dbg_adv_apw;
-                                    $allowed = 1;
+					#print "APW: ALLOWED: chunk-1 block<$block>\n";
+					$allowed = 1;
 				}
 			}
-                        print "DCS: level=$level block<$block> allowed=$allowed\n"
-                            if $dbg_adv_dcs;
 			if ($level == 0 && $block !~ /^\s*\{/ && !$allowed) {
 				my $herectx = $here . "\n";;
 				my $cnt = statement_rawlines($block);
@@ -2870,11 +2851,6 @@ sub process {
 			    $realfile !~ m@^drivers/base/core@) {
 				ERROR("lockdep_no_validate class is reserved for device->mutex.\n" . $herecurr);
 			}
-		}
-
-# QEMU specific tests
-		if ($rawline =~ /\b(?:Qemu|QEmu)\b/) {
-			WARN("use QEMU instead of Qemu or QEmu\n" . $herecurr);
 		}
 	}
 

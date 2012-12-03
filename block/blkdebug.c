@@ -26,11 +26,24 @@
 #include "block_int.h"
 #include "module.h"
 
-typedef struct BDRVBlkdebugState {
+typedef struct BlkdebugVars {
     int state;
-    int new_state;
-    QLIST_HEAD(, BlkdebugRule) rules[BLKDBG_EVENT_MAX];
-    QSIMPLEQ_HEAD(, BlkdebugRule) active_rules;
+
+    /* If inject_errno != 0, an error is injected for requests */
+    int inject_errno;
+
+    /* Decides if all future requests fail (false) or only the next one and
+     * after the next request inject_errno is reset to 0 (true) */
+    bool inject_once;
+
+    /* Decides if aio_readv/writev fails right away (true) or returns an error
+     * return value only in the callback (false) */
+    bool inject_immediately;
+} BlkdebugVars;
+
+typedef struct BDRVBlkdebugState {
+    BlkdebugVars vars;
+    QLIST_HEAD(list, BlkdebugRule) rules[BLKDBG_EVENT_MAX];
 } BDRVBlkdebugState;
 
 typedef struct BlkdebugAIOCB {
@@ -60,14 +73,12 @@ typedef struct BlkdebugRule {
             int error;
             int immediately;
             int once;
-            int64_t sector;
         } inject;
         struct {
             int new_state;
         } set_state;
     } options;
     QLIST_ENTRY(BlkdebugRule) next;
-    QSIMPLEQ_ENTRY(BlkdebugRule) active_next;
 } BlkdebugRule;
 
 static QemuOptsList inject_error_opts = {
@@ -84,10 +95,6 @@ static QemuOptsList inject_error_opts = {
         },
         {
             .name = "errno",
-            .type = QEMU_OPT_NUMBER,
-        },
-        {
-            .name = "sector",
             .type = QEMU_OPT_NUMBER,
         },
         {
@@ -140,7 +147,9 @@ static const char *event_names[BLKDBG_EVENT_MAX] = {
     [BLKDBG_L2_ALLOC_COW_READ]              = "l2_alloc.cow_read",
     [BLKDBG_L2_ALLOC_WRITE]                 = "l2_alloc.write",
 
+    [BLKDBG_READ]                           = "read",
     [BLKDBG_READ_AIO]                       = "read_aio",
+    [BLKDBG_READ_BACKING]                   = "read_backing",
     [BLKDBG_READ_BACKING_AIO]               = "read_backing_aio",
     [BLKDBG_READ_COMPRESSED]                = "read_compressed",
 
@@ -205,7 +214,7 @@ static int add_rule(QemuOpts *opts, void *opaque)
     }
 
     /* Set attributes common for all actions */
-    rule = g_malloc0(sizeof(*rule));
+    rule = qemu_mallocz(sizeof(*rule));
     *rule = (struct BlkdebugRule) {
         .event  = event,
         .action = d->action,
@@ -219,7 +228,6 @@ static int add_rule(QemuOpts *opts, void *opaque)
         rule->options.inject.once  = qemu_opt_get_bool(opts, "once", 0);
         rule->options.inject.immediately =
             qemu_opt_get_bool(opts, "immediately", 0);
-        rule->options.inject.sector = qemu_opt_get_number(opts, "sector", -1);
         break;
 
     case ACTION_SET_STATE:
@@ -284,17 +292,17 @@ static int blkdebug_open(BlockDriverState *bs, const char *filename, int flags)
         return -EINVAL;
     }
 
-    config = g_strdup(filename);
+    config = strdup(filename);
     config[c - filename] = '\0';
     ret = read_config(s, config);
-    g_free(config);
+    free(config);
     if (ret < 0) {
         return ret;
     }
     filename = c + 1;
 
     /* Set initial state */
-    s->state = 1;
+    s->vars.state = 1;
 
     /* Open the backing file */
     ret = bdrv_file_open(&bs->file, filename, flags);
@@ -320,18 +328,18 @@ static void blkdebug_aio_cancel(BlockDriverAIOCB *blockacb)
 }
 
 static BlockDriverAIOCB *inject_error(BlockDriverState *bs,
-    BlockDriverCompletionFunc *cb, void *opaque, BlkdebugRule *rule)
+    BlockDriverCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
-    int error = rule->options.inject.error;
+    int error = s->vars.inject_errno;
     struct BlkdebugAIOCB *acb;
     QEMUBH *bh;
 
-    if (rule->options.inject.once) {
-        QSIMPLEQ_INIT(&s->active_rules);
+    if (s->vars.inject_once) {
+        s->vars.inject_errno = 0;
     }
 
-    if (rule->options.inject.immediately) {
+    if (s->vars.inject_immediately) {
         return NULL;
     }
 
@@ -350,21 +358,14 @@ static BlockDriverAIOCB *blkdebug_aio_readv(BlockDriverState *bs,
     BlockDriverCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
-    BlkdebugRule *rule = NULL;
 
-    QSIMPLEQ_FOREACH(rule, &s->active_rules, active_next) {
-        if (rule->options.inject.sector == -1 ||
-            (rule->options.inject.sector >= sector_num &&
-             rule->options.inject.sector < sector_num + nb_sectors)) {
-            break;
-        }
+    if (s->vars.inject_errno) {
+        return inject_error(bs, cb, opaque);
     }
 
-    if (rule && rule->options.inject.error) {
-        return inject_error(bs, cb, opaque, rule);
-    }
-
-    return bdrv_aio_readv(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
+    BlockDriverAIOCB *acb =
+        bdrv_aio_readv(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
+    return acb;
 }
 
 static BlockDriverAIOCB *blkdebug_aio_writev(BlockDriverState *bs,
@@ -372,21 +373,14 @@ static BlockDriverAIOCB *blkdebug_aio_writev(BlockDriverState *bs,
     BlockDriverCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
-    BlkdebugRule *rule = NULL;
 
-    QSIMPLEQ_FOREACH(rule, &s->active_rules, active_next) {
-        if (rule->options.inject.sector == -1 ||
-            (rule->options.inject.sector >= sector_num &&
-             rule->options.inject.sector < sector_num + nb_sectors)) {
-            break;
-        }
+    if (s->vars.inject_errno) {
+        return inject_error(bs, cb, opaque);
     }
 
-    if (rule && rule->options.inject.error) {
-        return inject_error(bs, cb, opaque, rule);
-    }
-
-    return bdrv_aio_writev(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
+    BlockDriverAIOCB *acb =
+        bdrv_aio_writev(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
+    return acb;
 }
 
 static void blkdebug_close(BlockDriverState *bs)
@@ -398,57 +392,58 @@ static void blkdebug_close(BlockDriverState *bs)
     for (i = 0; i < BLKDBG_EVENT_MAX; i++) {
         QLIST_FOREACH_SAFE(rule, &s->rules[i], next, next) {
             QLIST_REMOVE(rule, next);
-            g_free(rule);
+            qemu_free(rule);
         }
     }
 }
 
-static bool process_rule(BlockDriverState *bs, struct BlkdebugRule *rule,
-    bool injected)
+static int blkdebug_flush(BlockDriverState *bs)
+{
+    return bdrv_flush(bs->file);
+}
+
+static BlockDriverAIOCB *blkdebug_aio_flush(BlockDriverState *bs,
+    BlockDriverCompletionFunc *cb, void *opaque)
+{
+    return bdrv_aio_flush(bs->file, cb, opaque);
+}
+
+static void process_rule(BlockDriverState *bs, struct BlkdebugRule *rule,
+    BlkdebugVars *old_vars)
 {
     BDRVBlkdebugState *s = bs->opaque;
+    BlkdebugVars *vars = &s->vars;
 
     /* Only process rules for the current state */
-    if (rule->state && rule->state != s->state) {
-        return injected;
+    if (rule->state && rule->state != old_vars->state) {
+        return;
     }
 
     /* Take the action */
     switch (rule->action) {
     case ACTION_INJECT_ERROR:
-        if (!injected) {
-            QSIMPLEQ_INIT(&s->active_rules);
-            injected = true;
-        }
-        QSIMPLEQ_INSERT_HEAD(&s->active_rules, rule, active_next);
+        vars->inject_errno       = rule->options.inject.error;
+        vars->inject_once        = rule->options.inject.once;
+        vars->inject_immediately = rule->options.inject.immediately;
         break;
 
     case ACTION_SET_STATE:
-        s->new_state = rule->options.set_state.new_state;
+        vars->state              = rule->options.set_state.new_state;
         break;
     }
-    return injected;
 }
 
 static void blkdebug_debug_event(BlockDriverState *bs, BlkDebugEvent event)
 {
     BDRVBlkdebugState *s = bs->opaque;
     struct BlkdebugRule *rule;
-    bool injected;
+    BlkdebugVars old_vars = s->vars;
 
     assert((int)event >= 0 && event < BLKDBG_EVENT_MAX);
 
-    injected = false;
-    s->new_state = s->state;
     QLIST_FOREACH(rule, &s->rules[event], next) {
-        injected = process_rule(bs, rule, injected);
+        process_rule(bs, rule, &old_vars);
     }
-    s->state = s->new_state;
-}
-
-static int64_t blkdebug_getlength(BlockDriverState *bs)
-{
-    return bdrv_getlength(bs->file);
 }
 
 static BlockDriver bdrv_blkdebug = {
@@ -459,10 +454,11 @@ static BlockDriver bdrv_blkdebug = {
 
     .bdrv_file_open     = blkdebug_open,
     .bdrv_close         = blkdebug_close,
-    .bdrv_getlength     = blkdebug_getlength,
+    .bdrv_flush         = blkdebug_flush,
 
     .bdrv_aio_readv     = blkdebug_aio_readv,
     .bdrv_aio_writev    = blkdebug_aio_writev,
+    .bdrv_aio_flush     = blkdebug_aio_flush,
 
     .bdrv_debug_event   = blkdebug_debug_event,
 };

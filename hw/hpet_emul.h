@@ -22,9 +22,6 @@
 
 #define HPET_NUM_IRQ_ROUTES     32
 
-#define HPET_LEGACY_PIT_INT     0
-#define HPET_LEGACY_RTC_INT     1
-
 #define HPET_CFG_ENABLE 0x001
 #define HPET_CFG_LEGACY 0x002
 
@@ -62,13 +59,13 @@ struct hpet_fw_entry
     uint64_t address;
     uint16_t min_tick;
     uint8_t page_prot;
-} QEMU_PACKED;
+} __attribute__ ((packed));
 
 struct hpet_fw_config
 {
     uint8_t count;
     struct hpet_fw_entry hpet[8];
-} QEMU_PACKED;
+} __attribute__ ((packed));
 
 extern struct hpet_fw_config hpet_cfg;
 #endif

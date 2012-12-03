@@ -410,7 +410,7 @@ static struct l2cap_chan_s *l2cap_channel_open(struct l2cap_instance_s *l2cap,
 
         if (psm_info) {
             /* Device supports this use-case.  */
-            ch = g_malloc0(sizeof(*ch));
+            ch = qemu_mallocz(sizeof(*ch));
             ch->params.sdu_out = l2cap_bframe_out;
             ch->params.sdu_submit = l2cap_bframe_submit;
             ch->frame_in = l2cap_bframe_in;
@@ -428,7 +428,7 @@ static struct l2cap_chan_s *l2cap_channel_open(struct l2cap_instance_s *l2cap,
                 result = L2CAP_CR_SUCCESS;
                 status = L2CAP_CS_NO_INFO;
             } else {
-                g_free(ch);
+                qemu_free(ch);
 
                 result = L2CAP_CR_NO_MEM;
                 status = L2CAP_CS_NO_INFO;
@@ -473,7 +473,7 @@ static void l2cap_channel_close(struct l2cap_instance_s *l2cap,
         l2cap->cid[cid] = NULL;
 
         ch->params.close(ch->params.opaque);
-        g_free(ch);
+        qemu_free(ch);
     }
 
     l2cap_disconnection_response(l2cap, cid, source_cid);
@@ -1000,8 +1000,7 @@ static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
             /* TODO: Signal an error? */
             return;
         }
-        l2cap_sframe_in(ch, le16_to_cpup((void *) hdr->data));
-        return;
+        return l2cap_sframe_in(ch, le16_to_cpup((void *) hdr->data));
     }
 
     switch (hdr->data[1] >> 6) {	/* SAR */
@@ -1011,8 +1010,7 @@ static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
         if (len - 4 > ch->mps)
             goto len_error;
 
-        ch->params.sdu_in(ch->params.opaque, hdr->data + 2, len - 4);
-        break;
+        return ch->params.sdu_in(ch->params.opaque, hdr->data + 2, len - 4);
 
     case L2CAP_SAR_START:
         if (ch->len_total || len < 6)
@@ -1035,8 +1033,7 @@ static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
             goto len_error;
 
         memcpy(ch->sdu + ch->len_cur, hdr->data + 2, len - 4);
-        ch->params.sdu_in(ch->params.opaque, ch->sdu, ch->len_total);
-        break;
+        return ch->params.sdu_in(ch->params.opaque, ch->sdu, ch->len_total);
 
     case L2CAP_SAR_CONT:
         if (!ch->len_total || ch->len_cur + len - 4 >= ch->len_total)
@@ -1139,7 +1136,7 @@ static void l2cap_bframe_submit(struct bt_l2cap_conn_params_s *parms)
 {
     struct l2cap_chan_s *chan = (struct l2cap_chan_s *) parms;
 
-    l2cap_pdu_submit(chan->l2cap);
+    return l2cap_pdu_submit(chan->l2cap);
 }
 
 #if 0
@@ -1221,13 +1218,13 @@ static void l2cap_teardown(struct l2cap_instance_s *l2cap, int send_disconnect)
     for (cid = L2CAP_CID_ALLOC; cid < L2CAP_CID_MAX; cid ++)
         if (l2cap->cid[cid]) {
             l2cap->cid[cid]->params.close(l2cap->cid[cid]->params.opaque);
-            g_free(l2cap->cid[cid]);
+            qemu_free(l2cap->cid[cid]);
         }
 
     if (l2cap->role)
-        g_free(l2cap);
+        qemu_free(l2cap);
     else
-        g_free(l2cap->link);
+        qemu_free(l2cap->link);
 }
 
 /* L2CAP glue to lower layers in bluetooth stack (LMP) */
@@ -1239,7 +1236,7 @@ static void l2cap_lmp_connection_request(struct bt_link_s *link)
 
     /* Always accept - we only get called if (dev->device->page_scan).  */
 
-    l2cap = g_malloc0(sizeof(struct slave_l2cap_instance_s));
+    l2cap = qemu_mallocz(sizeof(struct slave_l2cap_instance_s));
     l2cap->link.slave = &dev->device;
     l2cap->link.host = link->host;
     l2cap_init(&l2cap->l2cap, &l2cap->link, 0);
@@ -1260,7 +1257,7 @@ static void l2cap_lmp_connection_complete(struct bt_link_s *link)
         return;
     }
 
-    l2cap = g_malloc0(sizeof(struct l2cap_instance_s));
+    l2cap = qemu_mallocz(sizeof(struct l2cap_instance_s));
     l2cap_init(l2cap, link, 1);
 
     link->acl_mode = acl_active;
@@ -1356,7 +1353,7 @@ void bt_l2cap_psm_register(struct bt_l2cap_device_s *dev, int psm, int min_mtu,
         exit(-1);
     }
 
-    new_psm = g_malloc0(sizeof(*new_psm));
+    new_psm = qemu_mallocz(sizeof(*new_psm));
     new_psm->psm = psm;
     new_psm->min_mtu = min_mtu;
     new_psm->new_channel = new_channel;

@@ -17,8 +17,15 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+#include <stdarg.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
 
+#include "config.h"
 #include "cpu.h"
+#include "exec-all.h"
 #include "disas.h"
 #include "tcg-op.h"
 #include "qemu-log.h"
@@ -68,8 +75,8 @@ void m68k_tcg_init(void)
     char *p;
     int i;
 
-#define DEFO32(name,  offset) QREG_##name = tcg_global_mem_new_i32(TCG_AREG0, offsetof(CPUM68KState, offset), #name);
-#define DEFO64(name,  offset) QREG_##name = tcg_global_mem_new_i64(TCG_AREG0, offsetof(CPUM68KState, offset), #name);
+#define DEFO32(name,  offset) QREG_##name = tcg_global_mem_new_i32(TCG_AREG0, offsetof(CPUState, offset), #name);
+#define DEFO64(name,  offset) QREG_##name = tcg_global_mem_new_i64(TCG_AREG0, offsetof(CPUState, offset), #name);
 #define DEFF64(name,  offset) DEFO64(name, offset)
 #include "qregs.def"
 #undef DEFO32
@@ -150,25 +157,22 @@ static void *gen_throws_exception;
 #define OS_SINGLE 4
 #define OS_DOUBLE 5
 
-typedef void (*disas_proc)(CPUM68KState *env, DisasContext *s, uint16_t insn);
+typedef void (*disas_proc)(DisasContext *, uint16_t);
 
 #ifdef DEBUG_DISPATCH
-#define DISAS_INSN(name)                                                \
-    static void real_disas_##name(CPUM68KState *env, DisasContext *s,   \
-                                  uint16_t insn);                       \
-    static void disas_##name(CPUM68KState *env, DisasContext *s,        \
-                             uint16_t insn)                             \
-    {                                                                   \
-        qemu_log("Dispatch " #name "\n");                               \
-        real_disas_##name(s, env, insn);                                \
-    }                                                                   \
-    static void real_disas_##name(CPUM68KState *env, DisasContext *s,   \
-                                  uint16_t insn)
+#define DISAS_INSN(name) \
+  static void real_disas_##name (DisasContext *s, uint16_t insn); \
+  static void disas_##name (DisasContext *s, uint16_t insn) { \
+    qemu_log("Dispatch " #name "\n"); \
+    real_disas_##name(s, insn); } \
+  static void real_disas_##name (DisasContext *s, uint16_t insn)
 #else
-#define DISAS_INSN(name)                                                \
-    static void disas_##name(CPUM68KState *env, DisasContext *s,        \
-                             uint16_t insn)
+#define DISAS_INSN(name) \
+  static void disas_##name (DisasContext *s, uint16_t insn)
 #endif
+
+/* FIXME: Remove this.  */
+#define gen_im32(val) tcg_const_i32(val)
 
 /* Generate a load from the specified address.  Narrow values are
    sign extended to full register width.  */
@@ -263,12 +267,12 @@ static TCGv gen_ldst(DisasContext *s, int opsize, TCGv addr, TCGv val,
 }
 
 /* Read a 32-bit immediate constant.  */
-static inline uint32_t read_im32(CPUM68KState *env, DisasContext *s)
+static inline uint32_t read_im32(DisasContext *s)
 {
     uint32_t im;
-    im = ((uint32_t)cpu_lduw_code(env, s->pc)) << 16;
+    im = ((uint32_t)lduw_code(s->pc)) << 16;
     s->pc += 2;
-    im |= cpu_lduw_code(env, s->pc);
+    im |= lduw_code(s->pc);
     s->pc += 2;
     return im;
 }
@@ -294,8 +298,7 @@ static TCGv gen_addr_index(uint16_t ext, TCGv tmp)
 
 /* Handle a base + index + displacement effective addresss.
    A NULL_QREG base means pc-relative.  */
-static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
-                            TCGv base)
+static TCGv gen_lea_indexed(DisasContext *s, int opsize, TCGv base)
 {
     uint32_t offset;
     uint16_t ext;
@@ -304,7 +307,7 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
     uint32_t bd, od;
 
     offset = s->pc;
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
 
     if ((ext & 0x800) == 0 && !m68k_feature(s->env, M68K_FEATURE_WORD_INDEX))
@@ -318,10 +321,10 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
         if ((ext & 0x30) > 0x10) {
             /* base displacement */
             if ((ext & 0x30) == 0x20) {
-                bd = (int16_t)cpu_lduw_code(env, s->pc);
+                bd = (int16_t)lduw_code(s->pc);
                 s->pc += 2;
             } else {
-                bd = read_im32(env, s);
+                bd = read_im32(s);
             }
         } else {
             bd = 0;
@@ -336,7 +339,7 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
         if ((ext & 0x80) == 0) {
             /* base not suppressed */
             if (IS_NULL_QREG(base)) {
-                base = tcg_const_i32(offset + bd);
+                base = gen_im32(offset + bd);
                 bd = 0;
             }
             if (!IS_NULL_QREG(add)) {
@@ -352,7 +355,7 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
                 add = tmp;
             }
         } else {
-            add = tcg_const_i32(bd);
+            add = gen_im32(bd);
         }
         if ((ext & 3) != 0) {
             /* memory indirect */
@@ -367,10 +370,10 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, int opsize,
             if ((ext & 3) > 1) {
                 /* outer displacement */
                 if ((ext & 3) == 2) {
-                    od = (int16_t)cpu_lduw_code(env, s->pc);
+                    od = (int16_t)lduw_code(s->pc);
                     s->pc += 2;
                 } else {
-                    od = read_im32(env, s);
+                    od = read_im32(s);
                 }
             } else {
                 od = 0;
@@ -499,8 +502,7 @@ static inline TCGv gen_extend(TCGv val, int opsize, int sign)
 
 /* Generate code for an "effective address".  Does not adjust the base
    register for autoincrement addressing modes.  */
-static TCGv gen_lea(CPUM68KState *env, DisasContext *s, uint16_t insn,
-                    int opsize)
+static TCGv gen_lea(DisasContext *s, uint16_t insn, int opsize)
 {
     TCGv reg;
     TCGv tmp;
@@ -522,29 +524,29 @@ static TCGv gen_lea(CPUM68KState *env, DisasContext *s, uint16_t insn,
     case 5: /* Indirect displacement.  */
         reg = AREG(insn, 0);
         tmp = tcg_temp_new();
-        ext = cpu_lduw_code(env, s->pc);
+        ext = lduw_code(s->pc);
         s->pc += 2;
         tcg_gen_addi_i32(tmp, reg, (int16_t)ext);
         return tmp;
     case 6: /* Indirect index + displacement.  */
         reg = AREG(insn, 0);
-        return gen_lea_indexed(env, s, opsize, reg);
+        return gen_lea_indexed(s, opsize, reg);
     case 7: /* Other */
         switch (insn & 7) {
         case 0: /* Absolute short.  */
-            offset = cpu_ldsw_code(env, s->pc);
+            offset = ldsw_code(s->pc);
             s->pc += 2;
-            return tcg_const_i32(offset);
+            return gen_im32(offset);
         case 1: /* Absolute long.  */
-            offset = read_im32(env, s);
-            return tcg_const_i32(offset);
+            offset = read_im32(s);
+            return gen_im32(offset);
         case 2: /* pc displacement  */
             offset = s->pc;
-            offset += cpu_ldsw_code(env, s->pc);
+            offset += ldsw_code(s->pc);
             s->pc += 2;
-            return tcg_const_i32(offset);
+            return gen_im32(offset);
         case 3: /* pc index+displacement.  */
-            return gen_lea_indexed(env, s, opsize, NULL_QREG);
+            return gen_lea_indexed(s, opsize, NULL_QREG);
         case 4: /* Immediate.  */
         default:
             return NULL_QREG;
@@ -556,16 +558,15 @@ static TCGv gen_lea(CPUM68KState *env, DisasContext *s, uint16_t insn,
 
 /* Helper function for gen_ea. Reuse the computed address between the
    for read/write operands.  */
-static inline TCGv gen_ea_once(CPUM68KState *env, DisasContext *s,
-                               uint16_t insn, int opsize, TCGv val,
-                               TCGv *addrp, ea_what what)
+static inline TCGv gen_ea_once(DisasContext *s, uint16_t insn, int opsize,
+                              TCGv val, TCGv *addrp, ea_what what)
 {
     TCGv tmp;
 
     if (addrp && what == EA_STORE) {
         tmp = *addrp;
     } else {
-        tmp = gen_lea(env, s, insn, opsize);
+        tmp = gen_lea(s, insn, opsize);
         if (IS_NULL_QREG(tmp))
             return tmp;
         if (addrp)
@@ -577,8 +578,8 @@ static inline TCGv gen_ea_once(CPUM68KState *env, DisasContext *s,
 /* Generate code to load/store a value ito/from an EA.  If VAL > 0 this is
    a write otherwise it is a read (0 == sign extend, -1 == zero extend).
    ADDRP is non-null for readwrite operands.  */
-static TCGv gen_ea(CPUM68KState *env, DisasContext *s, uint16_t insn,
-                   int opsize, TCGv val, TCGv *addrp, ea_what what)
+static TCGv gen_ea(DisasContext *s, uint16_t insn, int opsize, TCGv val,
+                   TCGv *addrp, ea_what what)
 {
     TCGv reg;
     TCGv result;
@@ -618,7 +619,7 @@ static TCGv gen_ea(CPUM68KState *env, DisasContext *s, uint16_t insn,
             if (addrp && what == EA_STORE) {
                 tmp = *addrp;
             } else {
-                tmp = gen_lea(env, s, insn, opsize);
+                tmp = gen_lea(s, insn, opsize);
                 if (IS_NULL_QREG(tmp))
                     return tmp;
                 if (addrp)
@@ -635,35 +636,33 @@ static TCGv gen_ea(CPUM68KState *env, DisasContext *s, uint16_t insn,
         return result;
     case 5: /* Indirect displacement.  */
     case 6: /* Indirect index + displacement.  */
-        return gen_ea_once(env, s, insn, opsize, val, addrp, what);
+        return gen_ea_once(s, insn, opsize, val, addrp, what);
     case 7: /* Other */
         switch (insn & 7) {
         case 0: /* Absolute short.  */
         case 1: /* Absolute long.  */
         case 2: /* pc displacement  */
         case 3: /* pc index+displacement.  */
-            return gen_ea_once(env, s, insn, opsize, val, addrp, what);
+            return gen_ea_once(s, insn, opsize, val, addrp, what);
         case 4: /* Immediate.  */
             /* Sign extend values for consistency.  */
             switch (opsize) {
             case OS_BYTE:
-                if (what == EA_LOADS) {
-                    offset = cpu_ldsb_code(env, s->pc + 1);
-                } else {
-                    offset = cpu_ldub_code(env, s->pc + 1);
-                }
+                if (what == EA_LOADS)
+                    offset = ldsb_code(s->pc + 1);
+                else
+                    offset = ldub_code(s->pc + 1);
                 s->pc += 2;
                 break;
             case OS_WORD:
-                if (what == EA_LOADS) {
-                    offset = cpu_ldsw_code(env, s->pc);
-                } else {
-                    offset = cpu_lduw_code(env, s->pc);
-                }
+                if (what == EA_LOADS)
+                    offset = ldsw_code(s->pc);
+                else
+                    offset = lduw_code(s->pc);
                 s->pc += 2;
                 break;
             case OS_LONG:
-                offset = read_im32(env, s);
+                offset = read_im32(s);
                 break;
             default:
                 qemu_assert(0, "Bad immediate operand");
@@ -826,7 +825,7 @@ static void gen_exception(DisasContext *s, uint32_t where, int nr)
 {
     gen_flush_cc_op(s);
     gen_jmp_im(s, where);
-    gen_helper_raise_exception(cpu_env, tcg_const_i32(nr));
+    gen_helper_raise_exception(tcg_const_i32(nr));
 }
 
 static inline void gen_addr_fault(DisasContext *s)
@@ -834,21 +833,20 @@ static inline void gen_addr_fault(DisasContext *s)
     gen_exception(s, s->insn_pc, EXCP_ADDRESS);
 }
 
-#define SRC_EA(env, result, opsize, op_sign, addrp) do {                \
-        result = gen_ea(env, s, insn, opsize, NULL_QREG, addrp,         \
-                        op_sign ? EA_LOADS : EA_LOADU);                 \
-        if (IS_NULL_QREG(result)) {                                     \
-            gen_addr_fault(s);                                          \
-            return;                                                     \
-        }                                                               \
+#define SRC_EA(result, opsize, op_sign, addrp) do { \
+    result = gen_ea(s, insn, opsize, NULL_QREG, addrp, op_sign ? EA_LOADS : EA_LOADU); \
+    if (IS_NULL_QREG(result)) { \
+        gen_addr_fault(s); \
+        return; \
+    } \
     } while (0)
 
-#define DEST_EA(env, insn, opsize, val, addrp) do {                     \
-        TCGv ea_result = gen_ea(env, s, insn, opsize, val, addrp, EA_STORE); \
-        if (IS_NULL_QREG(ea_result)) {                                  \
-            gen_addr_fault(s);                                          \
-            return;                                                     \
-        }                                                               \
+#define DEST_EA(insn, opsize, val, addrp) do { \
+    TCGv ea_result = gen_ea(s, insn, opsize, val, addrp, EA_STORE); \
+    if (IS_NULL_QREG(ea_result)) { \
+        gen_addr_fault(s); \
+        return; \
+    } \
     } while (0)
 
 /* Generate a jump to an immediate address.  */
@@ -863,7 +861,7 @@ static void gen_jmp_tb(DisasContext *s, int n, uint32_t dest)
                (s->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK)) {
         tcg_gen_goto_tb(n);
         tcg_gen_movi_i32(QREG_PC, dest);
-        tcg_gen_exit_tb((tcg_target_long)tb + n);
+        tcg_gen_exit_tb((long)tb + n);
     } else {
         gen_jmp_im(s, dest);
         tcg_gen_exit_tb(0);
@@ -884,7 +882,8 @@ DISAS_INSN(undef_fpu)
 DISAS_INSN(undef)
 {
     gen_exception(s, s->pc - 2, EXCP_UNSUPPORTED);
-    cpu_abort(env, "Illegal instruction: %04x @ %08x", insn, s->pc - 2);
+    cpu_abort(cpu_single_env, "Illegal instruction: %04x @ %08x",
+              insn, s->pc - 2);
 }
 
 DISAS_INSN(mulw)
@@ -901,7 +900,7 @@ DISAS_INSN(mulw)
         tcg_gen_ext16s_i32(tmp, reg);
     else
         tcg_gen_ext16u_i32(tmp, reg);
-    SRC_EA(env, src, OS_WORD, sign, NULL);
+    SRC_EA(src, OS_WORD, sign, NULL);
     tcg_gen_mul_i32(tmp, tmp, src);
     tcg_gen_mov_i32(reg, tmp);
     /* Unlike m68k, coldfire always clears the overflow bit.  */
@@ -922,7 +921,7 @@ DISAS_INSN(divw)
     } else {
         tcg_gen_ext16u_i32(QREG_DIV1, reg);
     }
-    SRC_EA(env, src, OS_WORD, sign, NULL);
+    SRC_EA(src, OS_WORD, sign, NULL);
     tcg_gen_mov_i32(QREG_DIV2, src);
     if (sign) {
         gen_helper_divs(cpu_env, tcg_const_i32(1));
@@ -945,7 +944,7 @@ DISAS_INSN(divl)
     TCGv reg;
     uint16_t ext;
 
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
     if (ext & 0x87f8) {
         gen_exception(s, s->pc - 4, EXCP_UNSUPPORTED);
@@ -954,7 +953,7 @@ DISAS_INSN(divl)
     num = DREG(ext, 12);
     reg = DREG(ext, 0);
     tcg_gen_mov_i32(QREG_DIV1, num);
-    SRC_EA(env, den, OS_LONG, 0, NULL);
+    SRC_EA(den, OS_LONG, 0, NULL);
     tcg_gen_mov_i32(QREG_DIV2, den);
     if (ext & 0x0800) {
         gen_helper_divs(cpu_env, tcg_const_i32(0));
@@ -984,11 +983,11 @@ DISAS_INSN(addsub)
     reg = DREG(insn, 9);
     dest = tcg_temp_new();
     if (insn & 0x100) {
-        SRC_EA(env, tmp, OS_LONG, 0, &addr);
+        SRC_EA(tmp, OS_LONG, 0, &addr);
         src = reg;
     } else {
         tmp = reg;
-        SRC_EA(env, src, OS_LONG, 0, NULL);
+        SRC_EA(src, OS_LONG, 0, NULL);
     }
     if (add) {
         tcg_gen_add_i32(dest, tmp, src);
@@ -1001,7 +1000,7 @@ DISAS_INSN(addsub)
     }
     gen_update_cc_add(dest, src);
     if (insn & 0x100) {
-        DEST_EA(env, insn, OS_LONG, dest, &addr);
+        DEST_EA(insn, OS_LONG, dest, &addr);
     } else {
         tcg_gen_mov_i32(reg, dest);
     }
@@ -1031,7 +1030,7 @@ DISAS_INSN(bitop_reg)
     else
         opsize = OS_LONG;
     op = (insn >> 6) & 3;
-    SRC_EA(env, src1, opsize, 0, op ? &addr: NULL);
+    SRC_EA(src1, opsize, 0, op ? &addr: NULL);
     src2 = DREG(insn, 9);
     dest = tcg_temp_new();
 
@@ -1066,7 +1065,7 @@ DISAS_INSN(bitop_reg)
         break;
     }
     if (op)
-        DEST_EA(env, insn, opsize, dest, &addr);
+        DEST_EA(insn, opsize, dest, &addr);
 }
 
 DISAS_INSN(sats)
@@ -1097,9 +1096,9 @@ DISAS_INSN(movem)
     TCGv tmp;
     int is_load;
 
-    mask = cpu_lduw_code(env, s->pc);
+    mask = lduw_code(s->pc);
     s->pc += 2;
-    tmp = gen_lea(env, s, insn, OS_LONG);
+    tmp = gen_lea(s, insn, OS_LONG);
     if (IS_NULL_QREG(tmp)) {
         gen_addr_fault(s);
         return;
@@ -1141,14 +1140,14 @@ DISAS_INSN(bitop_im)
         opsize = OS_LONG;
     op = (insn >> 6) & 3;
 
-    bitnum = cpu_lduw_code(env, s->pc);
+    bitnum = lduw_code(s->pc);
     s->pc += 2;
     if (bitnum & 0xff00) {
-        disas_undef(env, s, insn);
+        disas_undef(s, insn);
         return;
     }
 
-    SRC_EA(env, src1, opsize, 0, op ? &addr: NULL);
+    SRC_EA(src1, opsize, 0, op ? &addr: NULL);
 
     gen_flush_flags(s);
     if (opsize == OS_BYTE)
@@ -1183,7 +1182,7 @@ DISAS_INSN(bitop_im)
         default: /* btst */
             break;
         }
-        DEST_EA(env, insn, opsize, tmp, &addr);
+        DEST_EA(insn, opsize, tmp, &addr);
     }
 }
 
@@ -1196,8 +1195,8 @@ DISAS_INSN(arith_im)
     TCGv addr;
 
     op = (insn >> 9) & 7;
-    SRC_EA(env, src1, OS_LONG, 0, (op == 6) ? NULL : &addr);
-    im = read_im32(env, s);
+    SRC_EA(src1, OS_LONG, 0, (op == 6) ? NULL : &addr);
+    im = read_im32(s);
     dest = tcg_temp_new();
     switch (op) {
     case 0: /* ori */
@@ -1210,16 +1209,16 @@ DISAS_INSN(arith_im)
         break;
     case 2: /* subi */
         tcg_gen_mov_i32(dest, src1);
-        gen_helper_xflag_lt(QREG_CC_X, dest, tcg_const_i32(im));
+        gen_helper_xflag_lt(QREG_CC_X, dest, gen_im32(im));
         tcg_gen_subi_i32(dest, dest, im);
-        gen_update_cc_add(dest, tcg_const_i32(im));
+        gen_update_cc_add(dest, gen_im32(im));
         s->cc_op = CC_OP_SUB;
         break;
     case 3: /* addi */
         tcg_gen_mov_i32(dest, src1);
         tcg_gen_addi_i32(dest, dest, im);
-        gen_update_cc_add(dest, tcg_const_i32(im));
-        gen_helper_xflag_lt(QREG_CC_X, dest, tcg_const_i32(im));
+        gen_update_cc_add(dest, gen_im32(im));
+        gen_helper_xflag_lt(QREG_CC_X, dest, gen_im32(im));
         s->cc_op = CC_OP_ADD;
         break;
     case 5: /* eori */
@@ -1229,14 +1228,14 @@ DISAS_INSN(arith_im)
     case 6: /* cmpi */
         tcg_gen_mov_i32(dest, src1);
         tcg_gen_subi_i32(dest, dest, im);
-        gen_update_cc_add(dest, tcg_const_i32(im));
+        gen_update_cc_add(dest, gen_im32(im));
         s->cc_op = CC_OP_SUB;
         break;
     default:
         abort();
     }
     if (op != 6) {
-        DEST_EA(env, insn, OS_LONG, dest, &addr);
+        DEST_EA(insn, OS_LONG, dest, &addr);
     }
 }
 
@@ -1268,7 +1267,7 @@ DISAS_INSN(move)
     default:
         abort();
     }
-    SRC_EA(env, src, opsize, 1, NULL);
+    SRC_EA(src, opsize, 1, NULL);
     op = (insn >> 6) & 7;
     if (op == 1) {
         /* movea */
@@ -1279,7 +1278,7 @@ DISAS_INSN(move)
         /* normal move */
         uint16_t dest_ea;
         dest_ea = ((insn >> 9) & 7) | (op << 3);
-        DEST_EA(env, dest_ea, opsize, src, NULL);
+        DEST_EA(dest_ea, opsize, src, NULL);
         /* This will be correct because loads sign extend.  */
         gen_logic_cc(s, src);
     }
@@ -1300,7 +1299,7 @@ DISAS_INSN(lea)
     TCGv tmp;
 
     reg = AREG(insn, 9);
-    tmp = gen_lea(env, s, insn, OS_LONG);
+    tmp = gen_lea(s, insn, OS_LONG);
     if (IS_NULL_QREG(tmp)) {
         gen_addr_fault(s);
         return;
@@ -1325,8 +1324,8 @@ DISAS_INSN(clr)
     default:
         abort();
     }
-    DEST_EA(env, insn, opsize, tcg_const_i32(0), NULL);
-    gen_logic_cc(s, tcg_const_i32(0));
+    DEST_EA(insn, opsize, gen_im32(0), NULL);
+    gen_logic_cc(s, gen_im32(0));
 }
 
 static TCGv gen_get_ccr(DisasContext *s)
@@ -1374,8 +1373,7 @@ static void gen_set_sr_im(DisasContext *s, uint16_t val, int ccr_only)
     }
 }
 
-static void gen_set_sr(CPUM68KState *env, DisasContext *s, uint16_t insn,
-                       int ccr_only)
+static void gen_set_sr(DisasContext *s, uint16_t insn, int ccr_only)
 {
     TCGv tmp;
     TCGv reg;
@@ -1395,17 +1393,17 @@ static void gen_set_sr(CPUM68KState *env, DisasContext *s, uint16_t insn,
     else if ((insn & 0x3f) == 0x3c)
       {
         uint16_t val;
-        val = cpu_lduw_code(env, s->pc);
+        val = lduw_code(s->pc);
         s->pc += 2;
         gen_set_sr_im(s, val, ccr_only);
       }
     else
-        disas_undef(env, s, insn);
+        disas_undef(s, insn);
 }
 
 DISAS_INSN(move_to_ccr)
 {
-    gen_set_sr(env, s, insn, 1);
+    gen_set_sr(s, insn, 1);
 }
 
 DISAS_INSN(not)
@@ -1436,7 +1434,7 @@ DISAS_INSN(pea)
 {
     TCGv tmp;
 
-    tmp = gen_lea(env, s, insn, OS_LONG);
+    tmp = gen_lea(s, insn, OS_LONG);
     if (IS_NULL_QREG(tmp)) {
         gen_addr_fault(s);
         return;
@@ -1482,7 +1480,7 @@ DISAS_INSN(tst)
     default:
         abort();
     }
-    SRC_EA(env, tmp, opsize, 1, NULL);
+    SRC_EA(tmp, opsize, 1, NULL);
     gen_logic_cc(s, tmp);
 }
 
@@ -1504,10 +1502,10 @@ DISAS_INSN(tas)
     TCGv addr;
 
     dest = tcg_temp_new();
-    SRC_EA(env, src1, OS_BYTE, 1, &addr);
+    SRC_EA(src1, OS_BYTE, 1, &addr);
     gen_logic_cc(s, src1);
     tcg_gen_ori_i32(dest, src1, 0x80);
-    DEST_EA(env, insn, OS_BYTE, dest, &addr);
+    DEST_EA(insn, OS_BYTE, dest, &addr);
 }
 
 DISAS_INSN(mull)
@@ -1519,14 +1517,14 @@ DISAS_INSN(mull)
 
     /* The upper 32 bits of the product are discarded, so
        muls.l and mulu.l are functionally equivalent.  */
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
     if (ext & 0x87ff) {
         gen_exception(s, s->pc - 4, EXCP_UNSUPPORTED);
         return;
     }
     reg = DREG(ext, 12);
-    SRC_EA(env, src1, OS_LONG, 0, NULL);
+    SRC_EA(src1, OS_LONG, 0, NULL);
     dest = tcg_temp_new();
     tcg_gen_mul_i32(dest, src1, reg);
     tcg_gen_mov_i32(reg, dest);
@@ -1540,7 +1538,7 @@ DISAS_INSN(link)
     TCGv reg;
     TCGv tmp;
 
-    offset = cpu_ldsw_code(env, s->pc);
+    offset = ldsw_code(s->pc);
     s->pc += 2;
     reg = AREG(insn, 0);
     tmp = tcg_temp_new();
@@ -1584,14 +1582,14 @@ DISAS_INSN(jump)
 
     /* Load the target address first to ensure correct exception
        behavior.  */
-    tmp = gen_lea(env, s, insn, OS_LONG);
+    tmp = gen_lea(s, insn, OS_LONG);
     if (IS_NULL_QREG(tmp)) {
         gen_addr_fault(s);
         return;
     }
     if ((insn & 0x40) == 0) {
         /* jsr */
-        gen_push(s, tcg_const_i32(s->pc));
+        gen_push(s, gen_im32(s->pc));
     }
     gen_jmp(s, tmp);
 }
@@ -1604,7 +1602,7 @@ DISAS_INSN(addsubq)
     int val;
     TCGv addr;
 
-    SRC_EA(env, src1, OS_LONG, 0, &addr);
+    SRC_EA(src1, OS_LONG, 0, &addr);
     val = (insn >> 9) & 7;
     if (val == 0)
         val = 8;
@@ -1619,7 +1617,7 @@ DISAS_INSN(addsubq)
             tcg_gen_addi_i32(dest, dest, val);
         }
     } else {
-        src2 = tcg_const_i32(val);
+        src2 = gen_im32(val);
         if (insn & 0x0100) {
             gen_helper_xflag_lt(QREG_CC_X, dest, src2);
             tcg_gen_subi_i32(dest, dest, val);
@@ -1631,7 +1629,7 @@ DISAS_INSN(addsubq)
         }
         gen_update_cc_add(dest, src2);
     }
-    DEST_EA(env, insn, OS_LONG, dest, &addr);
+    DEST_EA(insn, OS_LONG, dest, &addr);
 }
 
 DISAS_INSN(tpf)
@@ -1646,7 +1644,7 @@ DISAS_INSN(tpf)
     case 4: /* No extension words.  */
         break;
     default:
-        disas_undef(env, s, insn);
+        disas_undef(s, insn);
     }
 }
 
@@ -1661,14 +1659,14 @@ DISAS_INSN(branch)
     op = (insn >> 8) & 0xf;
     offset = (int8_t)insn;
     if (offset == 0) {
-        offset = cpu_ldsw_code(env, s->pc);
+        offset = ldsw_code(s->pc);
         s->pc += 2;
     } else if (offset == -1) {
-        offset = read_im32(env, s);
+        offset = read_im32(s);
     }
     if (op == 1) {
         /* bsr */
-        gen_push(s, tcg_const_i32(s->pc));
+        gen_push(s, gen_im32(s->pc));
     }
     gen_flush_cc_op(s);
     if (op > 1) {
@@ -1703,7 +1701,7 @@ DISAS_INSN(mvzs)
         opsize = OS_WORD;
     else
         opsize = OS_BYTE;
-    SRC_EA(env, src, opsize, (insn & 0x80) == 0, NULL);
+    SRC_EA(src, opsize, (insn & 0x80) == 0, NULL);
     reg = DREG(insn, 9);
     tcg_gen_mov_i32(reg, src);
     gen_logic_cc(s, src);
@@ -1719,11 +1717,11 @@ DISAS_INSN(or)
     reg = DREG(insn, 9);
     dest = tcg_temp_new();
     if (insn & 0x100) {
-        SRC_EA(env, src, OS_LONG, 0, &addr);
+        SRC_EA(src, OS_LONG, 0, &addr);
         tcg_gen_or_i32(dest, src, reg);
-        DEST_EA(env, insn, OS_LONG, dest, &addr);
+        DEST_EA(insn, OS_LONG, dest, &addr);
     } else {
-        SRC_EA(env, src, OS_LONG, 0, NULL);
+        SRC_EA(src, OS_LONG, 0, NULL);
         tcg_gen_or_i32(dest, src, reg);
         tcg_gen_mov_i32(reg, dest);
     }
@@ -1735,7 +1733,7 @@ DISAS_INSN(suba)
     TCGv src;
     TCGv reg;
 
-    SRC_EA(env, src, OS_LONG, 0, NULL);
+    SRC_EA(src, OS_LONG, 0, NULL);
     reg = AREG(insn, 9);
     tcg_gen_sub_i32(reg, reg, src);
 }
@@ -1759,9 +1757,9 @@ DISAS_INSN(mov3q)
     val = (insn >> 9) & 7;
     if (val == 0)
         val = -1;
-    src = tcg_const_i32(val);
+    src = gen_im32(val);
     gen_logic_cc(s, src);
-    DEST_EA(env, insn, OS_LONG, src, NULL);
+    DEST_EA(insn, OS_LONG, src, NULL);
 }
 
 DISAS_INSN(cmp)
@@ -1789,7 +1787,7 @@ DISAS_INSN(cmp)
     default:
         abort();
     }
-    SRC_EA(env, src, opsize, 1, NULL);
+    SRC_EA(src, opsize, 1, NULL);
     reg = DREG(insn, 9);
     dest = tcg_temp_new();
     tcg_gen_sub_i32(dest, reg, src);
@@ -1808,7 +1806,7 @@ DISAS_INSN(cmpa)
     } else {
         opsize = OS_WORD;
     }
-    SRC_EA(env, src, opsize, 1, NULL);
+    SRC_EA(src, opsize, 1, NULL);
     reg = AREG(insn, 9);
     dest = tcg_temp_new();
     tcg_gen_sub_i32(dest, reg, src);
@@ -1823,12 +1821,12 @@ DISAS_INSN(eor)
     TCGv dest;
     TCGv addr;
 
-    SRC_EA(env, src, OS_LONG, 0, &addr);
+    SRC_EA(src, OS_LONG, 0, &addr);
     reg = DREG(insn, 9);
     dest = tcg_temp_new();
     tcg_gen_xor_i32(dest, src, reg);
     gen_logic_cc(s, dest);
-    DEST_EA(env, insn, OS_LONG, dest, &addr);
+    DEST_EA(insn, OS_LONG, dest, &addr);
 }
 
 DISAS_INSN(and)
@@ -1841,11 +1839,11 @@ DISAS_INSN(and)
     reg = DREG(insn, 9);
     dest = tcg_temp_new();
     if (insn & 0x100) {
-        SRC_EA(env, src, OS_LONG, 0, &addr);
+        SRC_EA(src, OS_LONG, 0, &addr);
         tcg_gen_and_i32(dest, src, reg);
-        DEST_EA(env, insn, OS_LONG, dest, &addr);
+        DEST_EA(insn, OS_LONG, dest, &addr);
     } else {
-        SRC_EA(env, src, OS_LONG, 0, NULL);
+        SRC_EA(src, OS_LONG, 0, NULL);
         tcg_gen_and_i32(dest, src, reg);
         tcg_gen_mov_i32(reg, dest);
     }
@@ -1857,7 +1855,7 @@ DISAS_INSN(adda)
     TCGv src;
     TCGv reg;
 
-    SRC_EA(env, src, OS_LONG, 0, NULL);
+    SRC_EA(src, OS_LONG, 0, NULL);
     reg = AREG(insn, 9);
     tcg_gen_add_i32(reg, reg, src);
 }
@@ -1885,7 +1883,7 @@ DISAS_INSN(shift_im)
     tmp = (insn >> 9) & 7;
     if (tmp == 0)
         tmp = 8;
-    shift = tcg_const_i32(tmp);
+    shift = gen_im32(tmp);
     /* No need to flush flags becuse we know we will set C flag.  */
     if (insn & 0x100) {
         gen_helper_shl_cc(reg, cpu_env, reg, shift);
@@ -1946,13 +1944,13 @@ DISAS_INSN(strldsr)
     uint32_t addr;
 
     addr = s->pc - 2;
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
     if (ext != 0x46FC) {
         gen_exception(s, addr, EXCP_UNSUPPORTED);
         return;
     }
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
     if (IS_USER(s) || (ext & SR_S) == 0) {
         gen_exception(s, addr, EXCP_PRIVILEGE);
@@ -1982,7 +1980,7 @@ DISAS_INSN(move_to_sr)
         gen_exception(s, s->pc - 2, EXCP_PRIVILEGE);
         return;
     }
-    gen_set_sr(env, s, insn, 0);
+    gen_set_sr(s, insn, 0);
     gen_lookup_tb(s);
 }
 
@@ -2020,7 +2018,7 @@ DISAS_INSN(stop)
         return;
     }
 
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
 
     gen_set_sr_im(s, ext, 0);
@@ -2047,7 +2045,7 @@ DISAS_INSN(movec)
         return;
     }
 
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
 
     if (ext & 0x8000) {
@@ -2112,7 +2110,7 @@ DISAS_INSN(fpu)
     int set_dest;
     int opsize;
 
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
     opmode = ext & 0x7f;
     switch ((ext >> 13) & 7) {
@@ -2148,7 +2146,7 @@ DISAS_INSN(fpu)
                 tcg_gen_addi_i32(tmp32, tmp32, -8);
                 break;
             case 5:
-                offset = cpu_ldsw_code(env, s->pc);
+                offset = ldsw_code(s->pc);
                 s->pc += 2;
                 tcg_gen_addi_i32(tmp32, tmp32, offset);
                 break;
@@ -2174,7 +2172,7 @@ DISAS_INSN(fpu)
         default:
             goto undef;
         }
-        DEST_EA(env, insn, opsize, tmp32, NULL);
+        DEST_EA(insn, opsize, tmp32, NULL);
         tcg_temp_free_i32(tmp32);
         return;
     case 4: /* fmove to control register.  */
@@ -2193,7 +2191,7 @@ DISAS_INSN(fpu)
         switch ((ext >> 10) & 7) {
         case 4: /* FPCR */
             /* Not implemented.  Always return zero.  */
-            tmp32 = tcg_const_i32(0);
+            tmp32 = gen_im32(0);
             break;
         case 1: /* FPIAR */
         case 2: /* FPSR */
@@ -2202,7 +2200,7 @@ DISAS_INSN(fpu)
                       (ext >> 10) & 7);
             goto undef;
         }
-        DEST_EA(env, insn, OS_LONG, tmp32, NULL);
+        DEST_EA(insn, OS_LONG, tmp32, NULL);
         break;
     case 6: /* fmovem */
     case 7:
@@ -2212,7 +2210,7 @@ DISAS_INSN(fpu)
             int i;
             if ((ext & 0x1f00) != 0x1000 || (ext & 0xff) == 0)
                 goto undef;
-            tmp32 = gen_lea(env, s, insn, OS_LONG);
+            tmp32 = gen_lea(s, insn, OS_LONG);
             if (IS_NULL_QREG(tmp32)) {
                 gen_addr_fault(s);
                 return;
@@ -2262,12 +2260,12 @@ DISAS_INSN(fpu)
                 tcg_gen_addi_i32(tmp32, tmp32, -8);
                 break;
             case 5:
-                offset = cpu_ldsw_code(env, s->pc);
+                offset = ldsw_code(s->pc);
                 s->pc += 2;
                 tcg_gen_addi_i32(tmp32, tmp32, offset);
                 break;
             case 7:
-                offset = cpu_ldsw_code(env, s->pc);
+                offset = ldsw_code(s->pc);
                 offset += s->pc - 2;
                 s->pc += 2;
                 tcg_gen_addi_i32(tmp32, tmp32, offset);
@@ -2287,7 +2285,7 @@ DISAS_INSN(fpu)
             }
             tcg_temp_free_i32(tmp32);
         } else {
-            SRC_EA(env, tmp32, opsize, 1, NULL);
+            SRC_EA(tmp32, opsize, 1, NULL);
             src = tcg_temp_new_i64();
             switch (opsize) {
             case OS_LONG:
@@ -2382,7 +2380,7 @@ DISAS_INSN(fpu)
 undef:
     /* FIXME: Is this right for offset addressing modes?  */
     s->pc -= 2;
-    disas_undef_fpu(env, s, insn);
+    disas_undef_fpu(s, insn);
 }
 
 DISAS_INSN(fbcc)
@@ -2393,10 +2391,10 @@ DISAS_INSN(fbcc)
     int l1;
 
     addr = s->pc;
-    offset = cpu_ldsw_code(env, s->pc);
+    offset = ldsw_code(s->pc);
     s->pc += 2;
     if (insn & (1 << 6)) {
-        offset = (offset << 16) | cpu_lduw_code(env, s->pc);
+        offset = (offset << 16) | lduw_code(s->pc);
         s->pc += 2;
     }
 
@@ -2518,18 +2516,18 @@ DISAS_INSN(mac)
         s->done_mac = 1;
     }
 
-    ext = cpu_lduw_code(env, s->pc);
+    ext = lduw_code(s->pc);
     s->pc += 2;
 
     acc = ((insn >> 7) & 1) | ((ext >> 3) & 2);
     dual = ((insn & 0x30) != 0 && (ext & 3) != 0);
     if (dual && !m68k_feature(s->env, M68K_FEATURE_CF_EMAC_B)) {
-        disas_undef(env, s, insn);
+        disas_undef(s, insn);
         return;
     }
     if (insn & 0x30) {
         /* MAC with load.  */
-        tmp = gen_lea(env, s, insn, OS_LONG);
+        tmp = gen_lea(s, insn, OS_LONG);
         addr = tcg_temp_new();
         tcg_gen_and_i32(addr, tmp, QREG_MAC_MASK);
         /* Load the value now to ensure correct exception behavior.
@@ -2594,7 +2592,7 @@ DISAS_INSN(mac)
         /* Skip the accumulate if the value is already saturated.  */
         l1 = gen_new_label();
         tmp = tcg_temp_new();
-        gen_op_and32(tmp, QREG_MACSR, tcg_const_i32(MACSR_PAV0 << acc));
+        gen_op_and32(tmp, QREG_MACSR, gen_im32(MACSR_PAV0 << acc));
         gen_op_jmp_nz32(tmp, l1);
     }
 #endif
@@ -2628,7 +2626,7 @@ DISAS_INSN(mac)
             /* Skip the accumulate if the value is already saturated.  */
             l1 = gen_new_label();
             tmp = tcg_temp_new();
-            gen_op_and32(tmp, QREG_MACSR, tcg_const_i32(MACSR_PAV0 << acc));
+            gen_op_and32(tmp, QREG_MACSR, gen_im32(MACSR_PAV0 << acc));
             gen_op_jmp_nz32(tmp, l1);
         }
 #endif
@@ -2743,7 +2741,7 @@ DISAS_INSN(to_mac)
     int accnum;
     accnum = (insn >> 9) & 3;
     acc = MACREG(accnum);
-    SRC_EA(env, val, OS_LONG, 0, NULL);
+    SRC_EA(val, OS_LONG, 0, NULL);
     if (s->env->macsr & MACSR_FI) {
         tcg_gen_ext_i32_i64(acc, val);
         tcg_gen_shli_i64(acc, acc, 8);
@@ -2760,7 +2758,7 @@ DISAS_INSN(to_mac)
 DISAS_INSN(to_macsr)
 {
     TCGv val;
-    SRC_EA(env, val, OS_LONG, 0, NULL);
+    SRC_EA(val, OS_LONG, 0, NULL);
     gen_helper_set_macsr(cpu_env, val);
     gen_lookup_tb(s);
 }
@@ -2768,7 +2766,7 @@ DISAS_INSN(to_macsr)
 DISAS_INSN(to_mask)
 {
     TCGv val;
-    SRC_EA(env, val, OS_LONG, 0, NULL);
+    SRC_EA(val, OS_LONG, 0, NULL);
     tcg_gen_ori_i32(QREG_MAC_MASK, val, 0xffff0000);
 }
 
@@ -2776,7 +2774,7 @@ DISAS_INSN(to_mext)
 {
     TCGv val;
     TCGv acc;
-    SRC_EA(env, val, OS_LONG, 0, NULL);
+    SRC_EA(val, OS_LONG, 0, NULL);
     acc = tcg_const_i32((insn & 0x400) ? 2 : 0);
     if (s->env->macsr & MACSR_FI)
         gen_helper_set_mac_extf(cpu_env, val, acc);
@@ -2949,23 +2947,19 @@ void register_m68k_insns (CPUM68KState *env)
 
 /* ??? Some of this implementation is not exception safe.  We should always
    write back the result to memory before setting the condition codes.  */
-static void disas_m68k_insn(CPUM68KState * env, DisasContext *s)
+static void disas_m68k_insn(CPUState * env, DisasContext *s)
 {
     uint16_t insn;
 
-    if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP | CPU_LOG_TB_OP_OPT))) {
-        tcg_gen_debug_insn_start(s->pc);
-    }
-
-    insn = cpu_lduw_code(env, s->pc);
+    insn = lduw_code(s->pc);
     s->pc += 2;
 
-    opcode_table[insn](env, s, insn);
+    opcode_table[insn](s, insn);
 }
 
 /* generate intermediate code for basic block 'tb'.  */
 static inline void
-gen_intermediate_code_internal(CPUM68KState *env, TranslationBlock *tb,
+gen_intermediate_code_internal(CPUState *env, TranslationBlock *tb,
                                int search_pc)
 {
     DisasContext dc1, *dc = &dc1;
@@ -3044,7 +3038,7 @@ gen_intermediate_code_internal(CPUM68KState *env, TranslationBlock *tb,
             gen_flush_cc_op(dc);
             tcg_gen_movi_i32(QREG_PC, dc->pc);
         }
-        gen_helper_raise_exception(cpu_env, tcg_const_i32(EXCP_DEBUG));
+        gen_helper_raise_exception(tcg_const_i32(EXCP_DEBUG));
     } else {
         switch(dc->is_jmp) {
         case DISAS_NEXT:
@@ -3088,17 +3082,17 @@ gen_intermediate_code_internal(CPUM68KState *env, TranslationBlock *tb,
     //expand_target_qops();
 }
 
-void gen_intermediate_code(CPUM68KState *env, TranslationBlock *tb)
+void gen_intermediate_code(CPUState *env, TranslationBlock *tb)
 {
     gen_intermediate_code_internal(env, tb, 0);
 }
 
-void gen_intermediate_code_pc(CPUM68KState *env, TranslationBlock *tb)
+void gen_intermediate_code_pc(CPUState *env, TranslationBlock *tb)
 {
     gen_intermediate_code_internal(env, tb, 1);
 }
 
-void cpu_dump_state(CPUM68KState *env, FILE *f, fprintf_function cpu_fprintf,
+void cpu_dump_state(CPUState *env, FILE *f, fprintf_function cpu_fprintf,
                     int flags)
 {
     int i;
@@ -3119,7 +3113,8 @@ void cpu_dump_state(CPUM68KState *env, FILE *f, fprintf_function cpu_fprintf,
     cpu_fprintf (f, "FPRESULT = %12g\n", *(double *)&env->fp_result);
 }
 
-void restore_state_to_opc(CPUM68KState *env, TranslationBlock *tb, int pc_pos)
+void gen_pc_load(CPUState *env, TranslationBlock *tb,
+                unsigned long searched_pc, int pc_pos, void *puc)
 {
     env->pc = gen_opc_pc[pc_pos];
 }

@@ -1,8 +1,3 @@
-/*
- * QEMU float support
- *
- * Derived from SoftFloat.
- */
 
 /*============================================================================
 
@@ -35,11 +30,6 @@ these four paragraphs for those parts of this code that are retained.
 
 =============================================================================*/
 
-/* softfloat (and in particular the code in softfloat-specialize.h) is
- * target-dependent and needs the TARGET_* macros.
- */
-#include "config.h"
-
 #include "softfloat.h"
 
 /*----------------------------------------------------------------------------
@@ -69,37 +59,12 @@ void set_float_exception_flags(int val STATUS_PARAM)
     STATUS(float_exception_flags) = val;
 }
 
+#ifdef FLOATX80
 void set_floatx80_rounding_precision(int val STATUS_PARAM)
 {
     STATUS(floatx80_rounding_precision) = val;
 }
-
-/*----------------------------------------------------------------------------
-| Returns the fraction bits of the half-precision floating-point value `a'.
-*----------------------------------------------------------------------------*/
-
-INLINE uint32_t extractFloat16Frac(float16 a)
-{
-    return float16_val(a) & 0x3ff;
-}
-
-/*----------------------------------------------------------------------------
-| Returns the exponent bits of the half-precision floating-point value `a'.
-*----------------------------------------------------------------------------*/
-
-INLINE int_fast16_t extractFloat16Exp(float16 a)
-{
-    return (float16_val(a) >> 10) & 0x1f;
-}
-
-/*----------------------------------------------------------------------------
-| Returns the sign bit of the single-precision floating-point value `a'.
-*----------------------------------------------------------------------------*/
-
-INLINE flag extractFloat16Sign(float16 a)
-{
-    return float16_val(a)>>15;
-}
+#endif
 
 /*----------------------------------------------------------------------------
 | Takes a 64-bit fixed-point value `absZ' with binary point between bits 6
@@ -112,12 +77,12 @@ INLINE flag extractFloat16Sign(float16 a)
 | positive or negative integer is returned.
 *----------------------------------------------------------------------------*/
 
-static int32 roundAndPackInt32( flag zSign, uint64_t absZ STATUS_PARAM)
+static int32 roundAndPackInt32( flag zSign, bits64 absZ STATUS_PARAM)
 {
     int8 roundingMode;
     flag roundNearestEven;
     int8 roundIncrement, roundBits;
-    int32_t z;
+    int32 z;
 
     roundingMode = STATUS(float_rounding_mode);
     roundNearestEven = ( roundingMode == float_round_nearest_even );
@@ -143,7 +108,7 @@ static int32 roundAndPackInt32( flag zSign, uint64_t absZ STATUS_PARAM)
     if ( zSign ) z = - z;
     if ( ( absZ>>32 ) || ( z && ( ( z < 0 ) ^ zSign ) ) ) {
         float_raise( float_flag_invalid STATUS_VAR);
-        return zSign ? (int32_t) 0x80000000 : 0x7FFFFFFF;
+        return zSign ? (sbits32) 0x80000000 : 0x7FFFFFFF;
     }
     if ( roundBits ) STATUS(float_exception_flags) |= float_flag_inexact;
     return z;
@@ -162,15 +127,15 @@ static int32 roundAndPackInt32( flag zSign, uint64_t absZ STATUS_PARAM)
 | returned.
 *----------------------------------------------------------------------------*/
 
-static int64 roundAndPackInt64( flag zSign, uint64_t absZ0, uint64_t absZ1 STATUS_PARAM)
+static int64 roundAndPackInt64( flag zSign, bits64 absZ0, bits64 absZ1 STATUS_PARAM)
 {
     int8 roundingMode;
     flag roundNearestEven, increment;
-    int64_t z;
+    int64 z;
 
     roundingMode = STATUS(float_rounding_mode);
     roundNearestEven = ( roundingMode == float_round_nearest_even );
-    increment = ( (int64_t) absZ1 < 0 );
+    increment = ( (sbits64) absZ1 < 0 );
     if ( ! roundNearestEven ) {
         if ( roundingMode == float_round_to_zero ) {
             increment = 0;
@@ -187,7 +152,7 @@ static int64 roundAndPackInt64( flag zSign, uint64_t absZ0, uint64_t absZ1 STATU
     if ( increment ) {
         ++absZ0;
         if ( absZ0 == 0 ) goto overflow;
-        absZ0 &= ~ ( ( (uint64_t) ( absZ1<<1 ) == 0 ) & roundNearestEven );
+        absZ0 &= ~ ( ( (bits64) ( absZ1<<1 ) == 0 ) & roundNearestEven );
     }
     z = absZ0;
     if ( zSign ) z = - z;
@@ -195,7 +160,7 @@ static int64 roundAndPackInt64( flag zSign, uint64_t absZ0, uint64_t absZ1 STATU
  overflow:
         float_raise( float_flag_invalid STATUS_VAR);
         return
-              zSign ? (int64_t) LIT64( 0x8000000000000000 )
+              zSign ? (sbits64) LIT64( 0x8000000000000000 )
             : LIT64( 0x7FFFFFFFFFFFFFFF );
     }
     if ( absZ1 ) STATUS(float_exception_flags) |= float_flag_inexact;
@@ -207,7 +172,7 @@ static int64 roundAndPackInt64( flag zSign, uint64_t absZ0, uint64_t absZ1 STATU
 | Returns the fraction bits of the single-precision floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE uint32_t extractFloat32Frac( float32 a )
+INLINE bits32 extractFloat32Frac( float32 a )
 {
 
     return float32_val(a) & 0x007FFFFF;
@@ -218,7 +183,7 @@ INLINE uint32_t extractFloat32Frac( float32 a )
 | Returns the exponent bits of the single-precision floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE int_fast16_t extractFloat32Exp(float32 a)
+INLINE int16 extractFloat32Exp( float32 a )
 {
 
     return ( float32_val(a)>>23 ) & 0xFF;
@@ -259,7 +224,7 @@ static float32 float32_squash_input_denormal(float32 a STATUS_PARAM)
 *----------------------------------------------------------------------------*/
 
 static void
- normalizeFloat32Subnormal(uint32_t aSig, int_fast16_t *zExpPtr, uint32_t *zSigPtr)
+ normalizeFloat32Subnormal( bits32 aSig, int16 *zExpPtr, bits32 *zSigPtr )
 {
     int8 shiftCount;
 
@@ -280,11 +245,11 @@ static void
 | significand.
 *----------------------------------------------------------------------------*/
 
-INLINE float32 packFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig)
+INLINE float32 packFloat32( flag zSign, int16 zExp, bits32 zSig )
 {
 
     return make_float32(
-          ( ( (uint32_t) zSign )<<31 ) + ( ( (uint32_t) zExp )<<23 ) + zSig);
+          ( ( (bits32) zSign )<<31 ) + ( ( (bits32) zExp )<<23 ) + zSig);
 
 }
 
@@ -310,7 +275,7 @@ INLINE float32 packFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig)
 | Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
-static float32 roundAndPackFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig STATUS_PARAM)
+static float32 roundAndPackFloat32( flag zSign, int16 zExp, bits32 zSig STATUS_PARAM)
 {
     int8 roundingMode;
     flag roundNearestEven;
@@ -335,19 +300,16 @@ static float32 roundAndPackFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig 
         }
     }
     roundBits = zSig & 0x7F;
-    if ( 0xFD <= (uint16_t) zExp ) {
+    if ( 0xFD <= (bits16) zExp ) {
         if (    ( 0xFD < zExp )
              || (    ( zExp == 0xFD )
-                  && ( (int32_t) ( zSig + roundIncrement ) < 0 ) )
+                  && ( (sbits32) ( zSig + roundIncrement ) < 0 ) )
            ) {
             float_raise( float_flag_overflow | float_flag_inexact STATUS_VAR);
             return packFloat32( zSign, 0xFF, - ( roundIncrement == 0 ));
         }
         if ( zExp < 0 ) {
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloat32(zSign, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat32( zSign, 0, 0 );
             isTiny =
                    ( STATUS(float_detect_tininess) == float_tininess_before_rounding )
                 || ( zExp < -1 )
@@ -376,7 +338,7 @@ static float32 roundAndPackFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig 
 *----------------------------------------------------------------------------*/
 
 static float32
- normalizeRoundAndPackFloat32(flag zSign, int_fast16_t zExp, uint32_t zSig STATUS_PARAM)
+ normalizeRoundAndPackFloat32( flag zSign, int16 zExp, bits32 zSig STATUS_PARAM)
 {
     int8 shiftCount;
 
@@ -389,7 +351,7 @@ static float32
 | Returns the fraction bits of the double-precision floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE uint64_t extractFloat64Frac( float64 a )
+INLINE bits64 extractFloat64Frac( float64 a )
 {
 
     return float64_val(a) & LIT64( 0x000FFFFFFFFFFFFF );
@@ -400,7 +362,7 @@ INLINE uint64_t extractFloat64Frac( float64 a )
 | Returns the exponent bits of the double-precision floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE int_fast16_t extractFloat64Exp(float64 a)
+INLINE int16 extractFloat64Exp( float64 a )
 {
 
     return ( float64_val(a)>>52 ) & 0x7FF;
@@ -441,7 +403,7 @@ static float64 float64_squash_input_denormal(float64 a STATUS_PARAM)
 *----------------------------------------------------------------------------*/
 
 static void
- normalizeFloat64Subnormal(uint64_t aSig, int_fast16_t *zExpPtr, uint64_t *zSigPtr)
+ normalizeFloat64Subnormal( bits64 aSig, int16 *zExpPtr, bits64 *zSigPtr )
 {
     int8 shiftCount;
 
@@ -462,11 +424,11 @@ static void
 | significand.
 *----------------------------------------------------------------------------*/
 
-INLINE float64 packFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig)
+INLINE float64 packFloat64( flag zSign, int16 zExp, bits64 zSig )
 {
 
     return make_float64(
-        ( ( (uint64_t) zSign )<<63 ) + ( ( (uint64_t) zExp )<<52 ) + zSig);
+        ( ( (bits64) zSign )<<63 ) + ( ( (bits64) zExp )<<52 ) + zSig);
 
 }
 
@@ -492,11 +454,11 @@ INLINE float64 packFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig)
 | Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
-static float64 roundAndPackFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig STATUS_PARAM)
+static float64 roundAndPackFloat64( flag zSign, int16 zExp, bits64 zSig STATUS_PARAM)
 {
     int8 roundingMode;
     flag roundNearestEven;
-    int_fast16_t roundIncrement, roundBits;
+    int16 roundIncrement, roundBits;
     flag isTiny;
 
     roundingMode = STATUS(float_rounding_mode);
@@ -517,19 +479,16 @@ static float64 roundAndPackFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig 
         }
     }
     roundBits = zSig & 0x3FF;
-    if ( 0x7FD <= (uint16_t) zExp ) {
+    if ( 0x7FD <= (bits16) zExp ) {
         if (    ( 0x7FD < zExp )
              || (    ( zExp == 0x7FD )
-                  && ( (int64_t) ( zSig + roundIncrement ) < 0 ) )
+                  && ( (sbits64) ( zSig + roundIncrement ) < 0 ) )
            ) {
             float_raise( float_flag_overflow | float_flag_inexact STATUS_VAR);
             return packFloat64( zSign, 0x7FF, - ( roundIncrement == 0 ));
         }
         if ( zExp < 0 ) {
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloat64(zSign, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat64( zSign, 0, 0 );
             isTiny =
                    ( STATUS(float_detect_tininess) == float_tininess_before_rounding )
                 || ( zExp < -1 )
@@ -558,7 +517,7 @@ static float64 roundAndPackFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig 
 *----------------------------------------------------------------------------*/
 
 static float64
- normalizeRoundAndPackFloat64(flag zSign, int_fast16_t zExp, uint64_t zSig STATUS_PARAM)
+ normalizeRoundAndPackFloat64( flag zSign, int16 zExp, bits64 zSig STATUS_PARAM)
 {
     int8 shiftCount;
 
@@ -567,12 +526,14 @@ static float64
 
 }
 
+#ifdef FLOATX80
+
 /*----------------------------------------------------------------------------
 | Returns the fraction bits of the extended double-precision floating-point
 | value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE uint64_t extractFloatx80Frac( floatx80 a )
+INLINE bits64 extractFloatx80Frac( floatx80 a )
 {
 
     return a.low;
@@ -611,7 +572,7 @@ INLINE flag extractFloatx80Sign( floatx80 a )
 *----------------------------------------------------------------------------*/
 
 static void
- normalizeFloatx80Subnormal( uint64_t aSig, int32 *zExpPtr, uint64_t *zSigPtr )
+ normalizeFloatx80Subnormal( bits64 aSig, int32 *zExpPtr, bits64 *zSigPtr )
 {
     int8 shiftCount;
 
@@ -626,12 +587,12 @@ static void
 | extended double-precision floating-point value, returning the result.
 *----------------------------------------------------------------------------*/
 
-INLINE floatx80 packFloatx80( flag zSign, int32 zExp, uint64_t zSig )
+INLINE floatx80 packFloatx80( flag zSign, int32 zExp, bits64 zSig )
 {
     floatx80 z;
 
     z.low = zSig;
-    z.high = ( ( (uint16_t) zSign )<<15 ) + zExp;
+    z.high = ( ( (bits16) zSign )<<15 ) + zExp;
     return z;
 
 }
@@ -662,7 +623,7 @@ INLINE floatx80 packFloatx80( flag zSign, int32 zExp, uint64_t zSig )
 
 static floatx80
  roundAndPackFloatx80(
-     int8 roundingPrecision, flag zSign, int32 zExp, uint64_t zSig0, uint64_t zSig1
+     int8 roundingPrecision, flag zSign, int32 zExp, bits64 zSig0, bits64 zSig1
  STATUS_PARAM)
 {
     int8 roundingMode;
@@ -699,17 +660,14 @@ static floatx80
         }
     }
     roundBits = zSig0 & roundMask;
-    if ( 0x7FFD <= (uint32_t) ( zExp - 1 ) ) {
+    if ( 0x7FFD <= (bits32) ( zExp - 1 ) ) {
         if (    ( 0x7FFE < zExp )
              || ( ( zExp == 0x7FFE ) && ( zSig0 + roundIncrement < zSig0 ) )
            ) {
             goto overflow;
         }
         if ( zExp <= 0 ) {
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloatx80(zSign, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloatx80( zSign, 0, 0 );
             isTiny =
                    ( STATUS(float_detect_tininess) == float_tininess_before_rounding )
                 || ( zExp < 0 )
@@ -720,7 +678,7 @@ static floatx80
             if ( isTiny && roundBits ) float_raise( float_flag_underflow STATUS_VAR);
             if ( roundBits ) STATUS(float_exception_flags) |= float_flag_inexact;
             zSig0 += roundIncrement;
-            if ( (int64_t) zSig0 < 0 ) zExp = 1;
+            if ( (sbits64) zSig0 < 0 ) zExp = 1;
             roundIncrement = roundMask + 1;
             if ( roundNearestEven && ( roundBits<<1 == roundIncrement ) ) {
                 roundMask |= roundIncrement;
@@ -743,7 +701,7 @@ static floatx80
     if ( zSig0 == 0 ) zExp = 0;
     return packFloatx80( zSign, zExp, zSig0 );
  precision80:
-    increment = ( (int64_t) zSig1 < 0 );
+    increment = ( (sbits64) zSig1 < 0 );
     if ( ! roundNearestEven ) {
         if ( roundingMode == float_round_to_zero ) {
             increment = 0;
@@ -757,7 +715,7 @@ static floatx80
             }
         }
     }
-    if ( 0x7FFD <= (uint32_t) ( zExp - 1 ) ) {
+    if ( 0x7FFD <= (bits32) ( zExp - 1 ) ) {
         if (    ( 0x7FFE < zExp )
              || (    ( zExp == 0x7FFE )
                   && ( zSig0 == LIT64( 0xFFFFFFFFFFFFFFFF ) )
@@ -786,7 +744,7 @@ static floatx80
             if ( isTiny && zSig1 ) float_raise( float_flag_underflow STATUS_VAR);
             if ( zSig1 ) STATUS(float_exception_flags) |= float_flag_inexact;
             if ( roundNearestEven ) {
-                increment = ( (int64_t) zSig1 < 0 );
+                increment = ( (sbits64) zSig1 < 0 );
             }
             else {
                 if ( zSign ) {
@@ -799,8 +757,8 @@ static floatx80
             if ( increment ) {
                 ++zSig0;
                 zSig0 &=
-                    ~ ( ( (uint64_t) ( zSig1<<1 ) == 0 ) & roundNearestEven );
-                if ( (int64_t) zSig0 < 0 ) zExp = 1;
+                    ~ ( ( (bits64) ( zSig1<<1 ) == 0 ) & roundNearestEven );
+                if ( (sbits64) zSig0 < 0 ) zExp = 1;
             }
             return packFloatx80( zSign, zExp, zSig0 );
         }
@@ -813,7 +771,7 @@ static floatx80
             zSig0 = LIT64( 0x8000000000000000 );
         }
         else {
-            zSig0 &= ~ ( ( (uint64_t) ( zSig1<<1 ) == 0 ) & roundNearestEven );
+            zSig0 &= ~ ( ( (bits64) ( zSig1<<1 ) == 0 ) & roundNearestEven );
         }
     }
     else {
@@ -834,7 +792,7 @@ static floatx80
 
 static floatx80
  normalizeRoundAndPackFloatx80(
-     int8 roundingPrecision, flag zSign, int32 zExp, uint64_t zSig0, uint64_t zSig1
+     int8 roundingPrecision, flag zSign, int32 zExp, bits64 zSig0, bits64 zSig1
  STATUS_PARAM)
 {
     int8 shiftCount;
@@ -852,12 +810,16 @@ static floatx80
 
 }
 
+#endif
+
+#ifdef FLOAT128
+
 /*----------------------------------------------------------------------------
 | Returns the least-significant 64 fraction bits of the quadruple-precision
 | floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE uint64_t extractFloat128Frac1( float128 a )
+INLINE bits64 extractFloat128Frac1( float128 a )
 {
 
     return a.low;
@@ -869,7 +831,7 @@ INLINE uint64_t extractFloat128Frac1( float128 a )
 | floating-point value `a'.
 *----------------------------------------------------------------------------*/
 
-INLINE uint64_t extractFloat128Frac0( float128 a )
+INLINE bits64 extractFloat128Frac0( float128 a )
 {
 
     return a.high & LIT64( 0x0000FFFFFFFFFFFF );
@@ -911,11 +873,11 @@ INLINE flag extractFloat128Sign( float128 a )
 
 static void
  normalizeFloat128Subnormal(
-     uint64_t aSig0,
-     uint64_t aSig1,
+     bits64 aSig0,
+     bits64 aSig1,
      int32 *zExpPtr,
-     uint64_t *zSig0Ptr,
-     uint64_t *zSig1Ptr
+     bits64 *zSig0Ptr,
+     bits64 *zSig1Ptr
  )
 {
     int8 shiftCount;
@@ -954,12 +916,12 @@ static void
 *----------------------------------------------------------------------------*/
 
 INLINE float128
- packFloat128( flag zSign, int32 zExp, uint64_t zSig0, uint64_t zSig1 )
+ packFloat128( flag zSign, int32 zExp, bits64 zSig0, bits64 zSig1 )
 {
     float128 z;
 
     z.low = zSig1;
-    z.high = ( ( (uint64_t) zSign )<<63 ) + ( ( (uint64_t) zExp )<<48 ) + zSig0;
+    z.high = ( ( (bits64) zSign )<<63 ) + ( ( (bits64) zExp )<<48 ) + zSig0;
     return z;
 
 }
@@ -987,14 +949,14 @@ INLINE float128
 
 static float128
  roundAndPackFloat128(
-     flag zSign, int32 zExp, uint64_t zSig0, uint64_t zSig1, uint64_t zSig2 STATUS_PARAM)
+     flag zSign, int32 zExp, bits64 zSig0, bits64 zSig1, bits64 zSig2 STATUS_PARAM)
 {
     int8 roundingMode;
     flag roundNearestEven, increment, isTiny;
 
     roundingMode = STATUS(float_rounding_mode);
     roundNearestEven = ( roundingMode == float_round_nearest_even );
-    increment = ( (int64_t) zSig2 < 0 );
+    increment = ( (sbits64) zSig2 < 0 );
     if ( ! roundNearestEven ) {
         if ( roundingMode == float_round_to_zero ) {
             increment = 0;
@@ -1008,7 +970,7 @@ static float128
             }
         }
     }
-    if ( 0x7FFD <= (uint32_t) zExp ) {
+    if ( 0x7FFD <= (bits32) zExp ) {
         if (    ( 0x7FFD < zExp )
              || (    ( zExp == 0x7FFD )
                   && eq128(
@@ -1036,10 +998,7 @@ static float128
             return packFloat128( zSign, 0x7FFF, 0, 0 );
         }
         if ( zExp < 0 ) {
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloat128(zSign, 0, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat128( zSign, 0, 0, 0 );
             isTiny =
                    ( STATUS(float_detect_tininess) == float_tininess_before_rounding )
                 || ( zExp < -1 )
@@ -1055,7 +1014,7 @@ static float128
             zExp = 0;
             if ( isTiny && zSig2 ) float_raise( float_flag_underflow STATUS_VAR);
             if ( roundNearestEven ) {
-                increment = ( (int64_t) zSig2 < 0 );
+                increment = ( (sbits64) zSig2 < 0 );
             }
             else {
                 if ( zSign ) {
@@ -1091,10 +1050,10 @@ static float128
 
 static float128
  normalizeRoundAndPackFloat128(
-     flag zSign, int32 zExp, uint64_t zSig0, uint64_t zSig1 STATUS_PARAM)
+     flag zSign, int32 zExp, bits64 zSig0, bits64 zSig1 STATUS_PARAM)
 {
     int8 shiftCount;
-    uint64_t zSig2;
+    bits64 zSig2;
 
     if ( zSig0 == 0 ) {
         zSig0 = zSig1;
@@ -1115,6 +1074,8 @@ static float128
 
 }
 
+#endif
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 32-bit two's complement integer `a'
 | to the single-precision floating-point format.  The conversion is performed
@@ -1126,7 +1087,7 @@ float32 int32_to_float32( int32 a STATUS_PARAM )
     flag zSign;
 
     if ( a == 0 ) return float32_zero;
-    if ( a == (int32_t) 0x80000000 ) return packFloat32( 1, 0x9E, 0 );
+    if ( a == (sbits32) 0x80000000 ) return packFloat32( 1, 0x9E, 0 );
     zSign = ( a < 0 );
     return normalizeRoundAndPackFloat32( zSign, 0x9C, zSign ? - a : a STATUS_VAR );
 
@@ -1143,7 +1104,7 @@ float64 int32_to_float64( int32 a STATUS_PARAM )
     flag zSign;
     uint32 absA;
     int8 shiftCount;
-    uint64_t zSig;
+    bits64 zSig;
 
     if ( a == 0 ) return float64_zero;
     zSign = ( a < 0 );
@@ -1153,6 +1114,8 @@ float64 int32_to_float64( int32 a STATUS_PARAM )
     return packFloat64( zSign, 0x432 - shiftCount, zSig<<shiftCount );
 
 }
+
+#ifdef FLOATX80
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 32-bit two's complement integer `a'
@@ -1166,7 +1129,7 @@ floatx80 int32_to_floatx80( int32 a STATUS_PARAM )
     flag zSign;
     uint32 absA;
     int8 shiftCount;
-    uint64_t zSig;
+    bits64 zSig;
 
     if ( a == 0 ) return packFloatx80( 0, 0, 0 );
     zSign = ( a < 0 );
@@ -1176,6 +1139,10 @@ floatx80 int32_to_floatx80( int32 a STATUS_PARAM )
     return packFloatx80( zSign, 0x403E - shiftCount, zSig<<shiftCount );
 
 }
+
+#endif
+
+#ifdef FLOAT128
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 32-bit two's complement integer `a' to
@@ -1188,7 +1155,7 @@ float128 int32_to_float128( int32 a STATUS_PARAM )
     flag zSign;
     uint32 absA;
     int8 shiftCount;
-    uint64_t zSig0;
+    bits64 zSig0;
 
     if ( a == 0 ) return packFloat128( 0, 0, 0, 0 );
     zSign = ( a < 0 );
@@ -1198,6 +1165,8 @@ float128 int32_to_float128( int32 a STATUS_PARAM )
     return packFloat128( zSign, 0x402E - shiftCount, zSig0<<shiftCount, 0 );
 
 }
+
+#endif
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 64-bit two's complement integer `a'
@@ -1238,7 +1207,7 @@ float32 uint64_to_float32( uint64 a STATUS_PARAM )
     if ( a == 0 ) return float32_zero;
     shiftCount = countLeadingZeros64( a ) - 40;
     if ( 0 <= shiftCount ) {
-        return packFloat32(0, 0x95 - shiftCount, a<<shiftCount);
+        return packFloat32( 1 > 0, 0x95 - shiftCount, a<<shiftCount );
     }
     else {
         shiftCount += 7;
@@ -1248,7 +1217,7 @@ float32 uint64_to_float32( uint64 a STATUS_PARAM )
         else {
             a <<= shiftCount;
         }
-        return roundAndPackFloat32(0, 0x9C - shiftCount, a STATUS_VAR);
+        return roundAndPackFloat32( 1 > 0, 0x9C - shiftCount, a STATUS_VAR );
     }
 }
 
@@ -1263,7 +1232,7 @@ float64 int64_to_float64( int64 a STATUS_PARAM )
     flag zSign;
 
     if ( a == 0 ) return float64_zero;
-    if ( a == (int64_t) LIT64( 0x8000000000000000 ) ) {
+    if ( a == (sbits64) LIT64( 0x8000000000000000 ) ) {
         return packFloat64( 1, 0x43E, 0 );
     }
     zSign = ( a < 0 );
@@ -1277,6 +1246,8 @@ float64 uint64_to_float64( uint64 a STATUS_PARAM )
     return normalizeRoundAndPackFloat64( 0, 0x43C, a STATUS_VAR );
 
 }
+
+#ifdef FLOATX80
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 64-bit two's complement integer `a'
@@ -1299,6 +1270,10 @@ floatx80 int64_to_floatx80( int64 a STATUS_PARAM )
 
 }
 
+#endif
+
+#ifdef FLOAT128
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the 64-bit two's complement integer `a' to
 | the quadruple-precision floating-point format.  The conversion is performed
@@ -1311,7 +1286,7 @@ float128 int64_to_float128( int64 a STATUS_PARAM )
     uint64 absA;
     int8 shiftCount;
     int32 zExp;
-    uint64_t zSig0, zSig1;
+    bits64 zSig0, zSig1;
 
     if ( a == 0 ) return packFloat128( 0, 0, 0, 0 );
     zSign = ( a < 0 );
@@ -1332,6 +1307,8 @@ float128 int64_to_float128( int64 a STATUS_PARAM )
 
 }
 
+#endif
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the single-precision floating-point value
 | `a' to the 32-bit two's complement integer format.  The conversion is
@@ -1345,9 +1322,9 @@ float128 int64_to_float128( int64 a STATUS_PARAM )
 int32 float32_to_int32( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint32_t aSig;
-    uint64_t aSig64;
+    int16 aExp, shiftCount;
+    bits32 aSig;
+    bits64 aSig64;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat32Frac( a );
@@ -1376,9 +1353,9 @@ int32 float32_to_int32( float32 a STATUS_PARAM )
 int32 float32_to_int32_round_to_zero( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint32_t aSig;
-    int32_t z;
+    int16 aExp, shiftCount;
+    bits32 aSig;
+    int32 z;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat32Frac( a );
@@ -1390,7 +1367,7 @@ int32 float32_to_int32_round_to_zero( float32 a STATUS_PARAM )
             float_raise( float_flag_invalid STATUS_VAR);
             if ( ! aSign || ( ( aExp == 0xFF ) && aSig ) ) return 0x7FFFFFFF;
         }
-        return (int32_t) 0x80000000;
+        return (sbits32) 0x80000000;
     }
     else if ( aExp <= 0x7E ) {
         if ( aExp | aSig ) STATUS(float_exception_flags) |= float_flag_inexact;
@@ -1398,7 +1375,7 @@ int32 float32_to_int32_round_to_zero( float32 a STATUS_PARAM )
     }
     aSig = ( aSig | 0x00800000 )<<8;
     z = aSig>>( - shiftCount );
-    if ( (uint32_t) ( aSig<<( shiftCount & 31 ) ) ) {
+    if ( (bits32) ( aSig<<( shiftCount & 31 ) ) ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
     }
     if ( aSign ) z = - z;
@@ -1416,11 +1393,11 @@ int32 float32_to_int32_round_to_zero( float32 a STATUS_PARAM )
 | returned.
 *----------------------------------------------------------------------------*/
 
-int_fast16_t float32_to_int16_round_to_zero(float32 a STATUS_PARAM)
+int16 float32_to_int16_round_to_zero( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint32_t aSig;
+    int16 aExp, shiftCount;
+    bits32 aSig;
     int32 z;
 
     aSig = extractFloat32Frac( a );
@@ -1434,7 +1411,7 @@ int_fast16_t float32_to_int16_round_to_zero(float32 a STATUS_PARAM)
                 return 0x7FFF;
             }
         }
-        return (int32_t) 0xffff8000;
+        return (sbits32) 0xffff8000;
     }
     else if ( aExp <= 0x7E ) {
         if ( aExp | aSig ) {
@@ -1445,7 +1422,7 @@ int_fast16_t float32_to_int16_round_to_zero(float32 a STATUS_PARAM)
     shiftCount -= 0x10;
     aSig = ( aSig | 0x00800000 )<<8;
     z = aSig>>( - shiftCount );
-    if ( (uint32_t) ( aSig<<( shiftCount & 31 ) ) ) {
+    if ( (bits32) ( aSig<<( shiftCount & 31 ) ) ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
     }
     if ( aSign ) {
@@ -1468,9 +1445,9 @@ int_fast16_t float32_to_int16_round_to_zero(float32 a STATUS_PARAM)
 int64 float32_to_int64( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint32_t aSig;
-    uint64_t aSig64, aSigExtra;
+    int16 aExp, shiftCount;
+    bits32 aSig;
+    bits64 aSig64, aSigExtra;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat32Frac( a );
@@ -1482,7 +1459,7 @@ int64 float32_to_int64( float32 a STATUS_PARAM )
         if ( ! aSign || ( ( aExp == 0xFF ) && aSig ) ) {
             return LIT64( 0x7FFFFFFFFFFFFFFF );
         }
-        return (int64_t) LIT64( 0x8000000000000000 );
+        return (sbits64) LIT64( 0x8000000000000000 );
     }
     if ( aExp ) aSig |= 0x00800000;
     aSig64 = aSig;
@@ -1505,9 +1482,9 @@ int64 float32_to_int64( float32 a STATUS_PARAM )
 int64 float32_to_int64_round_to_zero( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint32_t aSig;
-    uint64_t aSig64;
+    int16 aExp, shiftCount;
+    bits32 aSig;
+    bits64 aSig64;
     int64 z;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
@@ -1522,7 +1499,7 @@ int64 float32_to_int64_round_to_zero( float32 a STATUS_PARAM )
                 return LIT64( 0x7FFFFFFFFFFFFFFF );
             }
         }
-        return (int64_t) LIT64( 0x8000000000000000 );
+        return (sbits64) LIT64( 0x8000000000000000 );
     }
     else if ( aExp <= 0x7E ) {
         if ( aExp | aSig ) STATUS(float_exception_flags) |= float_flag_inexact;
@@ -1531,7 +1508,7 @@ int64 float32_to_int64_round_to_zero( float32 a STATUS_PARAM )
     aSig64 = aSig | 0x00800000;
     aSig64 <<= 40;
     z = aSig64>>( - shiftCount );
-    if ( (uint64_t) ( aSig64<<( shiftCount & 63 ) ) ) {
+    if ( (bits64) ( aSig64<<( shiftCount & 63 ) ) ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
     }
     if ( aSign ) z = - z;
@@ -1549,15 +1526,15 @@ int64 float32_to_int64_round_to_zero( float32 a STATUS_PARAM )
 float64 float32_to_float64( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat32Frac( a );
     aExp = extractFloat32Exp( a );
     aSign = extractFloat32Sign( a );
     if ( aExp == 0xFF ) {
-        if ( aSig ) return commonNaNToFloat64( float32ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloat64( float32ToCommonNaN( a STATUS_VAR ));
         return packFloat64( aSign, 0x7FF, 0 );
     }
     if ( aExp == 0 ) {
@@ -1565,9 +1542,11 @@ float64 float32_to_float64( float32 a STATUS_PARAM )
         normalizeFloat32Subnormal( aSig, &aExp, &aSig );
         --aExp;
     }
-    return packFloat64( aSign, aExp + 0x380, ( (uint64_t) aSig )<<29 );
+    return packFloat64( aSign, aExp + 0x380, ( (bits64) aSig )<<29 );
 
 }
+
+#ifdef FLOATX80
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the single-precision floating-point value
@@ -1579,15 +1558,15 @@ float64 float32_to_float64( float32 a STATUS_PARAM )
 floatx80 float32_to_floatx80( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat32Frac( a );
     aExp = extractFloat32Exp( a );
     aSign = extractFloat32Sign( a );
     if ( aExp == 0xFF ) {
-        if ( aSig ) return commonNaNToFloatx80( float32ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloatx80( float32ToCommonNaN( a STATUS_VAR ) );
         return packFloatx80( aSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
     if ( aExp == 0 ) {
@@ -1595,9 +1574,13 @@ floatx80 float32_to_floatx80( float32 a STATUS_PARAM )
         normalizeFloat32Subnormal( aSig, &aExp, &aSig );
     }
     aSig |= 0x00800000;
-    return packFloatx80( aSign, aExp + 0x3F80, ( (uint64_t) aSig )<<40 );
+    return packFloatx80( aSign, aExp + 0x3F80, ( (bits64) aSig )<<40 );
 
 }
+
+#endif
+
+#ifdef FLOAT128
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the single-precision floating-point value
@@ -1609,15 +1592,15 @@ floatx80 float32_to_floatx80( float32 a STATUS_PARAM )
 float128 float32_to_float128( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat32Frac( a );
     aExp = extractFloat32Exp( a );
     aSign = extractFloat32Sign( a );
     if ( aExp == 0xFF ) {
-        if ( aSig ) return commonNaNToFloat128( float32ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloat128( float32ToCommonNaN( a STATUS_VAR ) );
         return packFloat128( aSign, 0x7FFF, 0, 0 );
     }
     if ( aExp == 0 ) {
@@ -1625,9 +1608,11 @@ float128 float32_to_float128( float32 a STATUS_PARAM )
         normalizeFloat32Subnormal( aSig, &aExp, &aSig );
         --aExp;
     }
-    return packFloat128( aSign, aExp + 0x3F80, ( (uint64_t) aSig )<<25, 0 );
+    return packFloat128( aSign, aExp + 0x3F80, ( (bits64) aSig )<<25, 0 );
 
 }
+
+#endif
 
 /*----------------------------------------------------------------------------
 | Rounds the single-precision floating-point value `a' to an integer, and
@@ -1639,10 +1624,10 @@ float128 float32_to_float128( float32 a STATUS_PARAM )
 float32 float32_round_to_int( float32 a STATUS_PARAM)
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t lastBitMask, roundBitsMask;
+    int16 aExp;
+    bits32 lastBitMask, roundBitsMask;
     int8 roundingMode;
-    uint32_t z;
+    bits32 z;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
     aExp = extractFloat32Exp( a );
@@ -1653,7 +1638,7 @@ float32 float32_round_to_int( float32 a STATUS_PARAM)
         return a;
     }
     if ( aExp <= 0x7E ) {
-        if ( (uint32_t) ( float32_val(a)<<1 ) == 0 ) return a;
+        if ( (bits32) ( float32_val(a)<<1 ) == 0 ) return a;
         STATUS(float_exception_flags) |= float_flag_inexact;
         aSign = extractFloat32Sign( a );
         switch ( STATUS(float_rounding_mode) ) {
@@ -1699,9 +1684,9 @@ float32 float32_round_to_int( float32 a STATUS_PARAM)
 
 static float32 addFloat32Sigs( float32 a, float32 b, flag zSign STATUS_PARAM)
 {
-    int_fast16_t aExp, bExp, zExp;
-    uint32_t aSig, bSig, zSig;
-    int_fast16_t expDiff;
+    int16 aExp, bExp, zExp;
+    bits32 aSig, bSig, zSig;
+    int16 expDiff;
 
     aSig = extractFloat32Frac( a );
     aExp = extractFloat32Exp( a );
@@ -1744,12 +1729,7 @@ static float32 addFloat32Sigs( float32 a, float32 b, flag zSign STATUS_PARAM)
             return a;
         }
         if ( aExp == 0 ) {
-            if (STATUS(flush_to_zero)) {
-                if (aSig | bSig) {
-                    float_raise(float_flag_output_denormal STATUS_VAR);
-                }
-                return packFloat32(zSign, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat32( zSign, 0, 0 );
             return packFloat32( zSign, 0, ( aSig + bSig )>>6 );
         }
         zSig = 0x40000000 + aSig + bSig;
@@ -1759,7 +1739,7 @@ static float32 addFloat32Sigs( float32 a, float32 b, flag zSign STATUS_PARAM)
     aSig |= 0x20000000;
     zSig = ( aSig + bSig )<<1;
     --zExp;
-    if ( (int32_t) zSig < 0 ) {
+    if ( (sbits32) zSig < 0 ) {
         zSig = aSig + bSig;
         ++zExp;
     }
@@ -1778,9 +1758,9 @@ static float32 addFloat32Sigs( float32 a, float32 b, flag zSign STATUS_PARAM)
 
 static float32 subFloat32Sigs( float32 a, float32 b, flag zSign STATUS_PARAM)
 {
-    int_fast16_t aExp, bExp, zExp;
-    uint32_t aSig, bSig, zSig;
-    int_fast16_t expDiff;
+    int16 aExp, bExp, zExp;
+    bits32 aSig, bSig, zSig;
+    int16 expDiff;
 
     aSig = extractFloat32Frac( a );
     aExp = extractFloat32Exp( a );
@@ -1898,10 +1878,10 @@ float32 float32_sub( float32 a, float32 b STATUS_PARAM )
 float32 float32_mul( float32 a, float32 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
-    int_fast16_t aExp, bExp, zExp;
-    uint32_t aSig, bSig;
-    uint64_t zSig64;
-    uint32_t zSig;
+    int16 aExp, bExp, zExp;
+    bits32 aSig, bSig;
+    bits64 zSig64;
+    bits32 zSig;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
@@ -1942,9 +1922,9 @@ float32 float32_mul( float32 a, float32 b STATUS_PARAM )
     zExp = aExp + bExp - 0x7F;
     aSig = ( aSig | 0x00800000 )<<7;
     bSig = ( bSig | 0x00800000 )<<8;
-    shift64RightJamming( ( (uint64_t) aSig ) * bSig, 32, &zSig64 );
+    shift64RightJamming( ( (bits64) aSig ) * bSig, 32, &zSig64 );
     zSig = zSig64;
-    if ( 0 <= (int32_t) ( zSig<<1 ) ) {
+    if ( 0 <= (sbits32) ( zSig<<1 ) ) {
         zSig <<= 1;
         --zExp;
     }
@@ -1961,8 +1941,8 @@ float32 float32_mul( float32 a, float32 b STATUS_PARAM )
 float32 float32_div( float32 a, float32 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
-    int_fast16_t aExp, bExp, zExp;
-    uint32_t aSig, bSig, zSig;
+    int16 aExp, bExp, zExp;
+    bits32 aSig, bSig, zSig;
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
 
@@ -2008,9 +1988,9 @@ float32 float32_div( float32 a, float32 b STATUS_PARAM )
         aSig >>= 1;
         ++zExp;
     }
-    zSig = ( ( (uint64_t) aSig )<<32 ) / bSig;
+    zSig = ( ( (bits64) aSig )<<32 ) / bSig;
     if ( ( zSig & 0x3F ) == 0 ) {
-        zSig |= ( (uint64_t) bSig * zSig != ( (uint64_t) aSig )<<32 );
+        zSig |= ( (bits64) bSig * zSig != ( (bits64) aSig )<<32 );
     }
     return roundAndPackFloat32( zSign, zExp, zSig STATUS_VAR );
 
@@ -2025,12 +2005,12 @@ float32 float32_div( float32 a, float32 b STATUS_PARAM )
 float32 float32_rem( float32 a, float32 b STATUS_PARAM )
 {
     flag aSign, zSign;
-    int_fast16_t aExp, bExp, expDiff;
-    uint32_t aSig, bSig;
-    uint32_t q;
-    uint64_t aSig64, bSig64, q64;
-    uint32_t alternateASig;
-    int32_t sigMean;
+    int16 aExp, bExp, expDiff;
+    bits32 aSig, bSig;
+    bits32 q;
+    bits64 aSig64, bSig64, q64;
+    bits32 alternateASig;
+    sbits32 sigMean;
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
 
@@ -2074,7 +2054,7 @@ float32 float32_rem( float32 a, float32 b STATUS_PARAM )
         q = ( bSig <= aSig );
         if ( q ) aSig -= bSig;
         if ( 0 < expDiff ) {
-            q = ( ( (uint64_t) aSig )<<32 ) / bSig;
+            q = ( ( (bits64) aSig )<<32 ) / bSig;
             q >>= 32 - expDiff;
             bSig >>= 2;
             aSig = ( ( aSig>>1 )<<( expDiff - 1 ) ) - bSig * q;
@@ -2086,8 +2066,8 @@ float32 float32_rem( float32 a, float32 b STATUS_PARAM )
     }
     else {
         if ( bSig <= aSig ) aSig -= bSig;
-        aSig64 = ( (uint64_t) aSig )<<40;
-        bSig64 = ( (uint64_t) bSig )<<40;
+        aSig64 = ( (bits64) aSig )<<40;
+        bSig64 = ( (bits64) bSig )<<40;
         expDiff -= 64;
         while ( 0 < expDiff ) {
             q64 = estimateDiv128To64( aSig64, 0, bSig64 );
@@ -2106,223 +2086,16 @@ float32 float32_rem( float32 a, float32 b STATUS_PARAM )
         alternateASig = aSig;
         ++q;
         aSig -= bSig;
-    } while ( 0 <= (int32_t) aSig );
+    } while ( 0 <= (sbits32) aSig );
     sigMean = aSig + alternateASig;
     if ( ( sigMean < 0 ) || ( ( sigMean == 0 ) && ( q & 1 ) ) ) {
         aSig = alternateASig;
     }
-    zSign = ( (int32_t) aSig < 0 );
+    zSign = ( (sbits32) aSig < 0 );
     if ( zSign ) aSig = - aSig;
     return normalizeRoundAndPackFloat32( aSign ^ zSign, bExp, aSig STATUS_VAR );
 
 }
-
-/*----------------------------------------------------------------------------
-| Returns the result of multiplying the single-precision floating-point values
-| `a' and `b' then adding 'c', with no intermediate rounding step after the
-| multiplication.  The operation is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic 754-2008.
-| The flags argument allows the caller to select negation of the
-| addend, the intermediate product, or the final result. (The difference
-| between this and having the caller do a separate negation is that negating
-| externally will flip the sign bit on NaNs.)
-*----------------------------------------------------------------------------*/
-
-float32 float32_muladd(float32 a, float32 b, float32 c, int flags STATUS_PARAM)
-{
-    flag aSign, bSign, cSign, zSign;
-    int_fast16_t aExp, bExp, cExp, pExp, zExp, expDiff;
-    uint32_t aSig, bSig, cSig;
-    flag pInf, pZero, pSign;
-    uint64_t pSig64, cSig64, zSig64;
-    uint32_t pSig;
-    int shiftcount;
-    flag signflip, infzero;
-
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-    c = float32_squash_input_denormal(c STATUS_VAR);
-    aSig = extractFloat32Frac(a);
-    aExp = extractFloat32Exp(a);
-    aSign = extractFloat32Sign(a);
-    bSig = extractFloat32Frac(b);
-    bExp = extractFloat32Exp(b);
-    bSign = extractFloat32Sign(b);
-    cSig = extractFloat32Frac(c);
-    cExp = extractFloat32Exp(c);
-    cSign = extractFloat32Sign(c);
-
-    infzero = ((aExp == 0 && aSig == 0 && bExp == 0xff && bSig == 0) ||
-               (aExp == 0xff && aSig == 0 && bExp == 0 && bSig == 0));
-
-    /* It is implementation-defined whether the cases of (0,inf,qnan)
-     * and (inf,0,qnan) raise InvalidOperation or not (and what QNaN
-     * they return if they do), so we have to hand this information
-     * off to the target-specific pick-a-NaN routine.
-     */
-    if (((aExp == 0xff) && aSig) ||
-        ((bExp == 0xff) && bSig) ||
-        ((cExp == 0xff) && cSig)) {
-        return propagateFloat32MulAddNaN(a, b, c, infzero STATUS_VAR);
-    }
-
-    if (infzero) {
-        float_raise(float_flag_invalid STATUS_VAR);
-        return float32_default_nan;
-    }
-
-    if (flags & float_muladd_negate_c) {
-        cSign ^= 1;
-    }
-
-    signflip = (flags & float_muladd_negate_result) ? 1 : 0;
-
-    /* Work out the sign and type of the product */
-    pSign = aSign ^ bSign;
-    if (flags & float_muladd_negate_product) {
-        pSign ^= 1;
-    }
-    pInf = (aExp == 0xff) || (bExp == 0xff);
-    pZero = ((aExp | aSig) == 0) || ((bExp | bSig) == 0);
-
-    if (cExp == 0xff) {
-        if (pInf && (pSign ^ cSign)) {
-            /* addition of opposite-signed infinities => InvalidOperation */
-            float_raise(float_flag_invalid STATUS_VAR);
-            return float32_default_nan;
-        }
-        /* Otherwise generate an infinity of the same sign */
-        return packFloat32(cSign ^ signflip, 0xff, 0);
-    }
-
-    if (pInf) {
-        return packFloat32(pSign ^ signflip, 0xff, 0);
-    }
-
-    if (pZero) {
-        if (cExp == 0) {
-            if (cSig == 0) {
-                /* Adding two exact zeroes */
-                if (pSign == cSign) {
-                    zSign = pSign;
-                } else if (STATUS(float_rounding_mode) == float_round_down) {
-                    zSign = 1;
-                } else {
-                    zSign = 0;
-                }
-                return packFloat32(zSign ^ signflip, 0, 0);
-            }
-            /* Exact zero plus a denorm */
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloat32(cSign ^ signflip, 0, 0);
-            }
-        }
-        /* Zero plus something non-zero : just return the something */
-        return make_float32(float32_val(c) ^ (signflip << 31));
-    }
-
-    if (aExp == 0) {
-        normalizeFloat32Subnormal(aSig, &aExp, &aSig);
-    }
-    if (bExp == 0) {
-        normalizeFloat32Subnormal(bSig, &bExp, &bSig);
-    }
-
-    /* Calculate the actual result a * b + c */
-
-    /* Multiply first; this is easy. */
-    /* NB: we subtract 0x7e where float32_mul() subtracts 0x7f
-     * because we want the true exponent, not the "one-less-than"
-     * flavour that roundAndPackFloat32() takes.
-     */
-    pExp = aExp + bExp - 0x7e;
-    aSig = (aSig | 0x00800000) << 7;
-    bSig = (bSig | 0x00800000) << 8;
-    pSig64 = (uint64_t)aSig * bSig;
-    if ((int64_t)(pSig64 << 1) >= 0) {
-        pSig64 <<= 1;
-        pExp--;
-    }
-
-    zSign = pSign ^ signflip;
-
-    /* Now pSig64 is the significand of the multiply, with the explicit bit in
-     * position 62.
-     */
-    if (cExp == 0) {
-        if (!cSig) {
-            /* Throw out the special case of c being an exact zero now */
-            shift64RightJamming(pSig64, 32, &pSig64);
-            pSig = pSig64;
-            return roundAndPackFloat32(zSign, pExp - 1,
-                                       pSig STATUS_VAR);
-        }
-        normalizeFloat32Subnormal(cSig, &cExp, &cSig);
-    }
-
-    cSig64 = (uint64_t)cSig << (62 - 23);
-    cSig64 |= LIT64(0x4000000000000000);
-    expDiff = pExp - cExp;
-
-    if (pSign == cSign) {
-        /* Addition */
-        if (expDiff > 0) {
-            /* scale c to match p */
-            shift64RightJamming(cSig64, expDiff, &cSig64);
-            zExp = pExp;
-        } else if (expDiff < 0) {
-            /* scale p to match c */
-            shift64RightJamming(pSig64, -expDiff, &pSig64);
-            zExp = cExp;
-        } else {
-            /* no scaling needed */
-            zExp = cExp;
-        }
-        /* Add significands and make sure explicit bit ends up in posn 62 */
-        zSig64 = pSig64 + cSig64;
-        if ((int64_t)zSig64 < 0) {
-            shift64RightJamming(zSig64, 1, &zSig64);
-        } else {
-            zExp--;
-        }
-    } else {
-        /* Subtraction */
-        if (expDiff > 0) {
-            shift64RightJamming(cSig64, expDiff, &cSig64);
-            zSig64 = pSig64 - cSig64;
-            zExp = pExp;
-        } else if (expDiff < 0) {
-            shift64RightJamming(pSig64, -expDiff, &pSig64);
-            zSig64 = cSig64 - pSig64;
-            zExp = cExp;
-            zSign ^= 1;
-        } else {
-            zExp = pExp;
-            if (cSig64 < pSig64) {
-                zSig64 = pSig64 - cSig64;
-            } else if (pSig64 < cSig64) {
-                zSig64 = cSig64 - pSig64;
-                zSign ^= 1;
-            } else {
-                /* Exact zero */
-                zSign = signflip;
-                if (STATUS(float_rounding_mode) == float_round_down) {
-                    zSign ^= 1;
-                }
-                return packFloat32(zSign, 0, 0);
-            }
-        }
-        --zExp;
-        /* Normalize to put the explicit bit back into bit 62. */
-        shiftcount = countLeadingZeros64(zSig64) - 1;
-        zSig64 <<= shiftcount;
-        zExp -= shiftcount;
-    }
-    shift64RightJamming(zSig64, 32, &zSig64);
-    return roundAndPackFloat32(zSign, zExp, zSig64 STATUS_VAR);
-}
-
 
 /*----------------------------------------------------------------------------
 | Returns the square root of the single-precision floating-point value `a'.
@@ -2333,9 +2106,9 @@ float32 float32_muladd(float32 a, float32 b, float32 c, int flags STATUS_PARAM)
 float32 float32_sqrt( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, zExp;
-    uint32_t aSig, zSig;
-    uint64_t rem, term;
+    int16 aExp, zExp;
+    bits32 aSig, zSig;
+    bits64 rem, term;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat32Frac( a );
@@ -2365,11 +2138,11 @@ float32 float32_sqrt( float32 a STATUS_PARAM )
             goto roundAndPack;
         }
         aSig >>= aExp & 1;
-        term = ( (uint64_t) zSig ) * zSig;
-        rem = ( ( (uint64_t) aSig )<<32 ) - term;
-        while ( (int64_t) rem < 0 ) {
+        term = ( (bits64) zSig ) * zSig;
+        rem = ( ( (bits64) aSig )<<32 ) - term;
+        while ( (sbits64) rem < 0 ) {
             --zSig;
-            rem += ( ( (uint64_t) zSig )<<1 ) | 1;
+            rem += ( ( (bits64) zSig )<<1 ) | 1;
         }
         zSig |= ( rem != 0 );
     }
@@ -2399,28 +2172,28 @@ float32 float32_sqrt( float32 a STATUS_PARAM )
 
 static const float64 float32_exp2_coefficients[15] =
 {
-    const_float64( 0x3ff0000000000000ll ), /*  1 */
-    const_float64( 0x3fe0000000000000ll ), /*  2 */
-    const_float64( 0x3fc5555555555555ll ), /*  3 */
-    const_float64( 0x3fa5555555555555ll ), /*  4 */
-    const_float64( 0x3f81111111111111ll ), /*  5 */
-    const_float64( 0x3f56c16c16c16c17ll ), /*  6 */
-    const_float64( 0x3f2a01a01a01a01all ), /*  7 */
-    const_float64( 0x3efa01a01a01a01all ), /*  8 */
-    const_float64( 0x3ec71de3a556c734ll ), /*  9 */
-    const_float64( 0x3e927e4fb7789f5cll ), /* 10 */
-    const_float64( 0x3e5ae64567f544e4ll ), /* 11 */
-    const_float64( 0x3e21eed8eff8d898ll ), /* 12 */
-    const_float64( 0x3de6124613a86d09ll ), /* 13 */
-    const_float64( 0x3da93974a8c07c9dll ), /* 14 */
-    const_float64( 0x3d6ae7f3e733b81fll ), /* 15 */
+    make_float64( 0x3ff0000000000000ll ), /*  1 */
+    make_float64( 0x3fe0000000000000ll ), /*  2 */
+    make_float64( 0x3fc5555555555555ll ), /*  3 */
+    make_float64( 0x3fa5555555555555ll ), /*  4 */
+    make_float64( 0x3f81111111111111ll ), /*  5 */
+    make_float64( 0x3f56c16c16c16c17ll ), /*  6 */
+    make_float64( 0x3f2a01a01a01a01all ), /*  7 */
+    make_float64( 0x3efa01a01a01a01all ), /*  8 */
+    make_float64( 0x3ec71de3a556c734ll ), /*  9 */
+    make_float64( 0x3e927e4fb7789f5cll ), /* 10 */
+    make_float64( 0x3e5ae64567f544e4ll ), /* 11 */
+    make_float64( 0x3e21eed8eff8d898ll ), /* 12 */
+    make_float64( 0x3de6124613a86d09ll ), /* 13 */
+    make_float64( 0x3da93974a8c07c9dll ), /* 14 */
+    make_float64( 0x3d6ae7f3e733b81fll ), /* 15 */
 };
 
 float32 float32_exp2( float32 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
     float64 r, x, xn;
     int i;
     a = float32_squash_input_denormal(a STATUS_VAR);
@@ -2467,8 +2240,8 @@ float32 float32_exp2( float32 a STATUS_PARAM )
 float32 float32_log2( float32 a STATUS_PARAM )
 {
     flag aSign, zSign;
-    int_fast16_t aExp;
-    uint32_t aSig, zSig, i;
+    int16 aExp;
+    bits32 aSig, zSig, i;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat32Frac( a );
@@ -2494,7 +2267,7 @@ float32 float32_log2( float32 a STATUS_PARAM )
     zSig = aExp << 23;
 
     for (i = 1 << 22; i > 0; i >>= 1) {
-        aSig = ( (uint64_t)aSig * aSig ) >> 23;
+        aSig = ( (bits64)aSig * aSig ) >> 23;
         if ( aSig & 0x01000000 ) {
             aSig >>= 1;
             zSig |= i;
@@ -2509,115 +2282,11 @@ float32 float32_log2( float32 a STATUS_PARAM )
 
 /*----------------------------------------------------------------------------
 | Returns 1 if the single-precision floating-point value `a' is equal to
-| the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  Otherwise, the comparison is performed
+| the corresponding value `b', and 0 otherwise.  The comparison is performed
 | according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
 int float32_eq( float32 a, float32 b STATUS_PARAM )
-{
-    uint32_t av, bv;
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
-         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    av = float32_val(a);
-    bv = float32_val(b);
-    return ( av == bv ) || ( (uint32_t) ( ( av | bv )<<1 ) == 0 );
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the single-precision floating-point value `a' is less than
-| or equal to the corresponding value `b', and 0 otherwise.  The invalid
-| exception is raised if either operand is a NaN.  The comparison is performed
-| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float32_le( float32 a, float32 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-    uint32_t av, bv;
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
-         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloat32Sign( a );
-    bSign = extractFloat32Sign( b );
-    av = float32_val(a);
-    bv = float32_val(b);
-    if ( aSign != bSign ) return aSign || ( (uint32_t) ( ( av | bv )<<1 ) == 0 );
-    return ( av == bv ) || ( aSign ^ ( av < bv ) );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the single-precision floating-point value `a' is less than
-| the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  The comparison is performed according
-| to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float32_lt( float32 a, float32 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-    uint32_t av, bv;
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
-         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloat32Sign( a );
-    bSign = extractFloat32Sign( b );
-    av = float32_val(a);
-    bv = float32_val(b);
-    if ( aSign != bSign ) return aSign && ( (uint32_t) ( ( av | bv )<<1 ) != 0 );
-    return ( av != bv ) && ( aSign ^ ( av < bv ) );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the single-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  The invalid exception is raised if either
-| operand is a NaN.  The comparison is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float32_unordered( float32 a, float32 b STATUS_PARAM )
-{
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
-         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 1;
-    }
-    return 0;
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the single-precision floating-point value `a' is equal to
-| the corresponding value `b', and 0 otherwise.  Quiet NaNs do not cause an
-| exception.  The comparison is performed according to the IEC/IEEE Standard
-| for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float32_eq_quiet( float32 a, float32 b STATUS_PARAM )
 {
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
@@ -2631,7 +2300,90 @@ int float32_eq_quiet( float32 a, float32 b STATUS_PARAM )
         return 0;
     }
     return ( float32_val(a) == float32_val(b) ) ||
-            ( (uint32_t) ( ( float32_val(a) | float32_val(b) )<<1 ) == 0 );
+            ( (bits32) ( ( float32_val(a) | float32_val(b) )<<1 ) == 0 );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the single-precision floating-point value `a' is less than
+| or equal to the corresponding value `b', and 0 otherwise.  The comparison
+| is performed according to the IEC/IEEE Standard for Binary Floating-Point
+| Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float32_le( float32 a, float32 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+    bits32 av, bv;
+    a = float32_squash_input_denormal(a STATUS_VAR);
+    b = float32_squash_input_denormal(b STATUS_VAR);
+
+    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
+         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloat32Sign( a );
+    bSign = extractFloat32Sign( b );
+    av = float32_val(a);
+    bv = float32_val(b);
+    if ( aSign != bSign ) return aSign || ( (bits32) ( ( av | bv )<<1 ) == 0 );
+    return ( av == bv ) || ( aSign ^ ( av < bv ) );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the single-precision floating-point value `a' is less than
+| the corresponding value `b', and 0 otherwise.  The comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float32_lt( float32 a, float32 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+    bits32 av, bv;
+    a = float32_squash_input_denormal(a STATUS_VAR);
+    b = float32_squash_input_denormal(b STATUS_VAR);
+
+    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
+         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloat32Sign( a );
+    bSign = extractFloat32Sign( b );
+    av = float32_val(a);
+    bv = float32_val(b);
+    if ( aSign != bSign ) return aSign && ( (bits32) ( ( av | bv )<<1 ) != 0 );
+    return ( av != bv ) && ( aSign ^ ( av < bv ) );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the single-precision floating-point value `a' is equal to
+| the corresponding value `b', and 0 otherwise.  The invalid exception is
+| raised if either operand is a NaN.  Otherwise, the comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float32_eq_signaling( float32 a, float32 b STATUS_PARAM )
+{
+    bits32 av, bv;
+    a = float32_squash_input_denormal(a STATUS_VAR);
+    b = float32_squash_input_denormal(b STATUS_VAR);
+
+    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
+         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    av = float32_val(a);
+    bv = float32_val(b);
+    return ( av == bv ) || ( (bits32) ( ( av | bv )<<1 ) == 0 );
+
 }
 
 /*----------------------------------------------------------------------------
@@ -2644,7 +2396,7 @@ int float32_eq_quiet( float32 a, float32 b STATUS_PARAM )
 int float32_le_quiet( float32 a, float32 b STATUS_PARAM )
 {
     flag aSign, bSign;
-    uint32_t av, bv;
+    bits32 av, bv;
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
 
@@ -2660,7 +2412,7 @@ int float32_le_quiet( float32 a, float32 b STATUS_PARAM )
     bSign = extractFloat32Sign( b );
     av = float32_val(a);
     bv = float32_val(b);
-    if ( aSign != bSign ) return aSign || ( (uint32_t) ( ( av | bv )<<1 ) == 0 );
+    if ( aSign != bSign ) return aSign || ( (bits32) ( ( av | bv )<<1 ) == 0 );
     return ( av == bv ) || ( aSign ^ ( av < bv ) );
 
 }
@@ -2675,7 +2427,7 @@ int float32_le_quiet( float32 a, float32 b STATUS_PARAM )
 int float32_lt_quiet( float32 a, float32 b STATUS_PARAM )
 {
     flag aSign, bSign;
-    uint32_t av, bv;
+    bits32 av, bv;
     a = float32_squash_input_denormal(a STATUS_VAR);
     b = float32_squash_input_denormal(b STATUS_VAR);
 
@@ -2691,32 +2443,9 @@ int float32_lt_quiet( float32 a, float32 b STATUS_PARAM )
     bSign = extractFloat32Sign( b );
     av = float32_val(a);
     bv = float32_val(b);
-    if ( aSign != bSign ) return aSign && ( (uint32_t) ( ( av | bv )<<1 ) != 0 );
+    if ( aSign != bSign ) return aSign && ( (bits32) ( ( av | bv )<<1 ) != 0 );
     return ( av != bv ) && ( aSign ^ ( av < bv ) );
 
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the single-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  Quiet NaNs do not cause an exception.  The
-| comparison is performed according to the IEC/IEEE Standard for Binary
-| Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float32_unordered_quiet( float32 a, float32 b STATUS_PARAM )
-{
-    a = float32_squash_input_denormal(a STATUS_VAR);
-    b = float32_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat32Exp( a ) == 0xFF ) && extractFloat32Frac( a ) )
-         || ( ( extractFloat32Exp( b ) == 0xFF ) && extractFloat32Frac( b ) )
-       ) {
-        if ( float32_is_signaling_nan( a ) || float32_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
-        return 1;
-    }
-    return 0;
 }
 
 /*----------------------------------------------------------------------------
@@ -2732,8 +2461,8 @@ int float32_unordered_quiet( float32 a, float32 b STATUS_PARAM )
 int32 float64_to_int32( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint64_t aSig;
+    int16 aExp, shiftCount;
+    bits64 aSig;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
@@ -2760,9 +2489,9 @@ int32 float64_to_int32( float64 a STATUS_PARAM )
 int32 float64_to_int32_round_to_zero( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint64_t aSig, savedASig;
-    int32_t z;
+    int16 aExp, shiftCount;
+    bits64 aSig, savedASig;
+    int32 z;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
@@ -2785,7 +2514,7 @@ int32 float64_to_int32_round_to_zero( float64 a STATUS_PARAM )
     if ( ( z < 0 ) ^ aSign ) {
  invalid:
         float_raise( float_flag_invalid STATUS_VAR);
-        return aSign ? (int32_t) 0x80000000 : 0x7FFFFFFF;
+        return aSign ? (sbits32) 0x80000000 : 0x7FFFFFFF;
     }
     if ( ( aSig<<shiftCount ) != savedASig ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
@@ -2804,11 +2533,11 @@ int32 float64_to_int32_round_to_zero( float64 a STATUS_PARAM )
 | returned.
 *----------------------------------------------------------------------------*/
 
-int_fast16_t float64_to_int16_round_to_zero(float64 a STATUS_PARAM)
+int16 float64_to_int16_round_to_zero( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint64_t aSig, savedASig;
+    int16 aExp, shiftCount;
+    bits64 aSig, savedASig;
     int32 z;
 
     aSig = extractFloat64Frac( a );
@@ -2837,7 +2566,7 @@ int_fast16_t float64_to_int16_round_to_zero(float64 a STATUS_PARAM)
     if ( ( (int16_t)z < 0 ) ^ aSign ) {
  invalid:
         float_raise( float_flag_invalid STATUS_VAR);
-        return aSign ? (int32_t) 0xffff8000 : 0x7FFF;
+        return aSign ? (sbits32) 0xffff8000 : 0x7FFF;
     }
     if ( ( aSig<<shiftCount ) != savedASig ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
@@ -2858,8 +2587,8 @@ int_fast16_t float64_to_int16_round_to_zero(float64 a STATUS_PARAM)
 int64 float64_to_int64( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint64_t aSig, aSigExtra;
+    int16 aExp, shiftCount;
+    bits64 aSig, aSigExtra;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
@@ -2876,7 +2605,7 @@ int64 float64_to_int64( float64 a STATUS_PARAM )
                ) {
                 return LIT64( 0x7FFFFFFFFFFFFFFF );
             }
-            return (int64_t) LIT64( 0x8000000000000000 );
+            return (sbits64) LIT64( 0x8000000000000000 );
         }
         aSigExtra = 0;
         aSig <<= - shiftCount;
@@ -2901,8 +2630,8 @@ int64 float64_to_int64( float64 a STATUS_PARAM )
 int64 float64_to_int64_round_to_zero( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, shiftCount;
-    uint64_t aSig;
+    int16 aExp, shiftCount;
+    bits64 aSig;
     int64 z;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
@@ -2922,7 +2651,7 @@ int64 float64_to_int64_round_to_zero( float64 a STATUS_PARAM )
                     return LIT64( 0x7FFFFFFFFFFFFFFF );
                 }
             }
-            return (int64_t) LIT64( 0x8000000000000000 );
+            return (sbits64) LIT64( 0x8000000000000000 );
         }
         z = aSig<<shiftCount;
     }
@@ -2932,7 +2661,7 @@ int64 float64_to_int64_round_to_zero( float64 a STATUS_PARAM )
             return 0;
         }
         z = aSig>>( - shiftCount );
-        if ( (uint64_t) ( aSig<<( shiftCount & 63 ) ) ) {
+        if ( (bits64) ( aSig<<( shiftCount & 63 ) ) ) {
             STATUS(float_exception_flags) |= float_flag_inexact;
         }
     }
@@ -2951,16 +2680,16 @@ int64 float64_to_int64_round_to_zero( float64 a STATUS_PARAM )
 float32 float64_to_float32( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint64_t aSig;
-    uint32_t zSig;
+    int16 aExp;
+    bits64 aSig;
+    bits32 zSig;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
     aExp = extractFloat64Exp( a );
     aSign = extractFloat64Sign( a );
     if ( aExp == 0x7FF ) {
-        if ( aSig ) return commonNaNToFloat32( float64ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloat32( float64ToCommonNaN( a STATUS_VAR ) );
         return packFloat32( aSign, 0xFF, 0 );
     }
     shift64RightJamming( aSig, 22, &aSig );
@@ -2984,30 +2713,31 @@ float32 float64_to_float32( float64 a STATUS_PARAM )
 | than the desired result exponent whenever `zSig' is a complete, normalized
 | significand.
 *----------------------------------------------------------------------------*/
-static float16 packFloat16(flag zSign, int_fast16_t zExp, uint16_t zSig)
+static bits16 packFloat16(flag zSign, int16 zExp, bits16 zSig)
 {
-    return make_float16(
-        (((uint32_t)zSign) << 15) + (((uint32_t)zExp) << 10) + zSig);
+    return (((bits32)zSign) << 15) + (((bits32)zExp) << 10) + zSig;
 }
 
 /* Half precision floats come in two formats: standard IEEE and "ARM" format.
    The latter gains extra exponent range by omitting the NaN/Inf encodings.  */
-
-float32 float16_to_float32(float16 a, flag ieee STATUS_PARAM)
+  
+float32 float16_to_float32( bits16 a, flag ieee STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
 
-    aSign = extractFloat16Sign(a);
-    aExp = extractFloat16Exp(a);
-    aSig = extractFloat16Frac(a);
+    aSign = a >> 15;
+    aExp = (a >> 10) & 0x1f;
+    aSig = a & 0x3ff;
 
     if (aExp == 0x1f && ieee) {
         if (aSig) {
-            return commonNaNToFloat32(float16ToCommonNaN(a STATUS_VAR) STATUS_VAR);
+            /* Make sure correct exceptions are raised.  */
+            float32ToCommonNaN(a STATUS_VAR);
+            aSig |= 0x200;
         }
-        return packFloat32(aSign, 0xff, 0);
+        return packFloat32(aSign, 0xff, aSig << 13);
     }
     if (aExp == 0) {
         int8 shiftCount;
@@ -3023,13 +2753,13 @@ float32 float16_to_float32(float16 a, flag ieee STATUS_PARAM)
     return packFloat32( aSign, aExp + 0x70, aSig << 13);
 }
 
-float16 float32_to_float16(float32 a, flag ieee STATUS_PARAM)
+bits16 float32_to_float16( float32 a, flag ieee STATUS_PARAM)
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint32_t aSig;
-    uint32_t mask;
-    uint32_t increment;
+    int16 aExp;
+    bits32 aSig;
+    bits32 mask;
+    bits32 increment;
     int8 roundingMode;
     a = float32_squash_input_denormal(a STATUS_VAR);
 
@@ -3038,30 +2768,24 @@ float16 float32_to_float16(float32 a, flag ieee STATUS_PARAM)
     aSign = extractFloat32Sign( a );
     if ( aExp == 0xFF ) {
         if (aSig) {
-            /* Input is a NaN */
-            float16 r = commonNaNToFloat16( float32ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
-            if (!ieee) {
-                return packFloat16(aSign, 0, 0);
-            }
-            return r;
+            /* Make sure correct exceptions are raised.  */
+            float32ToCommonNaN(a STATUS_VAR);
+            aSig |= 0x00400000;
         }
-        /* Infinity */
-        if (!ieee) {
-            float_raise(float_flag_invalid STATUS_VAR);
-            return packFloat16(aSign, 0x1f, 0x3ff);
-        }
-        return packFloat16(aSign, 0x1f, 0);
+        return packFloat16(aSign, 0x1f, aSig >> 13);
     }
-    if (aExp == 0 && aSig == 0) {
+    if (aExp == 0 && aSign == 0) {
         return packFloat16(aSign, 0, 0);
     }
     /* Decimal point between bits 22 and 23.  */
     aSig |= 0x00800000;
     aExp -= 0x7f;
     if (aExp < -14) {
-        mask = 0x00ffffff;
-        if (aExp >= -24) {
-            mask >>= 25 + aExp;
+        mask = 0x007fffff;
+        if (aExp < -24) {
+            aExp = -25;
+        } else {
+            mask >>= 24 + aExp;
         }
     } else {
         mask = 0x00001fff;
@@ -3103,7 +2827,7 @@ float16 float32_to_float16(float32 a, flag ieee STATUS_PARAM)
         }
     } else {
         if (aExp > 16) {
-            float_raise(float_flag_invalid | float_flag_inexact STATUS_VAR);
+            float_raise( float_flag_overflow | float_flag_inexact STATUS_VAR);
             return packFloat16(aSign, 0x1f, 0x3ff);
         }
     }
@@ -3117,6 +2841,8 @@ float16 float32_to_float16(float32 a, flag ieee STATUS_PARAM)
     return packFloat16(aSign, aExp + 14, aSig >> 13);
 }
 
+#ifdef FLOATX80
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the double-precision floating-point value
 | `a' to the extended double-precision floating-point format.  The conversion
@@ -3127,15 +2853,15 @@ float16 float32_to_float16(float32 a, flag ieee STATUS_PARAM)
 floatx80 float64_to_floatx80( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint64_t aSig;
+    int16 aExp;
+    bits64 aSig;
 
     a = float64_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat64Frac( a );
     aExp = extractFloat64Exp( a );
     aSign = extractFloat64Sign( a );
     if ( aExp == 0x7FF ) {
-        if ( aSig ) return commonNaNToFloatx80( float64ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloatx80( float64ToCommonNaN( a STATUS_VAR ) );
         return packFloatx80( aSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
     if ( aExp == 0 ) {
@@ -3148,6 +2874,10 @@ floatx80 float64_to_floatx80( float64 a STATUS_PARAM )
 
 }
 
+#endif
+
+#ifdef FLOAT128
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the double-precision floating-point value
 | `a' to the quadruple-precision floating-point format.  The conversion is
@@ -3158,15 +2888,15 @@ floatx80 float64_to_floatx80( float64 a STATUS_PARAM )
 float128 float64_to_float128( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint64_t aSig, zSig0, zSig1;
+    int16 aExp;
+    bits64 aSig, zSig0, zSig1;
 
     a = float64_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat64Frac( a );
     aExp = extractFloat64Exp( a );
     aSign = extractFloat64Sign( a );
     if ( aExp == 0x7FF ) {
-        if ( aSig ) return commonNaNToFloat128( float64ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( aSig ) return commonNaNToFloat128( float64ToCommonNaN( a STATUS_VAR ) );
         return packFloat128( aSign, 0x7FFF, 0, 0 );
     }
     if ( aExp == 0 ) {
@@ -3179,6 +2909,8 @@ float128 float64_to_float128( float64 a STATUS_PARAM )
 
 }
 
+#endif
+
 /*----------------------------------------------------------------------------
 | Rounds the double-precision floating-point value `a' to an integer, and
 | returns the result as a double-precision floating-point value.  The
@@ -3189,10 +2921,10 @@ float128 float64_to_float128( float64 a STATUS_PARAM )
 float64 float64_round_to_int( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint64_t lastBitMask, roundBitsMask;
+    int16 aExp;
+    bits64 lastBitMask, roundBitsMask;
     int8 roundingMode;
-    uint64_t z;
+    bits64 z;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aExp = extractFloat64Exp( a );
@@ -3203,7 +2935,7 @@ float64 float64_round_to_int( float64 a STATUS_PARAM )
         return a;
     }
     if ( aExp < 0x3FF ) {
-        if ( (uint64_t) ( float64_val(a)<<1 ) == 0 ) return a;
+        if ( (bits64) ( float64_val(a)<<1 ) == 0 ) return a;
         STATUS(float_exception_flags) |= float_flag_inexact;
         aSign = extractFloat64Sign( a );
         switch ( STATUS(float_rounding_mode) ) {
@@ -3262,9 +2994,9 @@ float64 float64_trunc_to_int( float64 a STATUS_PARAM)
 
 static float64 addFloat64Sigs( float64 a, float64 b, flag zSign STATUS_PARAM )
 {
-    int_fast16_t aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig;
-    int_fast16_t expDiff;
+    int16 aExp, bExp, zExp;
+    bits64 aSig, bSig, zSig;
+    int16 expDiff;
 
     aSig = extractFloat64Frac( a );
     aExp = extractFloat64Exp( a );
@@ -3307,12 +3039,7 @@ static float64 addFloat64Sigs( float64 a, float64 b, flag zSign STATUS_PARAM )
             return a;
         }
         if ( aExp == 0 ) {
-            if (STATUS(flush_to_zero)) {
-                if (aSig | bSig) {
-                    float_raise(float_flag_output_denormal STATUS_VAR);
-                }
-                return packFloat64(zSign, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat64( zSign, 0, 0 );
             return packFloat64( zSign, 0, ( aSig + bSig )>>9 );
         }
         zSig = LIT64( 0x4000000000000000 ) + aSig + bSig;
@@ -3322,7 +3049,7 @@ static float64 addFloat64Sigs( float64 a, float64 b, flag zSign STATUS_PARAM )
     aSig |= LIT64( 0x2000000000000000 );
     zSig = ( aSig + bSig )<<1;
     --zExp;
-    if ( (int64_t) zSig < 0 ) {
+    if ( (sbits64) zSig < 0 ) {
         zSig = aSig + bSig;
         ++zExp;
     }
@@ -3341,9 +3068,9 @@ static float64 addFloat64Sigs( float64 a, float64 b, flag zSign STATUS_PARAM )
 
 static float64 subFloat64Sigs( float64 a, float64 b, flag zSign STATUS_PARAM )
 {
-    int_fast16_t aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig;
-    int_fast16_t expDiff;
+    int16 aExp, bExp, zExp;
+    bits64 aSig, bSig, zSig;
+    int16 expDiff;
 
     aSig = extractFloat64Frac( a );
     aExp = extractFloat64Exp( a );
@@ -3461,8 +3188,8 @@ float64 float64_sub( float64 a, float64 b STATUS_PARAM )
 float64 float64_mul( float64 a, float64 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
-    int_fast16_t aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig0, zSig1;
+    int16 aExp, bExp, zExp;
+    bits64 aSig, bSig, zSig0, zSig1;
 
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
@@ -3505,7 +3232,7 @@ float64 float64_mul( float64 a, float64 b STATUS_PARAM )
     bSig = ( bSig | LIT64( 0x0010000000000000 ) )<<11;
     mul64To128( aSig, bSig, &zSig0, &zSig1 );
     zSig0 |= ( zSig1 != 0 );
-    if ( 0 <= (int64_t) ( zSig0<<1 ) ) {
+    if ( 0 <= (sbits64) ( zSig0<<1 ) ) {
         zSig0 <<= 1;
         --zExp;
     }
@@ -3522,10 +3249,10 @@ float64 float64_mul( float64 a, float64 b STATUS_PARAM )
 float64 float64_div( float64 a, float64 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
-    int_fast16_t aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig;
-    uint64_t rem0, rem1;
-    uint64_t term0, term1;
+    int16 aExp, bExp, zExp;
+    bits64 aSig, bSig, zSig;
+    bits64 rem0, rem1;
+    bits64 term0, term1;
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
 
@@ -3575,7 +3302,7 @@ float64 float64_div( float64 a, float64 b STATUS_PARAM )
     if ( ( zSig & 0x1FF ) <= 2 ) {
         mul64To128( bSig, zSig, &term0, &term1 );
         sub128( aSig, 0, term0, term1, &rem0, &rem1 );
-        while ( (int64_t) rem0 < 0 ) {
+        while ( (sbits64) rem0 < 0 ) {
             --zSig;
             add128( rem0, rem1, 0, bSig, &rem0, &rem1 );
         }
@@ -3594,10 +3321,10 @@ float64 float64_div( float64 a, float64 b STATUS_PARAM )
 float64 float64_rem( float64 a, float64 b STATUS_PARAM )
 {
     flag aSign, zSign;
-    int_fast16_t aExp, bExp, expDiff;
-    uint64_t aSig, bSig;
-    uint64_t q, alternateASig;
-    int64_t sigMean;
+    int16 aExp, bExp, expDiff;
+    bits64 aSig, bSig;
+    bits64 q, alternateASig;
+    sbits64 sigMean;
 
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
@@ -3660,235 +3387,15 @@ float64 float64_rem( float64 a, float64 b STATUS_PARAM )
         alternateASig = aSig;
         ++q;
         aSig -= bSig;
-    } while ( 0 <= (int64_t) aSig );
+    } while ( 0 <= (sbits64) aSig );
     sigMean = aSig + alternateASig;
     if ( ( sigMean < 0 ) || ( ( sigMean == 0 ) && ( q & 1 ) ) ) {
         aSig = alternateASig;
     }
-    zSign = ( (int64_t) aSig < 0 );
+    zSign = ( (sbits64) aSig < 0 );
     if ( zSign ) aSig = - aSig;
     return normalizeRoundAndPackFloat64( aSign ^ zSign, bExp, aSig STATUS_VAR );
 
-}
-
-/*----------------------------------------------------------------------------
-| Returns the result of multiplying the double-precision floating-point values
-| `a' and `b' then adding 'c', with no intermediate rounding step after the
-| multiplication.  The operation is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic 754-2008.
-| The flags argument allows the caller to select negation of the
-| addend, the intermediate product, or the final result. (The difference
-| between this and having the caller do a separate negation is that negating
-| externally will flip the sign bit on NaNs.)
-*----------------------------------------------------------------------------*/
-
-float64 float64_muladd(float64 a, float64 b, float64 c, int flags STATUS_PARAM)
-{
-    flag aSign, bSign, cSign, zSign;
-    int_fast16_t aExp, bExp, cExp, pExp, zExp, expDiff;
-    uint64_t aSig, bSig, cSig;
-    flag pInf, pZero, pSign;
-    uint64_t pSig0, pSig1, cSig0, cSig1, zSig0, zSig1;
-    int shiftcount;
-    flag signflip, infzero;
-
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-    c = float64_squash_input_denormal(c STATUS_VAR);
-    aSig = extractFloat64Frac(a);
-    aExp = extractFloat64Exp(a);
-    aSign = extractFloat64Sign(a);
-    bSig = extractFloat64Frac(b);
-    bExp = extractFloat64Exp(b);
-    bSign = extractFloat64Sign(b);
-    cSig = extractFloat64Frac(c);
-    cExp = extractFloat64Exp(c);
-    cSign = extractFloat64Sign(c);
-
-    infzero = ((aExp == 0 && aSig == 0 && bExp == 0x7ff && bSig == 0) ||
-               (aExp == 0x7ff && aSig == 0 && bExp == 0 && bSig == 0));
-
-    /* It is implementation-defined whether the cases of (0,inf,qnan)
-     * and (inf,0,qnan) raise InvalidOperation or not (and what QNaN
-     * they return if they do), so we have to hand this information
-     * off to the target-specific pick-a-NaN routine.
-     */
-    if (((aExp == 0x7ff) && aSig) ||
-        ((bExp == 0x7ff) && bSig) ||
-        ((cExp == 0x7ff) && cSig)) {
-        return propagateFloat64MulAddNaN(a, b, c, infzero STATUS_VAR);
-    }
-
-    if (infzero) {
-        float_raise(float_flag_invalid STATUS_VAR);
-        return float64_default_nan;
-    }
-
-    if (flags & float_muladd_negate_c) {
-        cSign ^= 1;
-    }
-
-    signflip = (flags & float_muladd_negate_result) ? 1 : 0;
-
-    /* Work out the sign and type of the product */
-    pSign = aSign ^ bSign;
-    if (flags & float_muladd_negate_product) {
-        pSign ^= 1;
-    }
-    pInf = (aExp == 0x7ff) || (bExp == 0x7ff);
-    pZero = ((aExp | aSig) == 0) || ((bExp | bSig) == 0);
-
-    if (cExp == 0x7ff) {
-        if (pInf && (pSign ^ cSign)) {
-            /* addition of opposite-signed infinities => InvalidOperation */
-            float_raise(float_flag_invalid STATUS_VAR);
-            return float64_default_nan;
-        }
-        /* Otherwise generate an infinity of the same sign */
-        return packFloat64(cSign ^ signflip, 0x7ff, 0);
-    }
-
-    if (pInf) {
-        return packFloat64(pSign ^ signflip, 0x7ff, 0);
-    }
-
-    if (pZero) {
-        if (cExp == 0) {
-            if (cSig == 0) {
-                /* Adding two exact zeroes */
-                if (pSign == cSign) {
-                    zSign = pSign;
-                } else if (STATUS(float_rounding_mode) == float_round_down) {
-                    zSign = 1;
-                } else {
-                    zSign = 0;
-                }
-                return packFloat64(zSign ^ signflip, 0, 0);
-            }
-            /* Exact zero plus a denorm */
-            if (STATUS(flush_to_zero)) {
-                float_raise(float_flag_output_denormal STATUS_VAR);
-                return packFloat64(cSign ^ signflip, 0, 0);
-            }
-        }
-        /* Zero plus something non-zero : just return the something */
-        return make_float64(float64_val(c) ^ ((uint64_t)signflip << 63));
-    }
-
-    if (aExp == 0) {
-        normalizeFloat64Subnormal(aSig, &aExp, &aSig);
-    }
-    if (bExp == 0) {
-        normalizeFloat64Subnormal(bSig, &bExp, &bSig);
-    }
-
-    /* Calculate the actual result a * b + c */
-
-    /* Multiply first; this is easy. */
-    /* NB: we subtract 0x3fe where float64_mul() subtracts 0x3ff
-     * because we want the true exponent, not the "one-less-than"
-     * flavour that roundAndPackFloat64() takes.
-     */
-    pExp = aExp + bExp - 0x3fe;
-    aSig = (aSig | LIT64(0x0010000000000000))<<10;
-    bSig = (bSig | LIT64(0x0010000000000000))<<11;
-    mul64To128(aSig, bSig, &pSig0, &pSig1);
-    if ((int64_t)(pSig0 << 1) >= 0) {
-        shortShift128Left(pSig0, pSig1, 1, &pSig0, &pSig1);
-        pExp--;
-    }
-
-    zSign = pSign ^ signflip;
-
-    /* Now [pSig0:pSig1] is the significand of the multiply, with the explicit
-     * bit in position 126.
-     */
-    if (cExp == 0) {
-        if (!cSig) {
-            /* Throw out the special case of c being an exact zero now */
-            shift128RightJamming(pSig0, pSig1, 64, &pSig0, &pSig1);
-            return roundAndPackFloat64(zSign, pExp - 1,
-                                       pSig1 STATUS_VAR);
-        }
-        normalizeFloat64Subnormal(cSig, &cExp, &cSig);
-    }
-
-    /* Shift cSig and add the explicit bit so [cSig0:cSig1] is the
-     * significand of the addend, with the explicit bit in position 126.
-     */
-    cSig0 = cSig << (126 - 64 - 52);
-    cSig1 = 0;
-    cSig0 |= LIT64(0x4000000000000000);
-    expDiff = pExp - cExp;
-
-    if (pSign == cSign) {
-        /* Addition */
-        if (expDiff > 0) {
-            /* scale c to match p */
-            shift128RightJamming(cSig0, cSig1, expDiff, &cSig0, &cSig1);
-            zExp = pExp;
-        } else if (expDiff < 0) {
-            /* scale p to match c */
-            shift128RightJamming(pSig0, pSig1, -expDiff, &pSig0, &pSig1);
-            zExp = cExp;
-        } else {
-            /* no scaling needed */
-            zExp = cExp;
-        }
-        /* Add significands and make sure explicit bit ends up in posn 126 */
-        add128(pSig0, pSig1, cSig0, cSig1, &zSig0, &zSig1);
-        if ((int64_t)zSig0 < 0) {
-            shift128RightJamming(zSig0, zSig1, 1, &zSig0, &zSig1);
-        } else {
-            zExp--;
-        }
-        shift128RightJamming(zSig0, zSig1, 64, &zSig0, &zSig1);
-        return roundAndPackFloat64(zSign, zExp, zSig1 STATUS_VAR);
-    } else {
-        /* Subtraction */
-        if (expDiff > 0) {
-            shift128RightJamming(cSig0, cSig1, expDiff, &cSig0, &cSig1);
-            sub128(pSig0, pSig1, cSig0, cSig1, &zSig0, &zSig1);
-            zExp = pExp;
-        } else if (expDiff < 0) {
-            shift128RightJamming(pSig0, pSig1, -expDiff, &pSig0, &pSig1);
-            sub128(cSig0, cSig1, pSig0, pSig1, &zSig0, &zSig1);
-            zExp = cExp;
-            zSign ^= 1;
-        } else {
-            zExp = pExp;
-            if (lt128(cSig0, cSig1, pSig0, pSig1)) {
-                sub128(pSig0, pSig1, cSig0, cSig1, &zSig0, &zSig1);
-            } else if (lt128(pSig0, pSig1, cSig0, cSig1)) {
-                sub128(cSig0, cSig1, pSig0, pSig1, &zSig0, &zSig1);
-                zSign ^= 1;
-            } else {
-                /* Exact zero */
-                zSign = signflip;
-                if (STATUS(float_rounding_mode) == float_round_down) {
-                    zSign ^= 1;
-                }
-                return packFloat64(zSign, 0, 0);
-            }
-        }
-        --zExp;
-        /* Do the equivalent of normalizeRoundAndPackFloat64() but
-         * starting with the significand in a pair of uint64_t.
-         */
-        if (zSig0) {
-            shiftcount = countLeadingZeros64(zSig0) - 1;
-            shortShift128Left(zSig0, zSig1, shiftcount, &zSig0, &zSig1);
-            if (zSig1) {
-                zSig0 |= 1;
-            }
-            zExp -= shiftcount;
-        } else {
-            shiftcount = countLeadingZeros64(zSig1) - 1;
-            zSig0 = zSig1 << shiftcount;
-            zExp -= (shiftcount + 64);
-        }
-        return roundAndPackFloat64(zSign, zExp, zSig0 STATUS_VAR);
-    }
 }
 
 /*----------------------------------------------------------------------------
@@ -3900,9 +3407,9 @@ float64 float64_muladd(float64 a, float64 b, float64 c, int flags STATUS_PARAM)
 float64 float64_sqrt( float64 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp, zExp;
-    uint64_t aSig, zSig, doubleZSig;
-    uint64_t rem0, rem1, term0, term1;
+    int16 aExp, zExp;
+    bits64 aSig, zSig, doubleZSig;
+    bits64 rem0, rem1, term0, term1;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
@@ -3932,7 +3439,7 @@ float64 float64_sqrt( float64 a STATUS_PARAM )
         doubleZSig = zSig<<1;
         mul64To128( zSig, zSig, &term0, &term1 );
         sub128( aSig, 0, term0, term1, &rem0, &rem1 );
-        while ( (int64_t) rem0 < 0 ) {
+        while ( (sbits64) rem0 < 0 ) {
             --zSig;
             doubleZSig -= 2;
             add128( rem0, rem1, zSig>>63, doubleZSig | 1, &rem0, &rem1 );
@@ -3951,8 +3458,8 @@ float64 float64_sqrt( float64 a STATUS_PARAM )
 float64 float64_log2( float64 a STATUS_PARAM )
 {
     flag aSign, zSign;
-    int_fast16_t aExp;
-    uint64_t aSig, aSig0, aSig1, zSig, i;
+    int16 aExp;
+    bits64 aSig, aSig0, aSig1, zSig, i;
     a = float64_squash_input_denormal(a STATUS_VAR);
 
     aSig = extractFloat64Frac( a );
@@ -3975,7 +3482,7 @@ float64 float64_log2( float64 a STATUS_PARAM )
     aExp -= 0x3FF;
     aSig |= LIT64( 0x0010000000000000 );
     zSign = aExp < 0;
-    zSig = (uint64_t)aExp << 52;
+    zSig = (bits64)aExp << 52;
     for (i = 1LL << 51; i > 0; i >>= 1) {
         mul64To128( aSig, aSig, &aSig0, &aSig1 );
         aSig = ( aSig0 << 12 ) | ( aSig1 >> 52 );
@@ -3992,118 +3499,13 @@ float64 float64_log2( float64 a STATUS_PARAM )
 
 /*----------------------------------------------------------------------------
 | Returns 1 if the double-precision floating-point value `a' is equal to the
-| corresponding value `b', and 0 otherwise.  The invalid exception is raised
-| if either operand is a NaN.  Otherwise, the comparison is performed
+| corresponding value `b', and 0 otherwise.  The comparison is performed
 | according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
 int float64_eq( float64 a, float64 b STATUS_PARAM )
 {
-    uint64_t av, bv;
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
-         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    av = float64_val(a);
-    bv = float64_val(b);
-    return ( av == bv ) || ( (uint64_t) ( ( av | bv )<<1 ) == 0 );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the double-precision floating-point value `a' is less than or
-| equal to the corresponding value `b', and 0 otherwise.  The invalid
-| exception is raised if either operand is a NaN.  The comparison is performed
-| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float64_le( float64 a, float64 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-    uint64_t av, bv;
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
-         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloat64Sign( a );
-    bSign = extractFloat64Sign( b );
-    av = float64_val(a);
-    bv = float64_val(b);
-    if ( aSign != bSign ) return aSign || ( (uint64_t) ( ( av | bv )<<1 ) == 0 );
-    return ( av == bv ) || ( aSign ^ ( av < bv ) );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the double-precision floating-point value `a' is less than
-| the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  The comparison is performed according
-| to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float64_lt( float64 a, float64 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-    uint64_t av, bv;
-
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
-         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloat64Sign( a );
-    bSign = extractFloat64Sign( b );
-    av = float64_val(a);
-    bv = float64_val(b);
-    if ( aSign != bSign ) return aSign && ( (uint64_t) ( ( av | bv )<<1 ) != 0 );
-    return ( av != bv ) && ( aSign ^ ( av < bv ) );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the double-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  The invalid exception is raised if either
-| operand is a NaN.  The comparison is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float64_unordered( float64 a, float64 b STATUS_PARAM )
-{
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
-         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 1;
-    }
-    return 0;
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the double-precision floating-point value `a' is equal to the
-| corresponding value `b', and 0 otherwise.  Quiet NaNs do not cause an
-| exception.The comparison is performed according to the IEC/IEEE Standard
-| for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float64_eq_quiet( float64 a, float64 b STATUS_PARAM )
-{
-    uint64_t av, bv;
+    bits64 av, bv;
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
 
@@ -4117,7 +3519,89 @@ int float64_eq_quiet( float64 a, float64 b STATUS_PARAM )
     }
     av = float64_val(a);
     bv = float64_val(b);
-    return ( av == bv ) || ( (uint64_t) ( ( av | bv )<<1 ) == 0 );
+    return ( av == bv ) || ( (bits64) ( ( av | bv )<<1 ) == 0 );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the double-precision floating-point value `a' is less than or
+| equal to the corresponding value `b', and 0 otherwise.  The comparison is
+| performed according to the IEC/IEEE Standard for Binary Floating-Point
+| Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float64_le( float64 a, float64 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+    bits64 av, bv;
+    a = float64_squash_input_denormal(a STATUS_VAR);
+    b = float64_squash_input_denormal(b STATUS_VAR);
+
+    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
+         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloat64Sign( a );
+    bSign = extractFloat64Sign( b );
+    av = float64_val(a);
+    bv = float64_val(b);
+    if ( aSign != bSign ) return aSign || ( (bits64) ( ( av | bv )<<1 ) == 0 );
+    return ( av == bv ) || ( aSign ^ ( av < bv ) );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the double-precision floating-point value `a' is less than
+| the corresponding value `b', and 0 otherwise.  The comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float64_lt( float64 a, float64 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+    bits64 av, bv;
+
+    a = float64_squash_input_denormal(a STATUS_VAR);
+    b = float64_squash_input_denormal(b STATUS_VAR);
+    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
+         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloat64Sign( a );
+    bSign = extractFloat64Sign( b );
+    av = float64_val(a);
+    bv = float64_val(b);
+    if ( aSign != bSign ) return aSign && ( (bits64) ( ( av | bv )<<1 ) != 0 );
+    return ( av != bv ) && ( aSign ^ ( av < bv ) );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the double-precision floating-point value `a' is equal to the
+| corresponding value `b', and 0 otherwise.  The invalid exception is raised
+| if either operand is a NaN.  Otherwise, the comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int float64_eq_signaling( float64 a, float64 b STATUS_PARAM )
+{
+    bits64 av, bv;
+    a = float64_squash_input_denormal(a STATUS_VAR);
+    b = float64_squash_input_denormal(b STATUS_VAR);
+
+    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
+         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    av = float64_val(a);
+    bv = float64_val(b);
+    return ( av == bv ) || ( (bits64) ( ( av | bv )<<1 ) == 0 );
 
 }
 
@@ -4131,7 +3615,7 @@ int float64_eq_quiet( float64 a, float64 b STATUS_PARAM )
 int float64_le_quiet( float64 a, float64 b STATUS_PARAM )
 {
     flag aSign, bSign;
-    uint64_t av, bv;
+    bits64 av, bv;
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
 
@@ -4147,7 +3631,7 @@ int float64_le_quiet( float64 a, float64 b STATUS_PARAM )
     bSign = extractFloat64Sign( b );
     av = float64_val(a);
     bv = float64_val(b);
-    if ( aSign != bSign ) return aSign || ( (uint64_t) ( ( av | bv )<<1 ) == 0 );
+    if ( aSign != bSign ) return aSign || ( (bits64) ( ( av | bv )<<1 ) == 0 );
     return ( av == bv ) || ( aSign ^ ( av < bv ) );
 
 }
@@ -4162,7 +3646,7 @@ int float64_le_quiet( float64 a, float64 b STATUS_PARAM )
 int float64_lt_quiet( float64 a, float64 b STATUS_PARAM )
 {
     flag aSign, bSign;
-    uint64_t av, bv;
+    bits64 av, bv;
     a = float64_squash_input_denormal(a STATUS_VAR);
     b = float64_squash_input_denormal(b STATUS_VAR);
 
@@ -4178,33 +3662,12 @@ int float64_lt_quiet( float64 a, float64 b STATUS_PARAM )
     bSign = extractFloat64Sign( b );
     av = float64_val(a);
     bv = float64_val(b);
-    if ( aSign != bSign ) return aSign && ( (uint64_t) ( ( av | bv )<<1 ) != 0 );
+    if ( aSign != bSign ) return aSign && ( (bits64) ( ( av | bv )<<1 ) != 0 );
     return ( av != bv ) && ( aSign ^ ( av < bv ) );
 
 }
 
-/*----------------------------------------------------------------------------
-| Returns 1 if the double-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  Quiet NaNs do not cause an exception.  The
-| comparison is performed according to the IEC/IEEE Standard for Binary
-| Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float64_unordered_quiet( float64 a, float64 b STATUS_PARAM )
-{
-    a = float64_squash_input_denormal(a STATUS_VAR);
-    b = float64_squash_input_denormal(b STATUS_VAR);
-
-    if (    ( ( extractFloat64Exp( a ) == 0x7FF ) && extractFloat64Frac( a ) )
-         || ( ( extractFloat64Exp( b ) == 0x7FF ) && extractFloat64Frac( b ) )
-       ) {
-        if ( float64_is_signaling_nan( a ) || float64_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
-        return 1;
-    }
-    return 0;
-}
+#ifdef FLOATX80
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the extended double-precision floating-
@@ -4220,12 +3683,12 @@ int32 floatx80_to_int32( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig;
+    bits64 aSig;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
-    if ( ( aExp == 0x7FFF ) && (uint64_t) ( aSig<<1 ) ) aSign = 0;
+    if ( ( aExp == 0x7FFF ) && (bits64) ( aSig<<1 ) ) aSign = 0;
     shiftCount = 0x4037 - aExp;
     if ( shiftCount <= 0 ) shiftCount = 1;
     shift64RightJamming( aSig, shiftCount, &aSig );
@@ -4247,14 +3710,14 @@ int32 floatx80_to_int32_round_to_zero( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig, savedASig;
-    int32_t z;
+    bits64 aSig, savedASig;
+    int32 z;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
     if ( 0x401E < aExp ) {
-        if ( ( aExp == 0x7FFF ) && (uint64_t) ( aSig<<1 ) ) aSign = 0;
+        if ( ( aExp == 0x7FFF ) && (bits64) ( aSig<<1 ) ) aSign = 0;
         goto invalid;
     }
     else if ( aExp < 0x3FFF ) {
@@ -4269,7 +3732,7 @@ int32 floatx80_to_int32_round_to_zero( floatx80 a STATUS_PARAM )
     if ( ( z < 0 ) ^ aSign ) {
  invalid:
         float_raise( float_flag_invalid STATUS_VAR);
-        return aSign ? (int32_t) 0x80000000 : 0x7FFFFFFF;
+        return aSign ? (sbits32) 0x80000000 : 0x7FFFFFFF;
     }
     if ( ( aSig<<shiftCount ) != savedASig ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
@@ -4292,7 +3755,7 @@ int64 floatx80_to_int64( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig, aSigExtra;
+    bits64 aSig, aSigExtra;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
@@ -4307,7 +3770,7 @@ int64 floatx80_to_int64( floatx80 a STATUS_PARAM )
                ) {
                 return LIT64( 0x7FFFFFFFFFFFFFFF );
             }
-            return (int64_t) LIT64( 0x8000000000000000 );
+            return (sbits64) LIT64( 0x8000000000000000 );
         }
         aSigExtra = 0;
     }
@@ -4332,7 +3795,7 @@ int64 floatx80_to_int64_round_to_zero( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig;
+    bits64 aSig;
     int64 z;
 
     aSig = extractFloatx80Frac( a );
@@ -4347,14 +3810,14 @@ int64 floatx80_to_int64_round_to_zero( floatx80 a STATUS_PARAM )
                 return LIT64( 0x7FFFFFFFFFFFFFFF );
             }
         }
-        return (int64_t) LIT64( 0x8000000000000000 );
+        return (sbits64) LIT64( 0x8000000000000000 );
     }
     else if ( aExp < 0x3FFF ) {
         if ( aExp | aSig ) STATUS(float_exception_flags) |= float_flag_inexact;
         return 0;
     }
     z = aSig>>( - shiftCount );
-    if ( (uint64_t) ( aSig<<( shiftCount & 63 ) ) ) {
+    if ( (bits64) ( aSig<<( shiftCount & 63 ) ) ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
     }
     if ( aSign ) z = - z;
@@ -4373,14 +3836,14 @@ float32 floatx80_to_float32( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t aSig;
+    bits64 aSig;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( aSig<<1 ) ) {
-            return commonNaNToFloat32( floatx80ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( (bits64) ( aSig<<1 ) ) {
+            return commonNaNToFloat32( floatx80ToCommonNaN( a STATUS_VAR ) );
         }
         return packFloat32( aSign, 0xFF, 0 );
     }
@@ -4401,14 +3864,14 @@ float64 floatx80_to_float64( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t aSig, zSig;
+    bits64 aSig, zSig;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( aSig<<1 ) ) {
-            return commonNaNToFloat64( floatx80ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+        if ( (bits64) ( aSig<<1 ) ) {
+            return commonNaNToFloat64( floatx80ToCommonNaN( a STATUS_VAR ) );
         }
         return packFloat64( aSign, 0x7FF, 0 );
     }
@@ -4417,6 +3880,8 @@ float64 floatx80_to_float64( floatx80 a STATUS_PARAM )
     return roundAndPackFloat64( aSign, aExp, zSig STATUS_VAR );
 
 }
+
+#ifdef FLOAT128
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the extended double-precision floating-
@@ -4428,19 +3893,21 @@ float64 floatx80_to_float64( floatx80 a STATUS_PARAM )
 float128 floatx80_to_float128( floatx80 a STATUS_PARAM )
 {
     flag aSign;
-    int_fast16_t aExp;
-    uint64_t aSig, zSig0, zSig1;
+    int16 aExp;
+    bits64 aSig, zSig0, zSig1;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
-    if ( ( aExp == 0x7FFF ) && (uint64_t) ( aSig<<1 ) ) {
-        return commonNaNToFloat128( floatx80ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+    if ( ( aExp == 0x7FFF ) && (bits64) ( aSig<<1 ) ) {
+        return commonNaNToFloat128( floatx80ToCommonNaN( a STATUS_VAR ) );
     }
     shift128Right( aSig<<1, 0, 16, &zSig0, &zSig1 );
     return packFloat128( aSign, aExp, zSig0, zSig1 );
 
 }
+
+#endif
 
 /*----------------------------------------------------------------------------
 | Rounds the extended double-precision floating-point value `a' to an integer,
@@ -4453,27 +3920,27 @@ floatx80 floatx80_round_to_int( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t lastBitMask, roundBitsMask;
+    bits64 lastBitMask, roundBitsMask;
     int8 roundingMode;
     floatx80 z;
 
     aExp = extractFloatx80Exp( a );
     if ( 0x403E <= aExp ) {
-        if ( ( aExp == 0x7FFF ) && (uint64_t) ( extractFloatx80Frac( a )<<1 ) ) {
+        if ( ( aExp == 0x7FFF ) && (bits64) ( extractFloatx80Frac( a )<<1 ) ) {
             return propagateFloatx80NaN( a, a STATUS_VAR );
         }
         return a;
     }
     if ( aExp < 0x3FFF ) {
         if (    ( aExp == 0 )
-             && ( (uint64_t) ( extractFloatx80Frac( a )<<1 ) == 0 ) ) {
+             && ( (bits64) ( extractFloatx80Frac( a )<<1 ) == 0 ) ) {
             return a;
         }
         STATUS(float_exception_flags) |= float_flag_inexact;
         aSign = extractFloatx80Sign( a );
         switch ( STATUS(float_rounding_mode) ) {
          case float_round_nearest_even:
-            if ( ( aExp == 0x3FFE ) && (uint64_t) ( extractFloatx80Frac( a )<<1 )
+            if ( ( aExp == 0x3FFE ) && (bits64) ( extractFloatx80Frac( a )<<1 )
                ) {
                 return
                     packFloatx80( aSign, 0x3FFF, LIT64( 0x8000000000000000 ) );
@@ -4526,7 +3993,7 @@ floatx80 floatx80_round_to_int( floatx80 a STATUS_PARAM )
 static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM)
 {
     int32 aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig0, zSig1;
+    bits64 aSig, bSig, zSig0, zSig1;
     int32 expDiff;
 
     aSig = extractFloatx80Frac( a );
@@ -4536,7 +4003,7 @@ static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     expDiff = aExp - bExp;
     if ( 0 < expDiff ) {
         if ( aExp == 0x7FFF ) {
-            if ( (uint64_t) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+            if ( (bits64) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
             return a;
         }
         if ( bExp == 0 ) --expDiff;
@@ -4545,7 +4012,7 @@ static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     }
     else if ( expDiff < 0 ) {
         if ( bExp == 0x7FFF ) {
-            if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+            if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
             return packFloatx80( zSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
         }
         if ( aExp == 0 ) ++expDiff;
@@ -4554,7 +4021,7 @@ static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     }
     else {
         if ( aExp == 0x7FFF ) {
-            if ( (uint64_t) ( ( aSig | bSig )<<1 ) ) {
+            if ( (bits64) ( ( aSig | bSig )<<1 ) ) {
                 return propagateFloatx80NaN( a, b STATUS_VAR );
             }
             return a;
@@ -4569,7 +4036,7 @@ static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
         goto shiftRight1;
     }
     zSig0 = aSig + bSig;
-    if ( (int64_t) zSig0 < 0 ) goto roundAndPack;
+    if ( (sbits64) zSig0 < 0 ) goto roundAndPack;
  shiftRight1:
     shift64ExtraRightJamming( zSig0, zSig1, 1, &zSig0, &zSig1 );
     zSig0 |= LIT64( 0x8000000000000000 );
@@ -4592,7 +4059,7 @@ static floatx80 addFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
 static floatx80 subFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM )
 {
     int32 aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig0, zSig1;
+    bits64 aSig, bSig, zSig0, zSig1;
     int32 expDiff;
     floatx80 z;
 
@@ -4604,7 +4071,7 @@ static floatx80 subFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     if ( 0 < expDiff ) goto aExpBigger;
     if ( expDiff < 0 ) goto bExpBigger;
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( ( aSig | bSig )<<1 ) ) {
+        if ( (bits64) ( ( aSig | bSig )<<1 ) ) {
             return propagateFloatx80NaN( a, b STATUS_VAR );
         }
         float_raise( float_flag_invalid STATUS_VAR);
@@ -4622,7 +4089,7 @@ static floatx80 subFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     return packFloatx80( STATUS(float_rounding_mode) == float_round_down, 0, 0 );
  bExpBigger:
     if ( bExp == 0x7FFF ) {
-        if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         return packFloatx80( zSign ^ 1, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
     if ( aExp == 0 ) ++expDiff;
@@ -4634,7 +4101,7 @@ static floatx80 subFloatx80Sigs( floatx80 a, floatx80 b, flag zSign STATUS_PARAM
     goto normalizeRoundAndPack;
  aExpBigger:
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         return a;
     }
     if ( bExp == 0 ) --expDiff;
@@ -4701,7 +4168,7 @@ floatx80 floatx80_mul( floatx80 a, floatx80 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
     int32 aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig0, zSig1;
+    bits64 aSig, bSig, zSig0, zSig1;
     floatx80 z;
 
     aSig = extractFloatx80Frac( a );
@@ -4712,15 +4179,15 @@ floatx80 floatx80_mul( floatx80 a, floatx80 b STATUS_PARAM )
     bSign = extractFloatx80Sign( b );
     zSign = aSign ^ bSign;
     if ( aExp == 0x7FFF ) {
-        if (    (uint64_t) ( aSig<<1 )
-             || ( ( bExp == 0x7FFF ) && (uint64_t) ( bSig<<1 ) ) ) {
+        if (    (bits64) ( aSig<<1 )
+             || ( ( bExp == 0x7FFF ) && (bits64) ( bSig<<1 ) ) ) {
             return propagateFloatx80NaN( a, b STATUS_VAR );
         }
         if ( ( bExp | bSig ) == 0 ) goto invalid;
         return packFloatx80( zSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
     if ( bExp == 0x7FFF ) {
-        if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         if ( ( aExp | aSig ) == 0 ) {
  invalid:
             float_raise( float_flag_invalid STATUS_VAR);
@@ -4740,7 +4207,7 @@ floatx80 floatx80_mul( floatx80 a, floatx80 b STATUS_PARAM )
     }
     zExp = aExp + bExp - 0x3FFE;
     mul64To128( aSig, bSig, &zSig0, &zSig1 );
-    if ( 0 < (int64_t) zSig0 ) {
+    if ( 0 < (sbits64) zSig0 ) {
         shortShift128Left( zSig0, zSig1, 1, &zSig0, &zSig1 );
         --zExp;
     }
@@ -4760,8 +4227,8 @@ floatx80 floatx80_div( floatx80 a, floatx80 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
     int32 aExp, bExp, zExp;
-    uint64_t aSig, bSig, zSig0, zSig1;
-    uint64_t rem0, rem1, rem2, term0, term1, term2;
+    bits64 aSig, bSig, zSig0, zSig1;
+    bits64 rem0, rem1, rem2, term0, term1, term2;
     floatx80 z;
 
     aSig = extractFloatx80Frac( a );
@@ -4772,15 +4239,15 @@ floatx80 floatx80_div( floatx80 a, floatx80 b STATUS_PARAM )
     bSign = extractFloatx80Sign( b );
     zSign = aSign ^ bSign;
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( aSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         if ( bExp == 0x7FFF ) {
-            if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+            if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
             goto invalid;
         }
         return packFloatx80( zSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
     if ( bExp == 0x7FFF ) {
-        if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         return packFloatx80( zSign, 0, 0 );
     }
     if ( bExp == 0 ) {
@@ -4810,15 +4277,15 @@ floatx80 floatx80_div( floatx80 a, floatx80 b STATUS_PARAM )
     zSig0 = estimateDiv128To64( aSig, rem1, bSig );
     mul64To128( bSig, zSig0, &term0, &term1 );
     sub128( aSig, rem1, term0, term1, &rem0, &rem1 );
-    while ( (int64_t) rem0 < 0 ) {
+    while ( (sbits64) rem0 < 0 ) {
         --zSig0;
         add128( rem0, rem1, 0, bSig, &rem0, &rem1 );
     }
     zSig1 = estimateDiv128To64( rem1, 0, bSig );
-    if ( (uint64_t) ( zSig1<<1 ) <= 8 ) {
+    if ( (bits64) ( zSig1<<1 ) <= 8 ) {
         mul64To128( bSig, zSig1, &term1, &term2 );
         sub128( rem1, 0, term1, term2, &rem1, &rem2 );
-        while ( (int64_t) rem1 < 0 ) {
+        while ( (sbits64) rem1 < 0 ) {
             --zSig1;
             add128( rem1, rem2, 0, bSig, &rem1, &rem2 );
         }
@@ -4840,8 +4307,8 @@ floatx80 floatx80_rem( floatx80 a, floatx80 b STATUS_PARAM )
 {
     flag aSign, zSign;
     int32 aExp, bExp, expDiff;
-    uint64_t aSig0, aSig1, bSig;
-    uint64_t q, term0, term1, alternateASig0, alternateASig1;
+    bits64 aSig0, aSig1, bSig;
+    bits64 q, term0, term1, alternateASig0, alternateASig1;
     floatx80 z;
 
     aSig0 = extractFloatx80Frac( a );
@@ -4850,14 +4317,14 @@ floatx80 floatx80_rem( floatx80 a, floatx80 b STATUS_PARAM )
     bSig = extractFloatx80Frac( b );
     bExp = extractFloatx80Exp( b );
     if ( aExp == 0x7FFF ) {
-        if (    (uint64_t) ( aSig0<<1 )
-             || ( ( bExp == 0x7FFF ) && (uint64_t) ( bSig<<1 ) ) ) {
+        if (    (bits64) ( aSig0<<1 )
+             || ( ( bExp == 0x7FFF ) && (bits64) ( bSig<<1 ) ) ) {
             return propagateFloatx80NaN( a, b STATUS_VAR );
         }
         goto invalid;
     }
     if ( bExp == 0x7FFF ) {
-        if ( (uint64_t) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
+        if ( (bits64) ( bSig<<1 ) ) return propagateFloatx80NaN( a, b STATUS_VAR );
         return a;
     }
     if ( bExp == 0 ) {
@@ -4871,7 +4338,7 @@ floatx80 floatx80_rem( floatx80 a, floatx80 b STATUS_PARAM )
         normalizeFloatx80Subnormal( bSig, &bExp, &bSig );
     }
     if ( aExp == 0 ) {
-        if ( (uint64_t) ( aSig0<<1 ) == 0 ) return a;
+        if ( (bits64) ( aSig0<<1 ) == 0 ) return a;
         normalizeFloatx80Subnormal( aSig0, &aExp, &aSig0 );
     }
     bSig |= LIT64( 0x8000000000000000 );
@@ -4936,15 +4403,15 @@ floatx80 floatx80_sqrt( floatx80 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, zExp;
-    uint64_t aSig0, aSig1, zSig0, zSig1, doubleZSig0;
-    uint64_t rem0, rem1, rem2, rem3, term0, term1, term2, term3;
+    bits64 aSig0, aSig1, zSig0, zSig1, doubleZSig0;
+    bits64 rem0, rem1, rem2, rem3, term0, term1, term2, term3;
     floatx80 z;
 
     aSig0 = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
     if ( aExp == 0x7FFF ) {
-        if ( (uint64_t) ( aSig0<<1 ) ) return propagateFloatx80NaN( a, a STATUS_VAR );
+        if ( (bits64) ( aSig0<<1 ) ) return propagateFloatx80NaN( a, a STATUS_VAR );
         if ( ! aSign ) return a;
         goto invalid;
     }
@@ -4967,7 +4434,7 @@ floatx80 floatx80_sqrt( floatx80 a STATUS_PARAM )
     doubleZSig0 = zSig0<<1;
     mul64To128( zSig0, zSig0, &term0, &term1 );
     sub128( aSig0, aSig1, term0, term1, &rem0, &rem1 );
-    while ( (int64_t) rem0 < 0 ) {
+    while ( (sbits64) rem0 < 0 ) {
         --zSig0;
         doubleZSig0 -= 2;
         add128( rem0, rem1, zSig0>>63, doubleZSig0 | 1, &rem0, &rem1 );
@@ -4979,7 +4446,7 @@ floatx80 floatx80_sqrt( floatx80 a STATUS_PARAM )
         sub128( rem1, 0, term1, term2, &rem1, &rem2 );
         mul64To128( zSig1, zSig1, &term2, &term3 );
         sub192( rem1, rem2, 0, 0, term2, term3, &rem1, &rem2, &rem3 );
-        while ( (int64_t) rem1 < 0 ) {
+        while ( (sbits64) rem1 < 0 ) {
             --zSig1;
             shortShift128Left( 0, zSig1, 1, &term2, &term3 );
             term3 |= 1;
@@ -4997,132 +4464,19 @@ floatx80 floatx80_sqrt( floatx80 a STATUS_PARAM )
 }
 
 /*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point value `a' is equal
-| to the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  Otherwise, the comparison is performed
-| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+| Returns 1 if the extended double-precision floating-point value `a' is
+| equal to the corresponding value `b', and 0 otherwise.  The comparison is
+| performed according to the IEC/IEEE Standard for Binary Floating-Point
+| Arithmetic.
 *----------------------------------------------------------------------------*/
 
 int floatx80_eq( floatx80 a, floatx80 b STATUS_PARAM )
 {
 
     if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
          || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    return
-           ( a.low == b.low )
-        && (    ( a.high == b.high )
-             || (    ( a.low == 0 )
-                  && ( (uint16_t) ( ( a.high | b.high )<<1 ) == 0 ) )
-           );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point value `a' is
-| less than or equal to the corresponding value `b', and 0 otherwise.  The
-| invalid exception is raised if either operand is a NaN.  The comparison is
-| performed according to the IEC/IEEE Standard for Binary Floating-Point
-| Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int floatx80_le( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-
-    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
-         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloatx80Sign( a );
-    bSign = extractFloatx80Sign( b );
-    if ( aSign != bSign ) {
-        return
-               aSign
-            || (    ( ( (uint16_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
-                 == 0 );
-    }
-    return
-          aSign ? le128( b.high, b.low, a.high, a.low )
-        : le128( a.high, a.low, b.high, b.low );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point value `a' is
-| less than the corresponding value `b', and 0 otherwise.  The invalid
-| exception is raised if either operand is a NaN.  The comparison is performed
-| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int floatx80_lt( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    flag aSign, bSign;
-
-    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
-         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 0;
-    }
-    aSign = extractFloatx80Sign( a );
-    bSign = extractFloatx80Sign( b );
-    if ( aSign != bSign ) {
-        return
-               aSign
-            && (    ( ( (uint16_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
-                 != 0 );
-    }
-    return
-          aSign ? lt128( b.high, b.low, a.high, a.low )
-        : lt128( a.high, a.low, b.high, b.low );
-
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point values `a' and `b'
-| cannot be compared, and 0 otherwise.  The invalid exception is raised if
-| either operand is a NaN.   The comparison is performed according to the
-| IEC/IEEE Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-int floatx80_unordered( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
-         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
-       ) {
-        float_raise( float_flag_invalid STATUS_VAR);
-        return 1;
-    }
-    return 0;
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point value `a' is
-| equal to the corresponding value `b', and 0 otherwise.  Quiet NaNs do not
-| cause an exception.  The comparison is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int floatx80_eq_quiet( floatx80 a, floatx80 b STATUS_PARAM )
-{
-
-    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
-         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
        ) {
         if (    floatx80_is_signaling_nan( a )
              || floatx80_is_signaling_nan( b ) ) {
@@ -5134,7 +4488,100 @@ int floatx80_eq_quiet( floatx80 a, floatx80 b STATUS_PARAM )
            ( a.low == b.low )
         && (    ( a.high == b.high )
              || (    ( a.low == 0 )
-                  && ( (uint16_t) ( ( a.high | b.high )<<1 ) == 0 ) )
+                  && ( (bits16) ( ( a.high | b.high )<<1 ) == 0 ) )
+           );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the extended double-precision floating-point value `a' is
+| less than or equal to the corresponding value `b', and 0 otherwise.  The
+| comparison is performed according to the IEC/IEEE Standard for Binary
+| Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int floatx80_le( floatx80 a, floatx80 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+
+    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
+         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloatx80Sign( a );
+    bSign = extractFloatx80Sign( b );
+    if ( aSign != bSign ) {
+        return
+               aSign
+            || (    ( ( (bits16) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+                 == 0 );
+    }
+    return
+          aSign ? le128( b.high, b.low, a.high, a.low )
+        : le128( a.high, a.low, b.high, b.low );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the extended double-precision floating-point value `a' is
+| less than the corresponding value `b', and 0 otherwise.  The comparison
+| is performed according to the IEC/IEEE Standard for Binary Floating-Point
+| Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int floatx80_lt( floatx80 a, floatx80 b STATUS_PARAM )
+{
+    flag aSign, bSign;
+
+    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
+         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    aSign = extractFloatx80Sign( a );
+    bSign = extractFloatx80Sign( b );
+    if ( aSign != bSign ) {
+        return
+               aSign
+            && (    ( ( (bits16) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+                 != 0 );
+    }
+    return
+          aSign ? lt128( b.high, b.low, a.high, a.low )
+        : lt128( a.high, a.low, b.high, b.low );
+
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the extended double-precision floating-point value `a' is equal
+| to the corresponding value `b', and 0 otherwise.  The invalid exception is
+| raised if either operand is a NaN.  Otherwise, the comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+*----------------------------------------------------------------------------*/
+
+int floatx80_eq_signaling( floatx80 a, floatx80 b STATUS_PARAM )
+{
+
+    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
+         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
+       ) {
+        float_raise( float_flag_invalid STATUS_VAR);
+        return 0;
+    }
+    return
+           ( a.low == b.low )
+        && (    ( a.high == b.high )
+             || (    ( a.low == 0 )
+                  && ( (bits16) ( ( a.high | b.high )<<1 ) == 0 ) )
            );
 
 }
@@ -5151,9 +4598,9 @@ int floatx80_le_quiet( floatx80 a, floatx80 b STATUS_PARAM )
     flag aSign, bSign;
 
     if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
          || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
        ) {
         if (    floatx80_is_signaling_nan( a )
              || floatx80_is_signaling_nan( b ) ) {
@@ -5166,7 +4613,7 @@ int floatx80_le_quiet( floatx80 a, floatx80 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            || (    ( ( (uint16_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            || (    ( ( (bits16) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  == 0 );
     }
     return
@@ -5187,9 +4634,9 @@ int floatx80_lt_quiet( floatx80 a, floatx80 b STATUS_PARAM )
     flag aSign, bSign;
 
     if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( a )<<1 ) )
          || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
+              && (bits64) ( extractFloatx80Frac( b )<<1 ) )
        ) {
         if (    floatx80_is_signaling_nan( a )
              || floatx80_is_signaling_nan( b ) ) {
@@ -5202,7 +4649,7 @@ int floatx80_lt_quiet( floatx80 a, floatx80 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            && (    ( ( (uint16_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            && (    ( ( (bits16) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  != 0 );
     }
     return
@@ -5211,27 +4658,9 @@ int floatx80_lt_quiet( floatx80 a, floatx80 b STATUS_PARAM )
 
 }
 
-/*----------------------------------------------------------------------------
-| Returns 1 if the extended double-precision floating-point values `a' and `b'
-| cannot be compared, and 0 otherwise.  Quiet NaNs do not cause an exception.
-| The comparison is performed according to the IEC/IEEE Standard for Binary
-| Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-int floatx80_unordered_quiet( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    if (    (    ( extractFloatx80Exp( a ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( a )<<1 ) )
-         || (    ( extractFloatx80Exp( b ) == 0x7FFF )
-              && (uint64_t) ( extractFloatx80Frac( b )<<1 ) )
-       ) {
-        if (    floatx80_is_signaling_nan( a )
-             || floatx80_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
-        return 1;
-    }
-    return 0;
-}
+#endif
+
+#ifdef FLOAT128
 
 /*----------------------------------------------------------------------------
 | Returns the result of converting the quadruple-precision floating-point
@@ -5247,7 +4676,7 @@ int32 float128_to_int32( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig0, aSig1;
+    bits64 aSig0, aSig1;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5276,8 +4705,8 @@ int32 float128_to_int32_round_to_zero( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig0, aSig1, savedASig;
-    int32_t z;
+    bits64 aSig0, aSig1, savedASig;
+    int32 z;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5301,7 +4730,7 @@ int32 float128_to_int32_round_to_zero( float128 a STATUS_PARAM )
     if ( ( z < 0 ) ^ aSign ) {
  invalid:
         float_raise( float_flag_invalid STATUS_VAR);
-        return aSign ? (int32_t) 0x80000000 : 0x7FFFFFFF;
+        return aSign ? (sbits32) 0x80000000 : 0x7FFFFFFF;
     }
     if ( ( aSig0<<shiftCount ) != savedASig ) {
         STATUS(float_exception_flags) |= float_flag_inexact;
@@ -5324,7 +4753,7 @@ int64 float128_to_int64( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig0, aSig1;
+    bits64 aSig0, aSig1;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5342,7 +4771,7 @@ int64 float128_to_int64( float128 a STATUS_PARAM )
                ) {
                 return LIT64( 0x7FFFFFFFFFFFFFFF );
             }
-            return (int64_t) LIT64( 0x8000000000000000 );
+            return (sbits64) LIT64( 0x8000000000000000 );
         }
         shortShift128Left( aSig0, aSig1, - shiftCount, &aSig0, &aSig1 );
     }
@@ -5367,7 +4796,7 @@ int64 float128_to_int64_round_to_zero( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, shiftCount;
-    uint64_t aSig0, aSig1;
+    bits64 aSig0, aSig1;
     int64 z;
 
     aSig1 = extractFloat128Frac1( a );
@@ -5389,10 +4818,10 @@ int64 float128_to_int64_round_to_zero( float128 a STATUS_PARAM )
                     return LIT64( 0x7FFFFFFFFFFFFFFF );
                 }
             }
-            return (int64_t) LIT64( 0x8000000000000000 );
+            return (sbits64) LIT64( 0x8000000000000000 );
         }
         z = ( aSig0<<shiftCount ) | ( aSig1>>( ( - shiftCount ) & 63 ) );
-        if ( (uint64_t) ( aSig1<<shiftCount ) ) {
+        if ( (bits64) ( aSig1<<shiftCount ) ) {
             STATUS(float_exception_flags) |= float_flag_inexact;
         }
     }
@@ -5405,7 +4834,7 @@ int64 float128_to_int64_round_to_zero( float128 a STATUS_PARAM )
         }
         z = aSig0>>( - shiftCount );
         if (    aSig1
-             || ( shiftCount && (uint64_t) ( aSig0<<( shiftCount & 63 ) ) ) ) {
+             || ( shiftCount && (bits64) ( aSig0<<( shiftCount & 63 ) ) ) ) {
             STATUS(float_exception_flags) |= float_flag_inexact;
         }
     }
@@ -5425,8 +4854,8 @@ float32 float128_to_float32( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t aSig0, aSig1;
-    uint32_t zSig;
+    bits64 aSig0, aSig1;
+    bits32 zSig;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5434,7 +4863,7 @@ float32 float128_to_float32( float128 a STATUS_PARAM )
     aSign = extractFloat128Sign( a );
     if ( aExp == 0x7FFF ) {
         if ( aSig0 | aSig1 ) {
-            return commonNaNToFloat32( float128ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+            return commonNaNToFloat32( float128ToCommonNaN( a STATUS_VAR ) );
         }
         return packFloat32( aSign, 0xFF, 0 );
     }
@@ -5460,7 +4889,7 @@ float64 float128_to_float64( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t aSig0, aSig1;
+    bits64 aSig0, aSig1;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5468,7 +4897,7 @@ float64 float128_to_float64( float128 a STATUS_PARAM )
     aSign = extractFloat128Sign( a );
     if ( aExp == 0x7FFF ) {
         if ( aSig0 | aSig1 ) {
-            return commonNaNToFloat64( float128ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+            return commonNaNToFloat64( float128ToCommonNaN( a STATUS_VAR ) );
         }
         return packFloat64( aSign, 0x7FF, 0 );
     }
@@ -5482,6 +4911,8 @@ float64 float128_to_float64( float128 a STATUS_PARAM )
 
 }
 
+#ifdef FLOATX80
+
 /*----------------------------------------------------------------------------
 | Returns the result of converting the quadruple-precision floating-point
 | value `a' to the extended double-precision floating-point format.  The
@@ -5493,7 +4924,7 @@ floatx80 float128_to_floatx80( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t aSig0, aSig1;
+    bits64 aSig0, aSig1;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
@@ -5501,7 +4932,7 @@ floatx80 float128_to_floatx80( float128 a STATUS_PARAM )
     aSign = extractFloat128Sign( a );
     if ( aExp == 0x7FFF ) {
         if ( aSig0 | aSig1 ) {
-            return commonNaNToFloatx80( float128ToCommonNaN( a STATUS_VAR ) STATUS_VAR );
+            return commonNaNToFloatx80( float128ToCommonNaN( a STATUS_VAR ) );
         }
         return packFloatx80( aSign, 0x7FFF, LIT64( 0x8000000000000000 ) );
     }
@@ -5517,6 +4948,8 @@ floatx80 float128_to_floatx80( float128 a STATUS_PARAM )
 
 }
 
+#endif
+
 /*----------------------------------------------------------------------------
 | Rounds the quadruple-precision floating-point value `a' to an integer, and
 | returns the result as a quadruple-precision floating-point value.  The
@@ -5528,7 +4961,7 @@ float128 float128_round_to_int( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp;
-    uint64_t lastBitMask, roundBitsMask;
+    bits64 lastBitMask, roundBitsMask;
     int8 roundingMode;
     float128 z;
 
@@ -5553,9 +4986,9 @@ float128 float128_round_to_int( float128 a STATUS_PARAM )
                 if ( ( z.low & roundBitsMask ) == 0 ) z.low &= ~ lastBitMask;
             }
             else {
-                if ( (int64_t) z.low < 0 ) {
+                if ( (sbits64) z.low < 0 ) {
                     ++z.high;
-                    if ( (uint64_t) ( z.low<<1 ) == 0 ) z.high &= ~1;
+                    if ( (bits64) ( z.low<<1 ) == 0 ) z.high &= ~1;
                 }
             }
         }
@@ -5569,7 +5002,7 @@ float128 float128_round_to_int( float128 a STATUS_PARAM )
     }
     else {
         if ( aExp < 0x3FFF ) {
-            if ( ( ( (uint64_t) ( a.high<<1 ) ) | a.low ) == 0 ) return a;
+            if ( ( ( (bits64) ( a.high<<1 ) ) | a.low ) == 0 ) return a;
             STATUS(float_exception_flags) |= float_flag_inexact;
             aSign = extractFloat128Sign( a );
             switch ( STATUS(float_rounding_mode) ) {
@@ -5631,7 +5064,7 @@ float128 float128_round_to_int( float128 a STATUS_PARAM )
 static float128 addFloat128Sigs( float128 a, float128 b, flag zSign STATUS_PARAM)
 {
     int32 aExp, bExp, zExp;
-    uint64_t aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2;
+    bits64 aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2;
     int32 expDiff;
 
     aSig1 = extractFloat128Frac1( a );
@@ -5680,12 +5113,7 @@ static float128 addFloat128Sigs( float128 a, float128 b, flag zSign STATUS_PARAM
         }
         add128( aSig0, aSig1, bSig0, bSig1, &zSig0, &zSig1 );
         if ( aExp == 0 ) {
-            if (STATUS(flush_to_zero)) {
-                if (zSig0 | zSig1) {
-                    float_raise(float_flag_output_denormal STATUS_VAR);
-                }
-                return packFloat128(zSign, 0, 0, 0);
-            }
+            if ( STATUS(flush_to_zero) ) return packFloat128( zSign, 0, 0, 0 );
             return packFloat128( zSign, 0, zSig0, zSig1 );
         }
         zSig2 = 0;
@@ -5717,7 +5145,7 @@ static float128 addFloat128Sigs( float128 a, float128 b, flag zSign STATUS_PARAM
 static float128 subFloat128Sigs( float128 a, float128 b, flag zSign STATUS_PARAM)
 {
     int32 aExp, bExp, zExp;
-    uint64_t aSig0, aSig1, bSig0, bSig1, zSig0, zSig1;
+    bits64 aSig0, aSig1, bSig0, bSig1, zSig0, zSig1;
     int32 expDiff;
     float128 z;
 
@@ -5842,7 +5270,7 @@ float128 float128_mul( float128 a, float128 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
     int32 aExp, bExp, zExp;
-    uint64_t aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2, zSig3;
+    bits64 aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2, zSig3;
     float128 z;
 
     aSig1 = extractFloat128Frac1( a );
@@ -5906,8 +5334,8 @@ float128 float128_div( float128 a, float128 b STATUS_PARAM )
 {
     flag aSign, bSign, zSign;
     int32 aExp, bExp, zExp;
-    uint64_t aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2;
-    uint64_t rem0, rem1, rem2, rem3, term0, term1, term2, term3;
+    bits64 aSig0, aSig1, bSig0, bSig1, zSig0, zSig1, zSig2;
+    bits64 rem0, rem1, rem2, rem3, term0, term1, term2, term3;
     float128 z;
 
     aSig1 = extractFloat128Frac1( a );
@@ -5961,7 +5389,7 @@ float128 float128_div( float128 a, float128 b STATUS_PARAM )
     zSig0 = estimateDiv128To64( aSig0, aSig1, bSig0 );
     mul128By64To192( bSig0, bSig1, zSig0, &term0, &term1, &term2 );
     sub192( aSig0, aSig1, 0, term0, term1, term2, &rem0, &rem1, &rem2 );
-    while ( (int64_t) rem0 < 0 ) {
+    while ( (sbits64) rem0 < 0 ) {
         --zSig0;
         add192( rem0, rem1, rem2, 0, bSig0, bSig1, &rem0, &rem1, &rem2 );
     }
@@ -5969,7 +5397,7 @@ float128 float128_div( float128 a, float128 b STATUS_PARAM )
     if ( ( zSig1 & 0x3FFF ) <= 4 ) {
         mul128By64To192( bSig0, bSig1, zSig1, &term1, &term2, &term3 );
         sub192( rem1, rem2, 0, term1, term2, term3, &rem1, &rem2, &rem3 );
-        while ( (int64_t) rem1 < 0 ) {
+        while ( (sbits64) rem1 < 0 ) {
             --zSig1;
             add192( rem1, rem2, rem3, 0, bSig0, bSig1, &rem1, &rem2, &rem3 );
         }
@@ -5990,9 +5418,9 @@ float128 float128_rem( float128 a, float128 b STATUS_PARAM )
 {
     flag aSign, zSign;
     int32 aExp, bExp, expDiff;
-    uint64_t aSig0, aSig1, bSig0, bSig1, q, term0, term1, term2;
-    uint64_t allZero, alternateASig0, alternateASig1, sigMean1;
-    int64_t sigMean0;
+    bits64 aSig0, aSig1, bSig0, bSig1, q, term0, term1, term2;
+    bits64 allZero, alternateASig0, alternateASig1, sigMean1;
+    sbits64 sigMean0;
     float128 z;
 
     aSig1 = extractFloat128Frac1( a );
@@ -6074,15 +5502,15 @@ float128 float128_rem( float128 a, float128 b STATUS_PARAM )
         alternateASig1 = aSig1;
         ++q;
         sub128( aSig0, aSig1, bSig0, bSig1, &aSig0, &aSig1 );
-    } while ( 0 <= (int64_t) aSig0 );
+    } while ( 0 <= (sbits64) aSig0 );
     add128(
-        aSig0, aSig1, alternateASig0, alternateASig1, (uint64_t *)&sigMean0, &sigMean1 );
+        aSig0, aSig1, alternateASig0, alternateASig1, (bits64 *)&sigMean0, &sigMean1 );
     if (    ( sigMean0 < 0 )
          || ( ( ( sigMean0 | sigMean1 ) == 0 ) && ( q & 1 ) ) ) {
         aSig0 = alternateASig0;
         aSig1 = alternateASig1;
     }
-    zSign = ( (int64_t) aSig0 < 0 );
+    zSign = ( (sbits64) aSig0 < 0 );
     if ( zSign ) sub128( 0, 0, aSig0, aSig1, &aSig0, &aSig1 );
     return
         normalizeRoundAndPackFloat128( aSign ^ zSign, bExp - 4, aSig0, aSig1 STATUS_VAR );
@@ -6099,8 +5527,8 @@ float128 float128_sqrt( float128 a STATUS_PARAM )
 {
     flag aSign;
     int32 aExp, zExp;
-    uint64_t aSig0, aSig1, zSig0, zSig1, zSig2, doubleZSig0;
-    uint64_t rem0, rem1, rem2, rem3, term0, term1, term2, term3;
+    bits64 aSig0, aSig1, zSig0, zSig1, zSig2, doubleZSig0;
+    bits64 rem0, rem1, rem2, rem3, term0, term1, term2, term3;
     float128 z;
 
     aSig1 = extractFloat128Frac1( a );
@@ -6132,7 +5560,7 @@ float128 float128_sqrt( float128 a STATUS_PARAM )
     doubleZSig0 = zSig0<<1;
     mul64To128( zSig0, zSig0, &term0, &term1 );
     sub128( aSig0, aSig1, term0, term1, &rem0, &rem1 );
-    while ( (int64_t) rem0 < 0 ) {
+    while ( (sbits64) rem0 < 0 ) {
         --zSig0;
         doubleZSig0 -= 2;
         add128( rem0, rem1, zSig0>>63, doubleZSig0 | 1, &rem0, &rem1 );
@@ -6144,7 +5572,7 @@ float128 float128_sqrt( float128 a STATUS_PARAM )
         sub128( rem1, 0, term1, term2, &rem1, &rem2 );
         mul64To128( zSig1, zSig1, &term2, &term3 );
         sub192( rem1, rem2, 0, 0, term2, term3, &rem1, &rem2, &rem3 );
-        while ( (int64_t) rem1 < 0 ) {
+        while ( (sbits64) rem1 < 0 ) {
             --zSig1;
             shortShift128Left( 0, zSig1, 1, &term2, &term3 );
             term3 |= 1;
@@ -6160,8 +5588,7 @@ float128 float128_sqrt( float128 a STATUS_PARAM )
 
 /*----------------------------------------------------------------------------
 | Returns 1 if the quadruple-precision floating-point value `a' is equal to
-| the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  Otherwise, the comparison is performed
+| the corresponding value `b', and 0 otherwise.  The comparison is performed
 | according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
@@ -6173,23 +5600,26 @@ int float128_eq( float128 a, float128 b STATUS_PARAM )
          || (    ( extractFloat128Exp( b ) == 0x7FFF )
               && ( extractFloat128Frac0( b ) | extractFloat128Frac1( b ) ) )
        ) {
-        float_raise( float_flag_invalid STATUS_VAR);
+        if (    float128_is_signaling_nan( a )
+             || float128_is_signaling_nan( b ) ) {
+            float_raise( float_flag_invalid STATUS_VAR);
+        }
         return 0;
     }
     return
            ( a.low == b.low )
         && (    ( a.high == b.high )
              || (    ( a.low == 0 )
-                  && ( (uint64_t) ( ( a.high | b.high )<<1 ) == 0 ) )
+                  && ( (bits64) ( ( a.high | b.high )<<1 ) == 0 ) )
            );
 
 }
 
 /*----------------------------------------------------------------------------
 | Returns 1 if the quadruple-precision floating-point value `a' is less than
-| or equal to the corresponding value `b', and 0 otherwise.  The invalid
-| exception is raised if either operand is a NaN.  The comparison is performed
-| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+| or equal to the corresponding value `b', and 0 otherwise.  The comparison
+| is performed according to the IEC/IEEE Standard for Binary Floating-Point
+| Arithmetic.
 *----------------------------------------------------------------------------*/
 
 int float128_le( float128 a, float128 b STATUS_PARAM )
@@ -6209,7 +5639,7 @@ int float128_le( float128 a, float128 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            || (    ( ( (uint64_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            || (    ( ( (bits64) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  == 0 );
     }
     return
@@ -6220,9 +5650,8 @@ int float128_le( float128 a, float128 b STATUS_PARAM )
 
 /*----------------------------------------------------------------------------
 | Returns 1 if the quadruple-precision floating-point value `a' is less than
-| the corresponding value `b', and 0 otherwise.  The invalid exception is
-| raised if either operand is a NaN.  The comparison is performed according
-| to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
+| the corresponding value `b', and 0 otherwise.  The comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
 int float128_lt( float128 a, float128 b STATUS_PARAM )
@@ -6242,7 +5671,7 @@ int float128_lt( float128 a, float128 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            && (    ( ( (uint64_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            && (    ( ( (bits64) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  != 0 );
     }
     return
@@ -6252,51 +5681,28 @@ int float128_lt( float128 a, float128 b STATUS_PARAM )
 }
 
 /*----------------------------------------------------------------------------
-| Returns 1 if the quadruple-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  The invalid exception is raised if either
-| operand is a NaN. The comparison is performed according to the IEC/IEEE
-| Standard for Binary Floating-Point Arithmetic.
+| Returns 1 if the quadruple-precision floating-point value `a' is equal to
+| the corresponding value `b', and 0 otherwise.  The invalid exception is
+| raised if either operand is a NaN.  Otherwise, the comparison is performed
+| according to the IEC/IEEE Standard for Binary Floating-Point Arithmetic.
 *----------------------------------------------------------------------------*/
 
-int float128_unordered( float128 a, float128 b STATUS_PARAM )
+int float128_eq_signaling( float128 a, float128 b STATUS_PARAM )
 {
+
     if (    (    ( extractFloat128Exp( a ) == 0x7FFF )
               && ( extractFloat128Frac0( a ) | extractFloat128Frac1( a ) ) )
          || (    ( extractFloat128Exp( b ) == 0x7FFF )
               && ( extractFloat128Frac0( b ) | extractFloat128Frac1( b ) ) )
        ) {
         float_raise( float_flag_invalid STATUS_VAR);
-        return 1;
-    }
-    return 0;
-}
-
-/*----------------------------------------------------------------------------
-| Returns 1 if the quadruple-precision floating-point value `a' is equal to
-| the corresponding value `b', and 0 otherwise.  Quiet NaNs do not cause an
-| exception.  The comparison is performed according to the IEC/IEEE Standard
-| for Binary Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float128_eq_quiet( float128 a, float128 b STATUS_PARAM )
-{
-
-    if (    (    ( extractFloat128Exp( a ) == 0x7FFF )
-              && ( extractFloat128Frac0( a ) | extractFloat128Frac1( a ) ) )
-         || (    ( extractFloat128Exp( b ) == 0x7FFF )
-              && ( extractFloat128Frac0( b ) | extractFloat128Frac1( b ) ) )
-       ) {
-        if (    float128_is_signaling_nan( a )
-             || float128_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
         return 0;
     }
     return
            ( a.low == b.low )
         && (    ( a.high == b.high )
              || (    ( a.low == 0 )
-                  && ( (uint64_t) ( ( a.high | b.high )<<1 ) == 0 ) )
+                  && ( (bits64) ( ( a.high | b.high )<<1 ) == 0 ) )
            );
 
 }
@@ -6328,7 +5734,7 @@ int float128_le_quiet( float128 a, float128 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            || (    ( ( (uint64_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            || (    ( ( (bits64) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  == 0 );
     }
     return
@@ -6364,7 +5770,7 @@ int float128_lt_quiet( float128 a, float128 b STATUS_PARAM )
     if ( aSign != bSign ) {
         return
                aSign
-            && (    ( ( (uint64_t) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
+            && (    ( ( (bits64) ( ( a.high | b.high )<<1 ) ) | a.low | b.low )
                  != 0 );
     }
     return
@@ -6373,44 +5779,23 @@ int float128_lt_quiet( float128 a, float128 b STATUS_PARAM )
 
 }
 
-/*----------------------------------------------------------------------------
-| Returns 1 if the quadruple-precision floating-point values `a' and `b' cannot
-| be compared, and 0 otherwise.  Quiet NaNs do not cause an exception.  The
-| comparison is performed according to the IEC/IEEE Standard for Binary
-| Floating-Point Arithmetic.
-*----------------------------------------------------------------------------*/
-
-int float128_unordered_quiet( float128 a, float128 b STATUS_PARAM )
-{
-    if (    (    ( extractFloat128Exp( a ) == 0x7FFF )
-              && ( extractFloat128Frac0( a ) | extractFloat128Frac1( a ) ) )
-         || (    ( extractFloat128Exp( b ) == 0x7FFF )
-              && ( extractFloat128Frac0( b ) | extractFloat128Frac1( b ) ) )
-       ) {
-        if (    float128_is_signaling_nan( a )
-             || float128_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
-        return 1;
-    }
-    return 0;
-}
+#endif
 
 /* misc functions */
-float32 uint32_to_float32( uint32 a STATUS_PARAM )
+float32 uint32_to_float32( unsigned int a STATUS_PARAM )
 {
     return int64_to_float32(a STATUS_VAR);
 }
 
-float64 uint32_to_float64( uint32 a STATUS_PARAM )
+float64 uint32_to_float64( unsigned int a STATUS_PARAM )
 {
     return int64_to_float64(a STATUS_VAR);
 }
 
-uint32 float32_to_uint32( float32 a STATUS_PARAM )
+unsigned int float32_to_uint32( float32 a STATUS_PARAM )
 {
     int64_t v;
-    uint32 res;
+    unsigned int res;
 
     v = float32_to_int64(a STATUS_VAR);
     if (v < 0) {
@@ -6425,10 +5810,10 @@ uint32 float32_to_uint32( float32 a STATUS_PARAM )
     return res;
 }
 
-uint32 float32_to_uint32_round_to_zero( float32 a STATUS_PARAM )
+unsigned int float32_to_uint32_round_to_zero( float32 a STATUS_PARAM )
 {
     int64_t v;
-    uint32 res;
+    unsigned int res;
 
     v = float32_to_int64_round_to_zero(a STATUS_VAR);
     if (v < 0) {
@@ -6443,10 +5828,10 @@ uint32 float32_to_uint32_round_to_zero( float32 a STATUS_PARAM )
     return res;
 }
 
-uint_fast16_t float32_to_uint16_round_to_zero(float32 a STATUS_PARAM)
+unsigned int float32_to_uint16_round_to_zero( float32 a STATUS_PARAM )
 {
     int64_t v;
-    uint_fast16_t res;
+    unsigned int res;
 
     v = float32_to_int64_round_to_zero(a STATUS_VAR);
     if (v < 0) {
@@ -6461,10 +5846,10 @@ uint_fast16_t float32_to_uint16_round_to_zero(float32 a STATUS_PARAM)
     return res;
 }
 
-uint32 float64_to_uint32( float64 a STATUS_PARAM )
+unsigned int float64_to_uint32( float64 a STATUS_PARAM )
 {
     int64_t v;
-    uint32 res;
+    unsigned int res;
 
     v = float64_to_int64(a STATUS_VAR);
     if (v < 0) {
@@ -6479,10 +5864,10 @@ uint32 float64_to_uint32( float64 a STATUS_PARAM )
     return res;
 }
 
-uint32 float64_to_uint32_round_to_zero( float64 a STATUS_PARAM )
+unsigned int float64_to_uint32_round_to_zero( float64 a STATUS_PARAM )
 {
     int64_t v;
-    uint32 res;
+    unsigned int res;
 
     v = float64_to_int64_round_to_zero(a STATUS_VAR);
     if (v < 0) {
@@ -6497,10 +5882,10 @@ uint32 float64_to_uint32_round_to_zero( float64 a STATUS_PARAM )
     return res;
 }
 
-uint_fast16_t float64_to_uint16_round_to_zero(float64 a STATUS_PARAM)
+unsigned int float64_to_uint16_round_to_zero( float64 a STATUS_PARAM )
 {
     int64_t v;
-    uint_fast16_t res;
+    unsigned int res;
 
     v = float64_to_int64_round_to_zero(a STATUS_VAR);
     if (v < 0) {
@@ -6543,7 +5928,7 @@ INLINE int float ## s ## _compare_internal( float ## s a, float ## s b,      \
                                       int is_quiet STATUS_PARAM )            \
 {                                                                            \
     flag aSign, bSign;                                                       \
-    uint ## s ## _t av, bv;                                                  \
+    bits ## s av, bv;                                                        \
     a = float ## s ## _squash_input_denormal(a STATUS_VAR);                  \
     b = float ## s ## _squash_input_denormal(b STATUS_VAR);                  \
                                                                              \
@@ -6563,7 +5948,7 @@ INLINE int float ## s ## _compare_internal( float ## s a, float ## s b,      \
     av = float ## s ## _val(a);                                              \
     bv = float ## s ## _val(b);                                              \
     if ( aSign != bSign ) {                                                  \
-        if ( (uint ## s ## _t) ( ( av | bv )<<1 ) == 0 ) {                   \
+        if ( (bits ## s) ( ( av | bv )<<1 ) == 0 ) {                         \
             /* zero case */                                                  \
             return float_relation_equal;                                     \
         } else {                                                             \
@@ -6590,52 +5975,6 @@ int float ## s ## _compare_quiet( float ## s a, float ## s b STATUS_PARAM )  \
 
 COMPARE(32, 0xff)
 COMPARE(64, 0x7ff)
-
-INLINE int floatx80_compare_internal( floatx80 a, floatx80 b,
-                                      int is_quiet STATUS_PARAM )
-{
-    flag aSign, bSign;
-
-    if (( ( extractFloatx80Exp( a ) == 0x7fff ) &&
-          ( extractFloatx80Frac( a )<<1 ) ) ||
-        ( ( extractFloatx80Exp( b ) == 0x7fff ) &&
-          ( extractFloatx80Frac( b )<<1 ) )) {
-        if (!is_quiet ||
-            floatx80_is_signaling_nan( a ) ||
-            floatx80_is_signaling_nan( b ) ) {
-            float_raise( float_flag_invalid STATUS_VAR);
-        }
-        return float_relation_unordered;
-    }
-    aSign = extractFloatx80Sign( a );
-    bSign = extractFloatx80Sign( b );
-    if ( aSign != bSign ) {
-
-        if ( ( ( (uint16_t) ( ( a.high | b.high ) << 1 ) ) == 0) &&
-             ( ( a.low | b.low ) == 0 ) ) {
-            /* zero case */
-            return float_relation_equal;
-        } else {
-            return 1 - (2 * aSign);
-        }
-    } else {
-        if (a.low == b.low && a.high == b.high) {
-            return float_relation_equal;
-        } else {
-            return 1 - 2 * (aSign ^ ( lt128( a.high, a.low, b.high, b.low ) ));
-        }
-    }
-}
-
-int floatx80_compare( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    return floatx80_compare_internal(a, b, 0 STATUS_VAR);
-}
-
-int floatx80_compare_quiet( floatx80 a, floatx80 b STATUS_PARAM )
-{
-    return floatx80_compare_internal(a, b, 1 STATUS_VAR);
-}
 
 INLINE int float128_compare_internal( float128 a, float128 b,
                                       int is_quiet STATUS_PARAM )
@@ -6681,61 +6020,12 @@ int float128_compare_quiet( float128 a, float128 b STATUS_PARAM )
     return float128_compare_internal(a, b, 1 STATUS_VAR);
 }
 
-/* min() and max() functions. These can't be implemented as
- * 'compare and pick one input' because that would mishandle
- * NaNs and +0 vs -0.
- */
-#define MINMAX(s, nan_exp)                                              \
-INLINE float ## s float ## s ## _minmax(float ## s a, float ## s b,     \
-                                        int ismin STATUS_PARAM )        \
-{                                                                       \
-    flag aSign, bSign;                                                  \
-    uint ## s ## _t av, bv;                                             \
-    a = float ## s ## _squash_input_denormal(a STATUS_VAR);             \
-    b = float ## s ## _squash_input_denormal(b STATUS_VAR);             \
-    if (float ## s ## _is_any_nan(a) ||                                 \
-        float ## s ## _is_any_nan(b)) {                                 \
-        return propagateFloat ## s ## NaN(a, b STATUS_VAR);             \
-    }                                                                   \
-    aSign = extractFloat ## s ## Sign(a);                               \
-    bSign = extractFloat ## s ## Sign(b);                               \
-    av = float ## s ## _val(a);                                         \
-    bv = float ## s ## _val(b);                                         \
-    if (aSign != bSign) {                                               \
-        if (ismin) {                                                    \
-            return aSign ? a : b;                                       \
-        } else {                                                        \
-            return aSign ? b : a;                                       \
-        }                                                               \
-    } else {                                                            \
-        if (ismin) {                                                    \
-            return (aSign ^ (av < bv)) ? a : b;                         \
-        } else {                                                        \
-            return (aSign ^ (av < bv)) ? b : a;                         \
-        }                                                               \
-    }                                                                   \
-}                                                                       \
-                                                                        \
-float ## s float ## s ## _min(float ## s a, float ## s b STATUS_PARAM)  \
-{                                                                       \
-    return float ## s ## _minmax(a, b, 1 STATUS_VAR);                   \
-}                                                                       \
-                                                                        \
-float ## s float ## s ## _max(float ## s a, float ## s b STATUS_PARAM)  \
-{                                                                       \
-    return float ## s ## _minmax(a, b, 0 STATUS_VAR);                   \
-}
-
-MINMAX(32, 0xff)
-MINMAX(64, 0x7ff)
-
-
 /* Multiply A by 2 raised to the power N.  */
 float32 float32_scalbn( float32 a, int n STATUS_PARAM )
 {
     flag aSign;
-    int16_t aExp;
-    uint32_t aSig;
+    int16 aExp;
+    bits32 aSig;
 
     a = float32_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat32Frac( a );
@@ -6743,21 +6033,12 @@ float32 float32_scalbn( float32 a, int n STATUS_PARAM )
     aSign = extractFloat32Sign( a );
 
     if ( aExp == 0xFF ) {
-        if ( aSig ) {
-            return propagateFloat32NaN( a, a STATUS_VAR );
-        }
         return a;
     }
     if ( aExp != 0 )
         aSig |= 0x00800000;
     else if ( aSig == 0 )
         return a;
-
-    if (n > 0x200) {
-        n = 0x200;
-    } else if (n < -0x200) {
-        n = -0x200;
-    }
 
     aExp += n - 1;
     aSig <<= 7;
@@ -6767,8 +6048,8 @@ float32 float32_scalbn( float32 a, int n STATUS_PARAM )
 float64 float64_scalbn( float64 a, int n STATUS_PARAM )
 {
     flag aSign;
-    int16_t aExp;
-    uint64_t aSig;
+    int16 aExp;
+    bits64 aSig;
 
     a = float64_squash_input_denormal(a STATUS_VAR);
     aSig = extractFloat64Frac( a );
@@ -6776,9 +6057,6 @@ float64 float64_scalbn( float64 a, int n STATUS_PARAM )
     aSign = extractFloat64Sign( a );
 
     if ( aExp == 0x7FF ) {
-        if ( aSig ) {
-            return propagateFloat64NaN( a, a STATUS_VAR );
-        }
         return a;
     }
     if ( aExp != 0 )
@@ -6786,62 +6064,46 @@ float64 float64_scalbn( float64 a, int n STATUS_PARAM )
     else if ( aSig == 0 )
         return a;
 
-    if (n > 0x1000) {
-        n = 0x1000;
-    } else if (n < -0x1000) {
-        n = -0x1000;
-    }
-
     aExp += n - 1;
     aSig <<= 10;
     return normalizeRoundAndPackFloat64( aSign, aExp, aSig STATUS_VAR );
 }
 
+#ifdef FLOATX80
 floatx80 floatx80_scalbn( floatx80 a, int n STATUS_PARAM )
 {
     flag aSign;
-    int32_t aExp;
-    uint64_t aSig;
+    int16 aExp;
+    bits64 aSig;
 
     aSig = extractFloatx80Frac( a );
     aExp = extractFloatx80Exp( a );
     aSign = extractFloatx80Sign( a );
 
-    if ( aExp == 0x7FFF ) {
-        if ( aSig<<1 ) {
-            return propagateFloatx80NaN( a, a STATUS_VAR );
-        }
+    if ( aExp == 0x7FF ) {
         return a;
     }
-
     if (aExp == 0 && aSig == 0)
         return a;
-
-    if (n > 0x10000) {
-        n = 0x10000;
-    } else if (n < -0x10000) {
-        n = -0x10000;
-    }
 
     aExp += n;
     return normalizeRoundAndPackFloatx80( STATUS(floatx80_rounding_precision),
                                           aSign, aExp, aSig, 0 STATUS_VAR );
 }
+#endif
 
+#ifdef FLOAT128
 float128 float128_scalbn( float128 a, int n STATUS_PARAM )
 {
     flag aSign;
-    int32_t aExp;
-    uint64_t aSig0, aSig1;
+    int32 aExp;
+    bits64 aSig0, aSig1;
 
     aSig1 = extractFloat128Frac1( a );
     aSig0 = extractFloat128Frac0( a );
     aExp = extractFloat128Exp( a );
     aSign = extractFloat128Sign( a );
     if ( aExp == 0x7FFF ) {
-        if ( aSig0 | aSig1 ) {
-            return propagateFloat128NaN( a, a STATUS_VAR );
-        }
         return a;
     }
     if ( aExp != 0 )
@@ -6849,14 +6111,9 @@ float128 float128_scalbn( float128 a, int n STATUS_PARAM )
     else if ( aSig0 == 0 && aSig1 == 0 )
         return a;
 
-    if (n > 0x10000) {
-        n = 0x10000;
-    } else if (n < -0x10000) {
-        n = -0x10000;
-    }
-
     aExp += n - 1;
     return normalizeRoundAndPackFloat128( aSign, aExp, aSig0, aSig1
                                           STATUS_VAR );
 
 }
+#endif

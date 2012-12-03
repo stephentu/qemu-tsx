@@ -30,14 +30,10 @@
 
 PCIDevice *piix4_dev;
 
-typedef struct PIIX4State {
-    PCIDevice dev;
-} PIIX4State;
-
 static void piix4_reset(void *opaque)
 {
-    PIIX4State *d = opaque;
-    uint8_t *pci_conf = d->dev.config;
+    PCIDevice *d = opaque;
+    uint8_t *pci_conf = d->config;
 
     pci_conf[0x04] = 0x07; // master, memory and I/O
     pci_conf[0x05] = 0x00;
@@ -72,61 +68,60 @@ static void piix4_reset(void *opaque)
     pci_conf[0xae] = 0x00;
 }
 
-static const VMStateDescription vmstate_piix4 = {
-    .name = "PIIX4",
-    .version_id = 2,
-    .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
-    .fields      = (VMStateField[]) {
-        VMSTATE_PCI_DEVICE(dev, PIIX4State),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-static int piix4_initfn(PCIDevice *dev)
+static void piix_save(QEMUFile* f, void *opaque)
 {
-    PIIX4State *d = DO_UPCAST(PIIX4State, dev, dev);
+    PCIDevice *d = opaque;
+    pci_device_save(d, f);
+}
 
-    isa_bus_new(&d->dev.qdev, pci_address_space_io(dev));
-    piix4_dev = &d->dev;
+static int piix_load(QEMUFile* f, void *opaque, int version_id)
+{
+    PCIDevice *d = opaque;
+    if (version_id != 2)
+        return -EINVAL;
+    return pci_device_load(d, f);
+}
+
+static int piix4_initfn(PCIDevice *d)
+{
+    uint8_t *pci_conf;
+
+    isa_bus_new(&d->qdev);
+    register_savevm(&d->qdev, "PIIX4", 0, 2, piix_save, piix_load, d);
+
+    pci_conf = d->config;
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_82371AB_0); // 82371AB/EB/MB PIIX4 PCI-to-ISA bridge
+    pci_config_set_class(pci_conf, PCI_CLASS_BRIDGE_ISA);
+
+    piix4_dev = d;
     qemu_register_reset(piix4_reset, d);
     return 0;
 }
 
-int piix4_init(PCIBus *bus, ISABus **isa_bus, int devfn)
+int piix4_init(PCIBus *bus, int devfn)
 {
     PCIDevice *d;
 
     d = pci_create_simple_multifunction(bus, devfn, true, "PIIX4");
-    *isa_bus = DO_UPCAST(ISABus, qbus, qdev_get_child_bus(&d->qdev, "isa.0"));
     return d->devfn;
 }
 
-static void piix4_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->no_hotplug = 1;
-    k->init = piix4_initfn;
-    k->vendor_id = PCI_VENDOR_ID_INTEL;
-    k->device_id = PCI_DEVICE_ID_INTEL_82371AB_0;
-    k->class_id = PCI_CLASS_BRIDGE_ISA;
-    dc->desc = "ISA bridge";
-    dc->no_user = 1;
-    dc->vmsd = &vmstate_piix4;
-}
-
-static TypeInfo piix4_info = {
-    .name          = "PIIX4",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PIIX4State),
-    .class_init    = piix4_class_init,
+static PCIDeviceInfo piix4_info[] = {
+    {
+        .qdev.name    = "PIIX4",
+        .qdev.desc    = "ISA bridge",
+        .qdev.size    = sizeof(PCIDevice),
+        .qdev.no_user = 1,
+        .no_hotplug   = 1,
+        .init         = piix4_initfn,
+    },{
+        /* end of list */
+    }
 };
 
-static void piix4_register_types(void)
+static void piix4_register(void)
 {
-    type_register_static(&piix4_info);
+    pci_qdev_register_many(piix4_info);
 }
-
-type_init(piix4_register_types)
+device_init(piix4_register);

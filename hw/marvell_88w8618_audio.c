@@ -4,10 +4,7 @@
  *
  * Copyright (c) 2008 Jan Kiszka
  *
- * This code is licensed under the GNU GPL v2.
- *
- * Contributions after 2012-01-13 are licensed under the terms of the
- * GNU GPL, version 2 or (at your option) any later version.
+ * This code is licenced under the GNU GPL v2.
  */
 #include "sysbus.h"
 #include "hw.h"
@@ -39,7 +36,6 @@
 
 typedef struct mv88w8618_audio_state {
     SysBusDevice busdev;
-    MemoryRegion iomem;
     qemu_irq irq;
     uint32_t playback_mode;
     uint32_t status;
@@ -50,7 +46,7 @@ typedef struct mv88w8618_audio_state {
     uint32_t play_pos;
     uint32_t last_free;
     uint32_t clock_div;
-    void *wm;
+    DeviceState *wm;
 } mv88w8618_audio_state;
 
 static void mv88w8618_audio_callback(void *opaque, int free_out, int free_in)
@@ -138,8 +134,7 @@ static void mv88w8618_audio_clock_update(mv88w8618_audio_state *s)
     wm8750_set_bclk_in(s->wm, rate);
 }
 
-static uint64_t mv88w8618_audio_read(void *opaque, hwaddr offset,
-                                    unsigned size)
+static uint32_t mv88w8618_audio_read(void *opaque, target_phys_addr_t offset)
 {
     mv88w8618_audio_state *s = opaque;
 
@@ -164,8 +159,8 @@ static uint64_t mv88w8618_audio_read(void *opaque, hwaddr offset,
     }
 }
 
-static void mv88w8618_audio_write(void *opaque, hwaddr offset,
-                                  uint64_t value, unsigned size)
+static void mv88w8618_audio_write(void *opaque, target_phys_addr_t offset,
+                                 uint32_t value)
 {
     mv88w8618_audio_state *s = opaque;
 
@@ -232,23 +227,31 @@ static void mv88w8618_audio_reset(DeviceState *d)
     s->phys_buf = 0;
 }
 
-static const MemoryRegionOps mv88w8618_audio_ops = {
-    .read = mv88w8618_audio_read,
-    .write = mv88w8618_audio_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+static CPUReadMemoryFunc * const mv88w8618_audio_readfn[] = {
+    mv88w8618_audio_read,
+    mv88w8618_audio_read,
+    mv88w8618_audio_read
+};
+
+static CPUWriteMemoryFunc * const mv88w8618_audio_writefn[] = {
+    mv88w8618_audio_write,
+    mv88w8618_audio_write,
+    mv88w8618_audio_write
 };
 
 static int mv88w8618_audio_init(SysBusDevice *dev)
 {
     mv88w8618_audio_state *s = FROM_SYSBUS(mv88w8618_audio_state, dev);
+    int iomemtype;
 
     sysbus_init_irq(dev, &s->irq);
 
     wm8750_data_req_set(s->wm, mv88w8618_audio_callback, s);
 
-    memory_region_init_io(&s->iomem, &mv88w8618_audio_ops, s,
-                          "audio", MP_AUDIO_SIZE);
-    sysbus_init_mmio(dev, &s->iomem);
+    iomemtype = cpu_register_io_memory(mv88w8618_audio_readfn,
+                                       mv88w8618_audio_writefn, s,
+                                       DEVICE_NATIVE_ENDIAN);
+    sysbus_init_mmio(dev, MP_AUDIO_SIZE, iomemtype);
 
     return 0;
 }
@@ -272,32 +275,25 @@ static const VMStateDescription mv88w8618_audio_vmsd = {
     }
 };
 
-static Property mv88w8618_audio_properties[] = {
-    DEFINE_PROP_PTR("wm8750", mv88w8618_audio_state, wm),
-    {/* end of list */},
+static SysBusDeviceInfo mv88w8618_audio_info = {
+    .init = mv88w8618_audio_init,
+    .qdev.name  = "mv88w8618_audio",
+    .qdev.size  = sizeof(mv88w8618_audio_state),
+    .qdev.reset = mv88w8618_audio_reset,
+    .qdev.vmsd  = &mv88w8618_audio_vmsd,
+    .qdev.props = (Property[]) {
+        {
+            .name   = "wm8750",
+            .info   = &qdev_prop_ptr,
+            .offset = offsetof(mv88w8618_audio_state, wm),
+        },
+        {/* end of list */}
+    }
 };
 
-static void mv88w8618_audio_class_init(ObjectClass *klass, void *data)
+static void mv88w8618_register_devices(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = mv88w8618_audio_init;
-    dc->reset = mv88w8618_audio_reset;
-    dc->vmsd = &mv88w8618_audio_vmsd;
-    dc->props = mv88w8618_audio_properties;
+    sysbus_register_withprop(&mv88w8618_audio_info);
 }
 
-static TypeInfo mv88w8618_audio_info = {
-    .name          = "mv88w8618_audio",
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(mv88w8618_audio_state),
-    .class_init    = mv88w8618_audio_class_init,
-};
-
-static void mv88w8618_register_types(void)
-{
-    type_register_static(&mv88w8618_audio_info);
-}
-
-type_init(mv88w8618_register_types)
+device_init(mv88w8618_register_devices)

@@ -37,9 +37,9 @@ typedef struct VncDisplaySASL VncDisplaySASL;
 struct VncStateSASL {
     sasl_conn_t *conn;
     /* If we want to negotiate an SSF layer with client */
-    bool wantSSF;
+    int wantSSF :1;
     /* If we are now running the SSF layer */
-    bool runSSF;
+    int runSSF :1;
     /*
      * If this is non-zero, then wait for that many bytes
      * to be written plain, before switching to SSF encoding

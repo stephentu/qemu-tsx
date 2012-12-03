@@ -21,35 +21,21 @@
 #include "qemu-error.h"
 #include <hw/ide/internal.h>
 #include "blockdev.h"
-#include "hw/block-common.h"
 #include "sysemu.h"
 
 /* --------------------------------- */
 
 static char *idebus_get_fw_dev_path(DeviceState *dev);
 
-static Property ide_props[] = {
-    DEFINE_PROP_UINT32("unit", IDEDevice, unit, -1),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void ide_bus_class_init(ObjectClass *klass, void *data)
-{
-    BusClass *k = BUS_CLASS(klass);
-
-    k->get_fw_dev_path = idebus_get_fw_dev_path;
-}
-
-static const TypeInfo ide_bus_info = {
-    .name = TYPE_IDE_BUS,
-    .parent = TYPE_BUS,
-    .instance_size = sizeof(IDEBus),
-    .class_init = ide_bus_class_init,
+static struct BusInfo ide_bus_info = {
+    .name  = "IDE",
+    .size  = sizeof(IDEBus),
+    .get_fw_dev_path = idebus_get_fw_dev_path,
 };
 
 void ide_bus_new(IDEBus *idebus, DeviceState *dev, int bus_id)
 {
-    qbus_create_inplace(&idebus->qbus, TYPE_IDE_BUS, dev, NULL);
+    qbus_create_inplace(&idebus->qbus, &ide_bus_info, dev, NULL);
     idebus->bus_id = bus_id;
 }
 
@@ -60,13 +46,13 @@ static char *idebus_get_fw_dev_path(DeviceState *dev)
     snprintf(path, sizeof(path), "%s@%d", qdev_fw_name(dev),
              ((IDEBus*)dev->parent_bus)->bus_id);
 
-    return g_strdup(path);
+    return strdup(path);
 }
 
-static int ide_qdev_init(DeviceState *qdev)
+static int ide_qdev_init(DeviceState *qdev, DeviceInfo *base)
 {
-    IDEDevice *dev = IDE_DEVICE(qdev);
-    IDEDeviceClass *dc = IDE_DEVICE_GET_CLASS(dev);
+    IDEDevice *dev = DO_UPCAST(IDEDevice, qdev, qdev);
+    IDEDeviceInfo *info = DO_UPCAST(IDEDeviceInfo, qdev, base);
     IDEBus *bus = DO_UPCAST(IDEBus, qbus, qdev->parent_bus);
 
     if (!dev->conf.bs) {
@@ -95,41 +81,35 @@ static int ide_qdev_init(DeviceState *qdev)
         error_report("Invalid IDE unit %d", dev->unit);
         goto err;
     }
-    return dc->init(dev);
+    return info->init(dev);
 
 err:
     return -1;
+}
+
+static void ide_qdev_register(IDEDeviceInfo *info)
+{
+    info->qdev.init = ide_qdev_init;
+    info->qdev.bus_info = &ide_bus_info;
+    qdev_register(&info->qdev);
 }
 
 IDEDevice *ide_create_drive(IDEBus *bus, int unit, DriveInfo *drive)
 {
     DeviceState *dev;
 
-    dev = qdev_create(&bus->qbus, drive->media_cd ? "ide-cd" : "ide-hd");
+    dev = qdev_create(&bus->qbus, "ide-drive");
     qdev_prop_set_uint32(dev, "unit", unit);
     qdev_prop_set_drive_nofail(dev, "drive", drive->bdrv);
     qdev_init_nofail(dev);
     return DO_UPCAST(IDEDevice, qdev, dev);
 }
 
-int ide_get_geometry(BusState *bus, int unit,
-                     int16_t *cyls, int8_t *heads, int8_t *secs)
+void ide_get_bs(BlockDriverState *bs[], BusState *qbus)
 {
-    IDEState *s = &DO_UPCAST(IDEBus, qbus, bus)->ifs[unit];
-
-    if (s->drive_kind != IDE_HD || !s->bs) {
-        return -1;
-    }
-
-    *cyls = s->cylinders;
-    *heads = s->heads;
-    *secs = s->sectors;
-    return 0;
-}
-
-int ide_get_bios_chs_trans(BusState *bus, int unit)
-{
-    return DO_UPCAST(IDEBus, qbus, bus)->ifs[unit].chs_trans;
+    IDEBus *bus = DO_UPCAST(IDEBus, qbus, qbus);
+    bs[0] = bus->master ? bus->master->conf.bs : NULL;
+    bs[1] = bus->slave  ? bus->slave->conf.bs  : NULL;
 }
 
 /* --------------------------------- */
@@ -138,34 +118,31 @@ typedef struct IDEDrive {
     IDEDevice dev;
 } IDEDrive;
 
-static int ide_dev_initfn(IDEDevice *dev, IDEDriveKind kind)
+static int ide_drive_initfn(IDEDevice *dev)
 {
     IDEBus *bus = DO_UPCAST(IDEBus, qbus, dev->qdev.parent_bus);
     IDEState *s = bus->ifs + dev->unit;
+    const char *serial;
+    DriveInfo *dinfo;
 
-    if (dev->conf.discard_granularity && dev->conf.discard_granularity != 512) {
-        error_report("discard_granularity must be 512 for ide");
-        return -1;
+    serial = dev->serial;
+    if (!serial) {
+        /* try to fall back to value set with legacy -drive serial=... */
+        dinfo = drive_get_by_blockdev(dev->conf.bs);
+        if (*dinfo->serial) {
+            serial = dinfo->serial;
+        }
     }
 
-    blkconf_serial(&dev->conf, &dev->serial);
-    if (kind != IDE_CD
-        && blkconf_geometry(&dev->conf, &dev->chs_trans, 65536, 16, 255) < 0) {
-        return -1;
-    }
-
-    if (ide_init_drive(s, dev->conf.bs, kind,
-                       dev->version, dev->serial, dev->model, dev->wwn,
-                       dev->conf.cyls, dev->conf.heads, dev->conf.secs,
-                       dev->chs_trans) < 0) {
+    if (ide_init_drive(s, dev->conf.bs, dev->version, serial) < 0) {
         return -1;
     }
 
     if (!dev->version) {
-        dev->version = g_strdup(s->version);
+        dev->version = qemu_strdup(s->version);
     }
     if (!dev->serial) {
-        dev->serial = g_strdup(s->drive_serial_str);
+        dev->serial = qemu_strdup(s->drive_serial_str);
     }
 
     add_boot_device_path(dev->conf.bootindex, &dev->qdev,
@@ -174,123 +151,22 @@ static int ide_dev_initfn(IDEDevice *dev, IDEDriveKind kind)
     return 0;
 }
 
-static int ide_hd_initfn(IDEDevice *dev)
-{
-    return ide_dev_initfn(dev, IDE_HD);
-}
-
-static int ide_cd_initfn(IDEDevice *dev)
-{
-    return ide_dev_initfn(dev, IDE_CD);
-}
-
-static int ide_drive_initfn(IDEDevice *dev)
-{
-    DriveInfo *dinfo = drive_get_by_blockdev(dev->conf.bs);
-
-    return ide_dev_initfn(dev, dinfo->media_cd ? IDE_CD : IDE_HD);
-}
-
-#define DEFINE_IDE_DEV_PROPERTIES()                     \
-    DEFINE_BLOCK_PROPERTIES(IDEDrive, dev.conf),        \
-    DEFINE_PROP_STRING("ver",  IDEDrive, dev.version),  \
-    DEFINE_PROP_HEX64("wwn",  IDEDrive, dev.wwn, 0),    \
-    DEFINE_PROP_STRING("serial",  IDEDrive, dev.serial),\
-    DEFINE_PROP_STRING("model", IDEDrive, dev.model)
-
-static Property ide_hd_properties[] = {
-    DEFINE_IDE_DEV_PROPERTIES(),
-    DEFINE_BLOCK_CHS_PROPERTIES(IDEDrive, dev.conf),
-    DEFINE_PROP_BIOS_CHS_TRANS("bios-chs-trans",
-                IDEDrive, dev.chs_trans, BIOS_ATA_TRANSLATION_AUTO),
-    DEFINE_PROP_END_OF_LIST(),
+static IDEDeviceInfo ide_drive_info = {
+    .qdev.name  = "ide-drive",
+    .qdev.fw_name  = "drive",
+    .qdev.size  = sizeof(IDEDrive),
+    .init       = ide_drive_initfn,
+    .qdev.props = (Property[]) {
+        DEFINE_PROP_UINT32("unit", IDEDrive, dev.unit, -1),
+        DEFINE_BLOCK_PROPERTIES(IDEDrive, dev.conf),
+        DEFINE_PROP_STRING("ver",  IDEDrive, dev.version),
+        DEFINE_PROP_STRING("serial",  IDEDrive, dev.serial),
+        DEFINE_PROP_END_OF_LIST(),
+    }
 };
 
-static void ide_hd_class_init(ObjectClass *klass, void *data)
+static void ide_drive_register(void)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    IDEDeviceClass *k = IDE_DEVICE_CLASS(klass);
-    k->init = ide_hd_initfn;
-    dc->fw_name = "drive";
-    dc->desc = "virtual IDE disk";
-    dc->props = ide_hd_properties;
+    ide_qdev_register(&ide_drive_info);
 }
-
-static TypeInfo ide_hd_info = {
-    .name          = "ide-hd",
-    .parent        = TYPE_IDE_DEVICE,
-    .instance_size = sizeof(IDEDrive),
-    .class_init    = ide_hd_class_init,
-};
-
-static Property ide_cd_properties[] = {
-    DEFINE_IDE_DEV_PROPERTIES(),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void ide_cd_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    IDEDeviceClass *k = IDE_DEVICE_CLASS(klass);
-    k->init = ide_cd_initfn;
-    dc->fw_name = "drive";
-    dc->desc = "virtual IDE CD-ROM";
-    dc->props = ide_cd_properties;
-}
-
-static TypeInfo ide_cd_info = {
-    .name          = "ide-cd",
-    .parent        = TYPE_IDE_DEVICE,
-    .instance_size = sizeof(IDEDrive),
-    .class_init    = ide_cd_class_init,
-};
-
-static Property ide_drive_properties[] = {
-    DEFINE_IDE_DEV_PROPERTIES(),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void ide_drive_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    IDEDeviceClass *k = IDE_DEVICE_CLASS(klass);
-    k->init = ide_drive_initfn;
-    dc->fw_name = "drive";
-    dc->desc = "virtual IDE disk or CD-ROM (legacy)";
-    dc->props = ide_drive_properties;
-}
-
-static TypeInfo ide_drive_info = {
-    .name          = "ide-drive",
-    .parent        = TYPE_IDE_DEVICE,
-    .instance_size = sizeof(IDEDrive),
-    .class_init    = ide_drive_class_init,
-};
-
-static void ide_device_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *k = DEVICE_CLASS(klass);
-    k->init = ide_qdev_init;
-    k->bus_type = TYPE_IDE_BUS;
-    k->props = ide_props;
-}
-
-static TypeInfo ide_device_type_info = {
-    .name = TYPE_IDE_DEVICE,
-    .parent = TYPE_DEVICE,
-    .instance_size = sizeof(IDEDevice),
-    .abstract = true,
-    .class_size = sizeof(IDEDeviceClass),
-    .class_init = ide_device_class_init,
-};
-
-static void ide_register_types(void)
-{
-    type_register_static(&ide_bus_info);
-    type_register_static(&ide_hd_info);
-    type_register_static(&ide_cd_info);
-    type_register_static(&ide_drive_info);
-    type_register_static(&ide_device_type_info);
-}
-
-type_init(ide_register_types)
+device_init(ide_drive_register);

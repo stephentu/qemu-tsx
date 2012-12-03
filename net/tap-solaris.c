@@ -65,7 +65,7 @@ static int tap_alloc(char *dev, size_t dev_size)
     static int arp_fd = 0;
     int ip_muxid, arp_muxid;
     struct strioctl  strioc_if, strioc_ppa;
-    int link_type = I_PLINK;
+    int link_type = I_PLINK;;
     struct lifreq ifr;
     char actual_name[32] = "";
 
@@ -197,7 +197,7 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr, int vnet_hdr_required
     return fd;
 }
 
-int tap_set_sndbuf(int fd, const NetdevTapOptions *tap)
+int tap_set_sndbuf(int fd, QemuOpts *opts)
 {
     return 0;
 }

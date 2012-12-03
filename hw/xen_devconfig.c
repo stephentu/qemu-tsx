@@ -1,5 +1,6 @@
 #include "xen_backend.h"
 #include "blockdev.h"
+#include "block_int.h" /* XXX */
 
 /* ------------------------------------------------------------- */
 
@@ -13,7 +14,7 @@ static void xen_config_cleanup_dir(char *dir)
 {
     struct xs_dirs *d;
 
-    d = g_malloc(sizeof(*d));
+    d = qemu_malloc(sizeof(*d));
     d->xs_dir = dir;
     QTAILQ_INSERT_TAIL(&xs_cleanup, d, list);
 }
@@ -42,7 +43,7 @@ static int xen_config_dev_mkdir(char *dev, int p)
 	xen_be_printf(NULL, 0, "xs_mkdir %s: failed\n", dev);
 	return -1;
     }
-    xen_config_cleanup_dir(g_strdup(dev));
+    xen_config_cleanup_dir(qemu_strdup(dev));
 
     if (!xs_set_permissions(xenstore, 0, dev, perms, 2)) {
 	xen_be_printf(NULL, 0, "xs_set_permissions %s: failed\n", dev);
@@ -93,16 +94,16 @@ static int xen_config_dev_all(char *fe, char *be)
 
 int xen_config_dev_blk(DriveInfo *disk)
 {
-    char fe[256], be[256], device_name[32];
+    char fe[256], be[256];
     int vdev = 202 * 256 + 16 * disk->unit;
-    int cdrom = disk->media_cd;
+    int cdrom = disk->bdrv->type == BDRV_TYPE_CDROM;
     const char *devtype = cdrom ? "cdrom" : "disk";
     const char *mode    = cdrom ? "r"     : "w";
-    const char *filename = qemu_opt_get(disk->opts, "file");
 
-    snprintf(device_name, sizeof(device_name), "xvd%c", 'a' + disk->unit);
+    snprintf(disk->bdrv->device_name, sizeof(disk->bdrv->device_name),
+	     "xvd%c", 'a' + disk->unit);
     xen_be_printf(NULL, 1, "config disk %d [%s]: %s\n",
-                  disk->unit, device_name, filename);
+                  disk->unit, disk->bdrv->device_name, disk->bdrv->filename);
     xen_config_dev_dirs("vbd", "qdisk", vdev, fe, be, sizeof(fe));
 
     /* frontend */
@@ -110,9 +111,9 @@ int xen_config_dev_blk(DriveInfo *disk)
     xenstore_write_str(fe, "device-type",     devtype);
 
     /* backend */
-    xenstore_write_str(be, "dev",             device_name);
+    xenstore_write_str(be, "dev",             disk->bdrv->device_name);
     xenstore_write_str(be, "type",            "file");
-    xenstore_write_str(be, "params",          filename);
+    xenstore_write_str(be, "params",          disk->bdrv->filename);
     xenstore_write_str(be, "mode",            mode);
 
     /* common stuff */
@@ -123,21 +124,19 @@ int xen_config_dev_nic(NICInfo *nic)
 {
     char fe[256], be[256];
     char mac[20];
-    int vlan_id = -1;
 
-    net_hub_id_for_client(nic->netdev, &vlan_id);
     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-             nic->macaddr.a[0], nic->macaddr.a[1], nic->macaddr.a[2],
-             nic->macaddr.a[3], nic->macaddr.a[4], nic->macaddr.a[5]);
-    xen_be_printf(NULL, 1, "config nic %d: mac=\"%s\"\n", vlan_id, mac);
-    xen_config_dev_dirs("vif", "qnic", vlan_id, fe, be, sizeof(fe));
+	     nic->macaddr[0], nic->macaddr[1], nic->macaddr[2],
+	     nic->macaddr[3], nic->macaddr[4], nic->macaddr[5]);
+    xen_be_printf(NULL, 1, "config nic %d: mac=\"%s\"\n", nic->vlan->id, mac);
+    xen_config_dev_dirs("vif", "qnic", nic->vlan->id, fe, be, sizeof(fe));
 
     /* frontend */
-    xenstore_write_int(fe, "handle",     vlan_id);
+    xenstore_write_int(fe, "handle",     nic->vlan->id);
     xenstore_write_str(fe, "mac",        mac);
 
     /* backend */
-    xenstore_write_int(be, "handle",     vlan_id);
+    xenstore_write_int(be, "handle",     nic->vlan->id);
     xenstore_write_str(be, "mac",        mac);
 
     /* common stuff */

@@ -38,9 +38,6 @@
 #define PCIE_DEV_PRINTF(dev, fmt, ...)                                  \
     PCIE_DPRINTF("%s:%x "fmt, (dev)->name, (dev)->devfn, ## __VA_ARGS__)
 
-#define PCI_ERR_SRC_COR_OFFS    0
-#define PCI_ERR_SRC_UNCOR_OFFS  2
-
 /* From 6.2.7 Error Listing and Rules. Table 6-2, 6-3 and 6-4 */
 static uint32_t pcie_aer_uncor_default_severity(uint32_t status)
 {
@@ -111,7 +108,7 @@ int pcie_aer_init(PCIDevice *dev, uint16_t offset)
     if (dev->exp.aer_log.log_max > PCIE_AER_LOG_MAX_LIMIT) {
         return -EINVAL;
     }
-    dev->exp.aer_log.log = g_malloc0(sizeof dev->exp.aer_log.log[0] *
+    dev->exp.aer_log.log = qemu_mallocz(sizeof dev->exp.aer_log.log[0] *
                                         dev->exp.aer_log.log_max);
 
     pci_set_long(dev->w1cmask + offset + PCI_ERR_UNCOR_STATUS,
@@ -165,7 +162,7 @@ int pcie_aer_init(PCIDevice *dev, uint16_t offset)
 
 void pcie_aer_exit(PCIDevice *dev)
 {
-    g_free(dev->exp.aer_log.log);
+    qemu_free(dev->exp.aer_log.log);
 }
 
 static void pcie_aer_update_uncor_status(PCIDevice *dev)
@@ -323,8 +320,7 @@ static void pcie_aer_msg_root_port(PCIDevice *dev, const PCIEAERMsg *msg)
         if (root_status & PCI_ERR_ROOT_COR_RCV) {
             root_status |= PCI_ERR_ROOT_MULTI_COR_RCV;
         } else {
-            pci_set_word(aer_cap + PCI_ERR_ROOT_ERR_SRC + PCI_ERR_SRC_COR_OFFS,
-                         msg->source_id);
+            pci_set_word(aer_cap + PCI_ERR_ROOT_COR_SRC, msg->source_id);
         }
         root_status |= PCI_ERR_ROOT_COR_RCV;
         break;
@@ -345,8 +341,7 @@ static void pcie_aer_msg_root_port(PCIDevice *dev, const PCIEAERMsg *msg)
         if (root_status & PCI_ERR_ROOT_UNCOR_RCV) {
             root_status |= PCI_ERR_ROOT_MULTI_UNCOR_RCV;
         } else {
-            pci_set_word(aer_cap + PCI_ERR_ROOT_ERR_SRC +
-                         PCI_ERR_SRC_UNCOR_OFFS, msg->source_id);
+            pci_set_word(aer_cap + PCI_ERR_ROOT_SRC, msg->source_id);
         }
         root_status |= PCI_ERR_ROOT_UNCOR_RCV;
     }
@@ -415,7 +410,7 @@ static void pcie_aer_update_log(PCIDevice *dev, const PCIEAERErr *err)
     int i;
 
     assert(err->status);
-    assert(!(err->status & (err->status - 1)));
+    assert(err->status & (err->status - 1));
 
     errcap &= ~(PCI_ERR_CAP_FEP_MASK | PCI_ERR_CAP_TLP);
     errcap |= PCI_ERR_CAP_FEP(first_bit);
@@ -495,7 +490,7 @@ static int pcie_aer_record_error(PCIDevice *dev,
     int fep = PCI_ERR_CAP_FEP(errcap);
 
     assert(err->status);
-    assert(!(err->status & (err->status - 1)));
+    assert(err->status & (err->status - 1));
 
     if (errcap & PCI_ERR_CAP_MHRE &&
         (pci_get_long(aer_cap + PCI_ERR_UNCOR_STATUS) & (1U << fep))) {
@@ -617,7 +612,7 @@ static bool pcie_aer_inject_uncor_error(PCIEAERInject *inj, bool is_fatal)
 /*
  * non-Function specific error must be recorded in all functions.
  * It is the responsibility of the caller of this function.
- * It is also caller's responsibility to determine which function should
+ * It is also caller's responsiblity to determine which function should
  * report the rerror.
  *
  * 6.2.4 Error Logging
@@ -738,11 +733,6 @@ void pcie_aer_root_init(PCIDevice *dev)
                  PCI_ERR_ROOT_CMD_EN_MASK);
     pci_set_long(dev->w1cmask + pos + PCI_ERR_ROOT_STATUS,
                  PCI_ERR_ROOT_STATUS_REPORT_MASK);
-    /* PCI_ERR_ROOT_IRQ is RO but devices change it using a
-     * device-specific method.
-     */
-    pci_set_long(dev->cmask + pos + PCI_ERR_ROOT_STATUS,
-                 ~PCI_ERR_ROOT_IRQ);
 }
 
 void pcie_aer_root_reset(PCIDevice *dev)
@@ -795,6 +785,16 @@ static const VMStateDescription vmstate_pcie_aer_err = {
     }
 };
 
+#define VMSTATE_PCIE_AER_ERRS(_field, _state, _field_num, _vmsd, _type) { \
+    .name       = (stringify(_field)),                                    \
+    .version_id = 0,                                                      \
+    .num_offset = vmstate_offset_value(_state, _field_num, uint16_t),     \
+    .size       = sizeof(_type),                                          \
+    .vmsd       = &(_vmsd),                                               \
+    .flags      = VMS_POINTER | VMS_VARRAY_UINT16 | VMS_STRUCT,           \
+    .offset     = vmstate_offset_pointer(_state, _field, _type),          \
+}
+
 const VMStateDescription vmstate_pcie_aer_log = {
     .name = "PCIE_AER_ERROR_LOG",
     .version_id = 1,
@@ -803,7 +803,7 @@ const VMStateDescription vmstate_pcie_aer_log = {
     .fields     = (VMStateField[]) {
         VMSTATE_UINT16(log_num, PCIEAERLog),
         VMSTATE_UINT16(log_max, PCIEAERLog),
-        VMSTATE_STRUCT_VARRAY_POINTER_UINT16(log, PCIEAERLog, log_num,
+        VMSTATE_PCIE_AER_ERRS(log, PCIEAERLog, log_num,
                               vmstate_pcie_aer_err, PCIEAERErr),
         VMSTATE_END_OF_LIST()
     }
@@ -831,7 +831,7 @@ typedef struct PCIEAERErrorName {
 } PCIEAERErrorName;
 
 /*
- * AER error name -> value conversion table
+ * AER error name -> value convertion table
  * This naming scheme is same to linux aer-injection tool.
  */
 static const struct PCIEAERErrorName pcie_aer_error_list[] = {
@@ -956,7 +956,7 @@ static int pcie_aer_parse_error_string(const char *error_name,
     return -EINVAL;
 }
 
-int do_pcie_aer_inject_error(Monitor *mon,
+int do_pcie_aer_inejct_error(Monitor *mon,
                              const QDict *qdict, QObject **ret_data)
 {
     const char *id = qdict_get_str(qdict, "id");
@@ -984,21 +984,20 @@ int do_pcie_aer_inject_error(Monitor *mon,
     if (pcie_aer_parse_error_string(error_name, &error_status, &correctable)) {
         char *e = NULL;
         error_status = strtoul(error_name, &e, 0);
-        correctable = qdict_get_try_bool(qdict, "correctable", 0);
+        correctable = !!qdict_get_int(qdict, "correctable");
         if (!e || *e != '\0') {
             monitor_printf(mon, "invalid error status value. \"%s\"",
                            error_name);
             return -EINVAL;
         }
     }
-    err.status = error_status;
     err.source_id = (pci_bus_num(dev->bus) << 8) | dev->devfn;
 
     err.flags = 0;
     if (correctable) {
         err.flags |= PCIE_AER_ERR_IS_CORRECTABLE;
     }
-    if (qdict_get_try_bool(qdict, "advisory_non_fatal", 0)) {
+    if (qdict_get_int(qdict, "advisory_non_fatal")) {
         err.flags |= PCIE_AER_ERR_MAYBE_ADVISORY;
     }
     if (qdict_haskey(qdict, "header0")) {

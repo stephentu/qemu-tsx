@@ -13,18 +13,14 @@ case $line in
     pkgversion=${line#*=}
     echo "#define QEMU_PKGVERSION \"$pkgversion\""
     ;;
- qemu_*dir=*) # qemu-specific directory configuration
+ prefix=* | [a-z]*dir=*) # directory configuration
     name=${line%=*}
     value=${line#*=}
-    define_name=`echo $name | LC_ALL=C tr '[a-z]' '[A-Z]'`
+    define_name=`echo $name | tr '[:lower:]' '[:upper:]'`
     eval "define_value=\"$value\""
-    echo "#define CONFIG_$define_name \"$define_value\""
+    echo "#define CONFIG_QEMU_$define_name \"$define_value\""
     # save for the next definitions
     eval "$name=\$define_value"
-    ;;
- prefix=*)
-    # save for the next definitions
-    prefix=${line#*=}
     ;;
  CONFIG_AUDIO_DRIVERS=*)
     drivers=${line#*=}
@@ -52,7 +48,7 @@ case $line in
     ;;
  ARCH=*) # configuration
     arch=${line#*=}
-    arch_name=`echo $arch | LC_ALL=C tr '[a-z]' '[A-Z]'`
+    arch_name=`echo $arch | tr '[:lower:]' '[:upper:]'`
     echo "#define HOST_$arch_name 1"
     ;;
  HOST_USB=*)
@@ -77,7 +73,7 @@ case $line in
  TARGET_BASE_ARCH=*) # configuration
     target_base_arch=${line#*=}
     if [ "$target_base_arch" != "$target_arch" ]; then
-      base_arch_name=`echo $target_base_arch | LC_ALL=C tr '[a-z]' '[A-Z]'`
+      base_arch_name=`echo $target_base_arch | tr '[:lower:]' '[:upper:]'`
       echo "#define TARGET_$base_arch_name 1"
     fi
     ;;

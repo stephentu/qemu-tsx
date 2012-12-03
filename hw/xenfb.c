@@ -35,15 +35,19 @@
 #include <string.h>
 #include <time.h>
 
-#include "hw.h"
-#include "console.h"
-#include "qemu-char.h"
-#include "xen_backend.h"
-
+#include <xs.h>
+#include <xenctrl.h>
 #include <xen/event_channel.h>
+#include <xen/io/xenbus.h>
 #include <xen/io/fbif.h>
 #include <xen/io/kbdif.h>
 #include <xen/io/protocols.h>
+
+#include "hw.h"
+#include "sysemu.h"
+#include "console.h"
+#include "qemu-char.h"
+#include "xen_backend.h"
 
 #ifndef BTN_LEFT
 #define BTN_LEFT 0x110 /* from <linux/input.h> */
@@ -344,50 +348,35 @@ static void xenfb_mouse_event(void *opaque,
 
 static int input_init(struct XenDevice *xendev)
 {
+    struct XenInput *in = container_of(xendev, struct XenInput, c.xendev);
+
+    if (!in->c.ds) {
+        xen_be_printf(xendev, 1, "ds not set (yet)\n");
+	return -1;
+    }
+
     xenstore_write_be_int(xendev, "feature-abs-pointer", 1);
     return 0;
 }
 
-static int input_initialise(struct XenDevice *xendev)
+static int input_connect(struct XenDevice *xendev)
 {
     struct XenInput *in = container_of(xendev, struct XenInput, c.xendev);
     int rc;
 
-    if (!in->c.ds) {
-        char *vfb = xenstore_read_str(NULL, "device/vfb");
-        if (vfb == NULL) {
-            /* there is no vfb, run vkbd on its own */
-            in->c.ds = get_displaystate();
-        } else {
-            g_free(vfb);
-            xen_be_printf(xendev, 1, "ds not set (yet)\n");
-            return -1;
-        }
-    }
+    if (xenstore_read_fe_int(xendev, "request-abs-pointer",
+                             &in->abs_pointer_wanted) == -1)
+	in->abs_pointer_wanted = 0;
 
     rc = common_bind(&in->c);
     if (rc != 0)
 	return rc;
 
     qemu_add_kbd_event_handler(xenfb_key_event, in);
-    return 0;
-}
-
-static void input_connected(struct XenDevice *xendev)
-{
-    struct XenInput *in = container_of(xendev, struct XenInput, c.xendev);
-
-    if (xenstore_read_fe_int(xendev, "request-abs-pointer",
-                             &in->abs_pointer_wanted) == -1) {
-        in->abs_pointer_wanted = 0;
-    }
-
-    if (in->qmouse) {
-        qemu_remove_mouse_event_handler(in->qmouse);
-    }
     in->qmouse = qemu_add_mouse_event_handler(xenfb_mouse_event, in,
 					      in->abs_pointer_wanted,
 					      "Xen PVFB Mouse");
+    return 0;
 }
 
 static void input_disconnect(struct XenDevice *xendev)
@@ -490,8 +479,8 @@ static int xenfb_map_fb(struct XenFB *xenfb)
     n_fbdirs = xenfb->fbpages * mode / 8;
     n_fbdirs = (n_fbdirs + (XC_PAGE_SIZE - 1)) / XC_PAGE_SIZE;
 
-    pgmfns = g_malloc0(sizeof(unsigned long) * n_fbdirs);
-    fbmfns = g_malloc0(sizeof(unsigned long) * xenfb->fbpages);
+    pgmfns = qemu_mallocz(sizeof(unsigned long) * n_fbdirs);
+    fbmfns = qemu_mallocz(sizeof(unsigned long) * xenfb->fbpages);
 
     xenfb_copy_mfns(mode, n_fbdirs, pgmfns, pd);
     map = xc_map_foreign_pages(xen_xc, xenfb->c.xendev.dom,
@@ -509,8 +498,8 @@ static int xenfb_map_fb(struct XenFB *xenfb)
     ret = 0; /* all is fine */
 
 out:
-    g_free(pgmfns);
-    g_free(fbmfns);
+    qemu_free(pgmfns);
+    qemu_free(fbmfns);
     return ret;
 }
 
@@ -648,7 +637,7 @@ static void xenfb_guest_copy(struct XenFB *xenfb, int x, int y, int w, int h)
         xen_be_printf(&xenfb->c.xendev, 0, "%s: oops: convert %d -> %d bpp?\n",
                       __FUNCTION__, xenfb->depth, bpp);
 
-    dpy_gfx_update(xenfb->c.ds, x, y, w, h);
+    dpy_update(xenfb->c.ds, x, y, w, h);
 }
 
 #ifdef XENFB_TYPE_REFRESH_PERIOD
@@ -717,7 +706,7 @@ static void xenfb_update(void *opaque)
 	if (xenfb_queue_full(xenfb))
 	    return;
 
-        QLIST_FOREACH(l, &xenfb->c.ds->listeners, next) {
+        for (l = xenfb->c.ds->listeners; l != NULL; l = l->next) {
             if (l->idle)
                 continue;
             idle = 0;
@@ -766,7 +755,7 @@ static void xenfb_update(void *opaque)
         xen_be_printf(&xenfb->c.xendev, 1, "update: resizing: %dx%d @ %d bpp%s\n",
                       xenfb->width, xenfb->height, xenfb->depth,
                       is_buffer_shared(xenfb->c.ds->surface) ? " (shared)" : "");
-        dpy_gfx_resize(xenfb->c.ds);
+        dpy_resize(xenfb->c.ds);
         xenfb->up_fullscreen = 1;
     }
 
@@ -872,7 +861,7 @@ static int fb_init(struct XenDevice *xendev)
     return 0;
 }
 
-static int fb_initialise(struct XenDevice *xendev)
+static int fb_connect(struct XenDevice *xendev)
 {
     struct XenFB *fb = container_of(xendev, struct XenFB, c.xendev);
     struct xenfb_page *fb_page;
@@ -966,8 +955,7 @@ static void fb_event(struct XenDevice *xendev)
 struct XenDevOps xen_kbdmouse_ops = {
     .size       = sizeof(struct XenInput),
     .init       = input_init,
-    .initialise = input_initialise,
-    .connected  = input_connected,
+    .connect    = input_connect,
     .disconnect = input_disconnect,
     .event      = input_event,
 };
@@ -975,7 +963,7 @@ struct XenDevOps xen_kbdmouse_ops = {
 struct XenDevOps xen_framebuffer_ops = {
     .size       = sizeof(struct XenFB),
     .init       = fb_init,
-    .initialise = fb_initialise,
+    .connect    = fb_connect,
     .disconnect = fb_disconnect,
     .event      = fb_event,
     .frontend_changed = fb_frontend_changed,

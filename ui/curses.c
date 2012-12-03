@@ -24,6 +24,7 @@
 #include <curses.h>
 
 #ifndef _WIN32
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #endif
@@ -95,16 +96,17 @@ static void curses_calc_pad(void)
     }
 }
 
-static void curses_resize(DisplayState *ds, int width, int height)
+static void curses_resize(DisplayState *ds)
 {
-    if (width == gwidth && height == gheight) {
+    if (ds_get_width(ds) == gwidth && ds_get_height(ds) == gheight)
         return;
-    }
 
-    gwidth = width;
-    gheight = height;
+    gwidth = ds_get_width(ds);
+    gheight = ds_get_height(ds);
 
     curses_calc_pad();
+    ds->surface->width = width * FONT_WIDTH;
+    ds->surface->height = height * FONT_HEIGHT;
 }
 
 #ifndef _WIN32
@@ -166,6 +168,8 @@ static void curses_refresh(DisplayState *ds)
         clear();
         refresh();
         curses_calc_pad();
+        ds->surface->width = FONT_WIDTH * width;
+        ds->surface->height = FONT_HEIGHT * height;
         vga_hw_invalidate();
         invalidate = 0;
     }
@@ -192,6 +196,8 @@ static void curses_refresh(DisplayState *ds)
             refresh();
             curses_calc_pad();
             curses_update(ds, 0, 0, width, height);
+            ds->surface->width = FONT_WIDTH * width;
+            ds->surface->height = FONT_HEIGHT * height;
             continue;
         }
 #endif
@@ -349,12 +355,14 @@ void curses_display_init(DisplayState *ds, int full_screen)
 #endif
 #endif
 
-    dcl = (DisplayChangeListener *) g_malloc0(sizeof(DisplayChangeListener));
-    dcl->dpy_text_update = curses_update;
-    dcl->dpy_text_resize = curses_resize;
+    dcl = (DisplayChangeListener *) qemu_mallocz(sizeof(DisplayChangeListener));
+    dcl->dpy_update = curses_update;
+    dcl->dpy_resize = curses_resize;
     dcl->dpy_refresh = curses_refresh;
     dcl->dpy_text_cursor = curses_cursor_position;
     register_displaychangelistener(ds, dcl);
+    qemu_free_displaysurface(ds);
+    ds->surface = qemu_create_displaysurface_from(640, 400, 0, 0, (uint8_t*) screen);
 
     invalidate = 1;
 }
