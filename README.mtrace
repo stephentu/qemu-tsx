@@ -31,6 +31,17 @@
 	    --disable-vnc-png \
 	    --disable-strip
 
+*for a 32bit version:
+
+  ./configure --prefix=PFX \
+	    --target-list="i386-softmmu" \
+	    --disable-kvm  \
+	    --audio-card-list="" \
+	    --disable-vnc-jpeg \
+	    --disable-vnc-png \
+	    --disable-strip
+
+
 * Implementation choices
   
   If we don't want the virtual address, we could modify the macros in
