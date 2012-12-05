@@ -31,6 +31,12 @@
 #define SANITY_ASSERT(x)
 #endif /* SANITY_CHECKING */
 
+#define QPRINTF(env, fmt, ...) \
+  do { \
+    printf("%s:%d: env=(0x%llx): ", __func__, __LINE__, (unsigned long long) (env)); \
+    printf(fmt, __VA_ARGS__); \
+  } while (0)
+
 //#define DEBUG_PCALL
 
 
