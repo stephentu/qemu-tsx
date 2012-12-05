@@ -181,7 +181,7 @@
 #define HF2_VINTR_SHIFT      3 /* value of V_INTR_MASKING bit */
 
 #define HF2_GIF_MASK          (1 << HF2_GIF_SHIFT)
-#define HF2_HIF_MASK          (1 << HF2_HIF_SHIFT) 
+#define HF2_HIF_MASK          (1 << HF2_HIF_SHIFT)
 #define HF2_NMI_MASK          (1 << HF2_NMI_SHIFT)
 #define HF2_VINTR_MASK        (1 << HF2_VINTR_SHIFT)
 
@@ -438,7 +438,7 @@
 #define CPUID_VENDOR_INTEL_3 0x6c65746e /* "ntel" */
 
 #define CPUID_VENDOR_AMD_1   0x68747541 /* "Auth" */
-#define CPUID_VENDOR_AMD_2   0x69746e65 /* "enti" */ 
+#define CPUID_VENDOR_AMD_2   0x69746e65 /* "enti" */
 #define CPUID_VENDOR_AMD_3   0x444d4163 /* "cAMD" */
 
 #define CPUID_MWAIT_IBE     (1 << 1) /* Interrupts can exit capability */
@@ -689,9 +689,9 @@ typedef struct CPUX86StateCheckpoint {
 /**
  * The data structure which holds dirty cache lines in per-CPU store buffers
  */
-typedef struct CPUX86CacheLine {
+typedef struct CPUX86CacheLineData {
   target_ulong cno; /* cache line number */
-  struct CPUX86CacheLine *next; /* next pointer, for linked-lists */
+  struct CPUX86CacheLineData *next; /* next pointer, for linked-lists */
   uint8_t data[X86_CACHE_LINE_SIZE];
 } CPUX86CacheLine;
 
@@ -821,7 +821,7 @@ typedef struct CPUX86State {
     uint32_t sipi_vector;
     uint32_t cpuid_kvm_features;
     uint32_t cpuid_svm_features;
-    
+
     /* in order to simplify APIC support, we leave this pointer to the
        user */
     struct DeviceState *apic_state;
@@ -853,9 +853,9 @@ typedef struct CPUX86State {
     // before if commits.
     bool htm_needs_abort;
 
-    CPUX86CacheLine *htm_hash_table[X86_HTM_NBUCKETS];
-    CPUX86CacheLine *htm_free_list;
-    CPUX86CacheLine htm_cache_lines[X86_HTM_NBUFENTRIES];
+    CPUX86CacheLineData *htm_hash_table[X86_HTM_NBUCKETS];
+    CPUX86CacheLineData *htm_free_list;
+    CPUX86CacheLineData htm_cache_lines[X86_HTM_NBUFENTRIES];
 
     //for lock table linked list
     struct CPUX86State *htm_lock_table_next;
@@ -1111,10 +1111,10 @@ void do_cpu_sipi(CPUState *env);
 
 /* mem_helper.c */
 CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env);
-void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line);
+void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLineData *line);
 
 CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
-bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry);
+bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLineData *entry);
 CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
 void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*));
 void cpu_htm_hash_table_reset(CPUX86State *env);

@@ -1903,7 +1903,7 @@ void helper_cmpxchg8b(target_ulong a0)
         eflags |= CC_Z;
     } else {
         /* always do the store */
-        stq(a0, d); 
+        stq(a0, d);
         EDX = (uint32_t)(d >> 32);
         EAX = (uint32_t)d;
         eflags &= ~CC_Z;
@@ -1928,8 +1928,8 @@ void helper_cmpxchg16b(target_ulong a0)
         eflags |= CC_Z;
     } else {
         /* always do the store */
-        stq(a0, d0); 
-        stq(a0 + 8, d1); 
+        stq(a0, d0);
+        stq(a0 + 8, d1);
         EDX = d1;
         EAX = d0;
         eflags &= ~CC_Z;
@@ -2321,7 +2321,7 @@ void helper_lcall_real(int new_cs, target_ulong new_eip1,
 }
 
 /* protected mode call */
-void helper_lcall_protected(int new_cs, target_ulong new_eip, 
+void helper_lcall_protected(int new_cs, target_ulong new_eip,
                             int shift, int next_eip_addend)
 {
     int new_stack, i;
@@ -3002,7 +3002,7 @@ void helper_rdpmc(void)
         raise_exception(EXCP0D_GPF);
     }
     helper_svm_check_intercept_param(SVM_EXIT_RDPMC, 0);
-    
+
     /* currently unimplemented */
     raise_exception_err(EXCP06_ILLOP, 0);
 }
@@ -4388,7 +4388,7 @@ void helper_fxsave(target_ulong ptr, int data64)
     if (data64) {
         stq(ptr + 0x08, 0); /* rip */
         stq(ptr + 0x10, 0); /* rdp */
-    } else 
+    } else
 #endif
     {
         stl(ptr + 0x08, 0); /* eip */
@@ -4695,7 +4695,7 @@ void helper_hlt(int next_eip_addend)
 {
     helper_svm_check_intercept_param(SVM_EXIT_HLT, 0);
     EIP += next_eip_addend;
-    
+
     do_hlt();
 }
 
@@ -4932,7 +4932,6 @@ cpu_htm_mem_entry_return(CPUX86CacheLineEntry *entry)
   *free_list = entry;
 }
 
-#if defined(CONFIG_USER_ONLY)
 static bool
 cpu_htm_mem_hash_table_insert(CPUX86CacheLineEntry **ht, CPUX86CacheLineEntry *entry)
 {
@@ -5000,8 +4999,6 @@ cpu_htm_mem_hash_table_lookup_or_create(CPUX86CacheLineEntry **ht, target_ulong 
     }
   return ret;
 }
-
-#endif /* defined(CONFIG_USER_ONLY) */
 
 static inline bool
 cpu_htm_mem_entry_is_owner(
@@ -5145,7 +5142,7 @@ static inline void cpu_htm_low_level_abort(CPUX86State *env)
   env->eip = env->htm_abort_eip;
 }
 
-static void bad_cache_line_call(CPUX86CacheLine *line)
+static void bad_cache_line_call(CPUX86CacheLineData *line)
 {
   assert(false);
 }
@@ -5177,30 +5174,28 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
   }
 }
 
-#if defined(CONFIG_USER_ONLY)
-static void cache_line_commit(CPUX86CacheLine *line)
+static void cache_line_commit(CPUX86CacheLineData *line)
 {
-  uint8_t *p;
-  int i;
-  p = (uint8_t *)(X86_HTM_CNO_TO_ADDR(line->cno) + GUEST_BASE);
-  printf("cache_line_commit: commit CL starting at: 0x%llx\n",
-         (unsigned long long) p);
-  memmove(p, &line->data[0], X86_CACHE_LINE_SIZE);
-  SANITY_ASSERT(memcmp(p, &line->data[0], X86_CACHE_LINE_SIZE) == 0);
+  //uint8_t *p;
+  //int i;
+  //p = (uint8_t *)(X86_HTM_CNO_TO_ADDR(line->cno) + GUEST_BASE);
+  //printf("cache_line_commit: commit CL starting at: 0x%llx\n",
+  //       (unsigned long long) p);
+  //memmove(p, &line->data[0], X86_CACHE_LINE_SIZE);
+  //SANITY_ASSERT(memcmp(p, &line->data[0], X86_CACHE_LINE_SIZE) == 0);
 
-  for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
-    printf("0x%llx: 0x%llx\n",
-           (unsigned long long)(p + i * 8),
-           (unsigned long long) *((uint64_t *)(p + i * 8)));
-  }
+  //for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
+  //  printf("0x%llx: 0x%llx\n",
+  //         (unsigned long long)(p + i * 8),
+  //         (unsigned long long) *((uint64_t *)(p + i * 8)));
+  //}
+
+  printf("cache_line_commit: commit CL starting at: 0x%llx\n",
+         (unsigned long long) X86_HTM_CNO_TO_ADDR(line->cno));
+  cpu_physical_memory_rw(
+      X86_HTM_CNO_TO_ADDR(line->cno),
+      &line->data[0], X86_CACHE_LINE_SIZE, 1);
 }
-#else
-static void cache_line_commit(CPUX86CacheLine *line)
-{
-  // XXX: implement
-  assert(false);
-}
-#endif /* defined(CONFIG_USER_ONLY) */
 
 void helper_xend(CPUX86State *env)
 {
@@ -5273,12 +5268,11 @@ mem_idx_to_size(uint32_t idx)
   }
 }
 
-#if defined(CONFIG_USER_ONLY)
-static inline CPUX86CacheLine*
+static inline CPUX86CacheLineData*
 load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
 {
   bool r;
-  CPUX86CacheLine *cline;
+  CPUX86CacheLineData *cline;
   // load the cache line into per-cpu buffer
   if (!(cline = cpu_htm_hash_table_lookup(env, cno)) && alloc) {
 
@@ -5289,9 +5283,11 @@ load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
       return 0;
 
     // read the cache line from memory, to fill the buffer
-    memmove(&cline->data[0],
-        (uint8_t *)X86_HTM_CNO_TO_ADDR(cno) + GUEST_BASE,
-        X86_CACHE_LINE_SIZE);
+    cpu_physical_memory_rw(
+        X86_HTM_CNO_TO_ADDR(cno),
+        &cline->data[0],
+        X86_CACHE_LINE_SIZE,
+        0);
 
     cline->cno = cno;
     if (!(r = cpu_htm_hash_table_insert(env, cline)))
@@ -5301,48 +5297,21 @@ load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
   SANITY_ASSERT(!cline || cline->cno == cno);
   return cline;
 }
-#endif /* defined(CONFIG_USER_ONLY) */
-
-#if defined(CONFIG_USER_ONLY)
-static inline void
-do_split_read(const uint8_t *p0,
-              const uint8_t *p1,
-              uint8_t *buf,
-              uint32_t split,
-              uint32_t size)
-{
-  memmove(buf, p0, split);
-  if (size > split)
-    memmove(buf + split, p1, size - split);
-}
 
 static inline target_ulong helper_htm_mem_load_helper(
     CPUX86State *env, target_ulong a0, uint32_t idx, bool sign)
 {
+  CPUX86CacheLineEntry *cline;
+  CPUX86CacheLineData *clinedata;
+  target_ulong cno, retval;
+  uint8_t buf[sizeof(target_ulong)];
+  uint32_t size, i;
+  unsigned long pd;
+  target_phys_addr_t page;
+  PhysPageDesc *p;
 
-  // XXX: should be static_assert
-  SANITY_ASSERT(sizeof(target_ulong) <= X86_CACHE_LINE_SIZE);
-
-  target_ulong cno0, cno1; /* need at most two cache lines */
-  target_ulong retval;
-  CPUX86CacheLine *cline0, *cline1;
-  CPUX86CacheLineEntry *gline0, *gline1;
-
-  uint8_t *p0, *p1, buf[sizeof(target_ulong)];
-  uint32_t split, size;
-
-  const char *reason;
-
+  // num bytes to be read
   size = mem_idx_to_size(idx);
-  split = size;
-
-  // convert a0 to cache line number(s)
-  cno0 = X86_HTM_ADDR_TO_CNO(a0);
-  cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
-    cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
-  SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
-
-  //QPRINTF(env, "loading addr=(0x%llx)\n", (unsigned long long) a0);
 
   lock_cpu_mem();
   {
@@ -5352,112 +5321,62 @@ static inline target_ulong helper_htm_mem_load_helper(
         goto abort_txn;
       }
 
-      if (cno0 == cno1) {
-        gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
-        if (!gline0) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_SHARED, env)) {
-          reason = "could not acquire read lock";
-          goto abort_txn;
-        }
+      page = a0 & TARGET_PAGE_MASK;
+      p = phys_page_find(page >> TARGET_PAGE_BITS);
+      if (!p)
+        pd = IO_MEM_UNASSIGNED;
+      else
+        pd = p->phys_offset;
 
-        // owner of (at least a) read lock, proceed with read
-        cline0 = cline1 = load_cacheline(env, cno0, false);
-        if (cline0) {
-          p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-          p1 = 0;
-          SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-        } else {
-          p0 = (uint8_t *)((uintptr_t)a0);
-          p1 = 0;
-        }
-      } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, true);
-        if (!gline0) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_SHARED, env)) {
-          reason = "could not acquire read lock";
-          goto abort_txn;
-        }
-
-        if (!gline1) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline1, HTM_LOCK_SHARED, env)) {
-          reason = "could not acquire read lock";
-          goto abort_txn;
-        }
-
-        cline0 = load_cacheline(env, cno0, false);
-        cline1 = load_cacheline(env, cno1, false);
-        SANITY_ASSERT((!cline0 && !cline1) || (cline0 != cline1));
-        split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
-
-        if (cline0) {
-          p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-          SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-        } else
-          p0 = (uint8_t *)((uintptr_t)a0);
-
-        if (cline1) {
-          p1 = (uint8_t *)(&cline1->data[0]);
-          SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
-        } else
-          p1 = (uint8_t *)((uintptr_t)a0 + split);
-
-        SANITY_ASSERT(size > split);
+      // check if reading from non-txn region (IO)
+      // see exec. for where this check comes from
+      if ((pd & ~TARGET_PAGE_MASK) > IO_MEM_ROM && !(pd & IO_MEM_ROMD)) {
+        reason = "reading from IO region";
+        goto abort_txn;
       }
 
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
+        if (!cline) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_SHARED, env)) {
+          reason = "could not acquire read lock";
+          goto abort_txn;
+        }
+
+        clinedata = load_cacheline(env, cno, false);
+        if (clinedata)
+          // serve the read from the local cache line
+          buf[i] = clinedata->data[(a0 + i) % X86_CACHE_LINE_SIZE];
+        else
+          // serve the read from main memory
+          cpu_physical_memory_rw(a0 + i, &buf[i], 1, 0);
+      }
     } else {
-      if (cno0 == cno1) {
-        gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
-      } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, false);
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
+        if (cline && cline->mode == HTM_LOCK_EXCLUSIVE) {
+          // must abort writer
+          SANITY_ASSERT(cline->owners);
+          SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners));
+          cline->owners->htm_needs_abort = true;
+          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
+        }
       }
 
-      if (gline0)
-        QPRINTF(env, "gline0 != null cno0=(%d)\n", (int) cno0);
-      if (gline1)
-        QPRINTF(env, "gline1 != null cno1=(%d)\n", (int) cno1);
-
-      if (gline0 && gline0->mode == HTM_LOCK_EXCLUSIVE) {
-        // must abort writer
-        SANITY_ASSERT(gline0->owners);
-        SANITY_ASSERT(gline0->owners->htm_nest_level);
-        gline0->owners->htm_needs_abort = true;
-        QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) gline0->owners);
-      }
-
-      if (gline1 && gline1->mode == HTM_LOCK_EXCLUSIVE) {
-        // must abort writer
-        SANITY_ASSERT(gline1->owners);
-        SANITY_ASSERT(gline1->owners->htm_nest_level);
-        gline1->owners->htm_needs_abort = true;
-        QPRINTF(env, "aborting txn on env=(0x%llu)\n", (unsigned long long) gline1->owners);
-      }
-
-      // note the entries are cleaned up by the cpu's abort process, so we
-      // leave them for now
-
-      p0 = (uint8_t *)((uintptr_t)a0);
-      p1 = 0;
+      // copy size bytes over from host physical memory into buf
+      cpu_physical_memory_rw(a0, buf, size, 0);
     }
 
-    SANITY_ASSERT(size >= split);
-    SANITY_ASSERT((size != split) || !p1);
-
-    do_split_read(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-
+    // at this point, the read data is stored in buf, so we simply
+    // bswap it and store it into retval
     switch (idx & 3) {
     case 0:
-      SANITY_ASSERT(!p1);
-      SANITY_ASSERT(split == 1);
       if (sign)
         retval = (target_ulong) (int8_t)buf[0];
       else
@@ -5506,15 +5425,6 @@ abort_txn:
   cpu_loop_exit();
   return 0;
 }
-#else
-static inline target_ulong helper_htm_mem_load_helper(
-    CPUX86State *env, target_ulong a0, uint32_t idx, bool sign)
-{
-  // need a different implementation
-  assert(false);
-  return 0;
-}
-#endif /* defined(CONFIG_USER_ONLY) */
 
 target_ulong helper_htm_mem_loadu(
     CPUX86State *env, target_ulong a0, uint32_t idx)
@@ -5528,186 +5438,116 @@ target_ulong helper_htm_mem_loads(
   return helper_htm_mem_load_helper(env, a0, idx, true);
 }
 
-#if defined(CONFIG_USER_ONLY)
-static inline void
-do_split_write(uint8_t *p0, uint8_t *p1, const uint8_t *buf,
-               uint32_t split, uint32_t size)
-{
-  memmove(p0, buf, split);
-  if (size > split)
-    memmove(p1, buf + split, size - split);
-}
-
 void helper_htm_mem_store(
     CPUX86State *env, target_ulong t0, target_ulong a0, uint32_t idx)
 {
-  target_ulong cno0, cno1; /* need at most two cache lines */
-  CPUX86CacheLine *cline0, *cline1;
-  CPUX86CacheLineEntry *gline0, *gline1;
+  CPUX86CacheLineEntry *cline;
+  CPUX86CacheLineData *clinedata;
+  target_ulong cno, retval;
+  uint8_t buf[sizeof(target_ulong)];
+  uint32_t size, i;
+  unsigned long pd;
+  target_phys_addr_t page;
+  PhysPageDesc *p;
   CPUX86State *sp;
 
-  uint8_t *p0, *p1, buf[sizeof(t0)];
-  uint32_t split, size;
-
-  const char *reason;
-
-  // split means the following:
-  // the first split bytes of buf are written to [p0, p0 + split)
-  // the remaining (size - split) bytes of buf are written to
-  //   [p1, p1 + (size-split))
-
+  // num bytes to be read
   size = mem_idx_to_size(idx);
-  split = size;
 
-  // convert a0 to cache line number(s)
-  cno0 = X86_HTM_ADDR_TO_CNO(a0);
-  cno1 = ((a0 + size) % X86_CACHE_LINE_SIZE) == 0 ?
-    cno0 /* end at cache line boundary */ : X86_HTM_ADDR_TO_CNO(a0 + size);
-  SANITY_ASSERT(cno0 == cno1 || (cno0 + 1) == cno1);
+  // marshall t0 into buf
+  switch (idx & 3) {
+  case 0:
+    // st8
+    buf[0] = (uint8_t) t0;
+    break;
+
+  case 1:
+    // st16
+    *((uint16_t *)buf) = tswap16(t0);
+    break;
+
+  case 2:
+    // st32
+    *((uint32_t *)buf) = tswap32(t0);
+    break;
+
+  default:
+  case 3:
+#ifdef TARGET_X86_64
+    // st64
+    *((uint64_t *)buf) = tswap64(t0);
+#else
+    /* Should never happen on 32-bit targets.  */
+    assert(false);
+#endif
+    break;
+  }
 
   lock_cpu_mem();
   {
     if (X86_HTM_IN_TXN(env)) {
-
-      QPRINTF(env, "helper_htm_mem_store: store %d bytes t0=(0x%llx) "
-              "into addr=(0x%llx), cache_line_addr=(0x%llx)\n",
-              size,
-              (unsigned long long) t0,
-              (unsigned long long) a0,
-              (unsigned long long) X86_HTM_CNO_TO_ADDR(cno0));
-
       if (env->htm_needs_abort) {
         reason = "aborted by another CPU";
         goto abort_txn;
       }
 
-      if (cno0 == cno1) {
-        gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
-        if (!gline0) {
+      page = a0 & TARGET_PAGE_MASK;
+      p = phys_page_find(page >> TARGET_PAGE_BITS);
+      if (!p)
+        pd = IO_MEM_UNASSIGNED;
+      else
+        pd = p->phys_offset;
+
+      // check if reading from non-txn region (IO)
+      // see exec.c for where this check comes from
+      if ((pd & ~TARGET_PAGE_MASK) != IO_MEM_RAM) {
+        reason = "writing to non RAM region";
+        goto abort_txn;
+      }
+
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
+        if (!cline) {
           reason = "no global table space";
           goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_EXCLUSIVE, env)) {
+        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_EXCLUSIVE, env)) {
           reason = "could not acquire write lock";
           goto abort_txn;
         }
 
-        cline0 = cline1 = load_cacheline(env, cno0, true);
-        if (!cline0) {
+        clinedata = load_cacheline(env, cno, true);
+        if (!clinedata) {
           reason = "no local table space";
           goto abort_txn;
         }
-        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-        p1 = 0;
 
-        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-      } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, true);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, true);
-        if (!gline0) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline0, HTM_LOCK_EXCLUSIVE, env)) {
-          reason = "could not acquire write lock";
-          goto abort_txn;
-        }
-
-        if (!gline1) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(gline1, HTM_LOCK_EXCLUSIVE, env)) {
-          reason = "could not acquire write lock";
-          goto abort_txn;
-        }
-
-        cline0 = load_cacheline(env, cno0, true);
-        cline1 = load_cacheline(env, cno1, true);
-        if (!cline0 || !cline1) {
-          reason = "no local table space";
-          goto abort_txn;
-        }
-        SANITY_ASSERT(cline0 != cline1);
-        split = X86_HTM_CNO_TO_ADDR(cno1) - a0;
-        p0 = (uint8_t *)(&cline0->data[0] + X86_HTM_ADDR_CL_OFFSET(a0));
-        p1 = (uint8_t *)(&cline1->data[0]);
-
-        SANITY_ASSERT(size > split);
-        SANITY_ASSERT((p0 + split) <= (&cline0->data[0] + X86_CACHE_LINE_SIZE));
-        SANITY_ASSERT((p1 + (size - split)) <= (&cline1->data[0] + X86_CACHE_LINE_SIZE));
+        // write the byte into the cache line
+        clinedata->data[(a0 + i) % X86_CACHE_LINE_SIZE] = buf[i];
       }
     } else {
-      if (cno0 == cno1) {
-        gline0 = gline1 =
-          cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
-      } else {
-        gline0 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno0, false);
-        gline1 = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno1, false);
-      }
-
-      // non-txn writes abort all txns holding any sort of lock
-
-      if (gline0) {
-        SANITY_ASSERT(gline0->mode > HTM_LOCK_NONE);
-        for (sp = gline0->owners; sp; sp = sp->htm_lock_table_next) {
-          SANITY_ASSERT(sp->htm_nest_level);
-          sp->htm_needs_abort = 1;
-          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
+        if (cline && cline->mode > HTM_LOCK_NONE) {
+          // must abort other readers/writers
+          for (sp = cline->owners; sp; sp = sp->htm_lock_table_next) {
+            SANITY_ASSERT(X86_HTM_IN_TXN(sp));
+            sp->htm_needs_abort = 1;
+            QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
+          }
         }
       }
 
-      if (gline1) {
-        SANITY_ASSERT(gline1->mode > HTM_LOCK_NONE);
-        for (sp = gline1->owners; sp; sp = sp->htm_lock_table_next) {
-          SANITY_ASSERT(sp->htm_nest_level);
-          sp->htm_needs_abort = 1;
-          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
-        }
-      }
-
-      p0 = (uint8_t *)((uintptr_t)a0);
-      p1 = 0;
-    }
-
-    SANITY_ASSERT(size >= split);
-    SANITY_ASSERT((size != split) || !p1);
-
-    // see tci.c
-
-    switch (idx & 3) {
-    case 0:
-      // st8
-      SANITY_ASSERT(!p1);
-      SANITY_ASSERT(split == 1);
-      *(p0 + GUEST_BASE) = (uint8_t)t0;
-      break;
-
-    case 1:
-      // st16
-      *((uint16_t *)buf) = tswap16(t0);
-      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-      break;
-
-    case 2:
-      // st32
-      *((uint32_t *)buf) = tswap32(t0);
-      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-      break;
-
-    default:
-    case 3:
-#ifdef TARGET_X86_64
-      // st64
-      *((uint64_t *)buf) = tswap64(t0);
-      do_split_write(p0 + GUEST_BASE, p1 + GUEST_BASE, buf, split, size);
-#else
-      /* Should never happen on 32-bit targets.  */
-      assert(false);
-#endif
-      break;
+      // copy size bytes over from from to host physical memory
+      cpu_physical_memory_rw(a0, buf, size, 1);
     }
   }
   unlock_cpu_mem();
-  return;
+
+  return retval;
 
   /** WARNING: mem lock is held when coming here */
 abort_txn:
@@ -5716,21 +5556,12 @@ abort_txn:
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit();
+  return 0;
 }
-#else
-void helper_htm_mem_store(
-    CPUX86State *env, target_ulong t0, target_ulong a0, uint32_t idx)
-{
-  // XXX: will need a different implementation which looks at
-  // soft-mmu
-  assert(false);
-}
-#endif /* defined(CONFIG_USER_ONLY) */
 
-
-CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env)
+CPUX86CacheLineData* cpu_htm_get_free_cache_line(CPUX86State *env)
 {
-  CPUX86CacheLine *ret;
+  CPUX86CacheLineData *ret;
   if (!(ret = env->htm_free_list))
     // no more free cache lines
     return ret;
@@ -5739,16 +5570,16 @@ CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env)
   return ret;
 }
 
-void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLine *line)
+void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLineData *line)
 {
   line->next         = env->htm_free_list;
   env->htm_free_list = line;
 }
 
-CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno)
+CPUX86CacheLineData* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno)
 {
   target_ulong h;
-  CPUX86CacheLine *p;
+  CPUX86CacheLineData *p;
   h = X86_HTM_CNO_HASH_FCN(cno);
   for (p = env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; p; p = p->next) {
     if (p->cno == cno)
@@ -5757,10 +5588,10 @@ CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno)
   return 0;
 }
 
-bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry)
+bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLineData *entry)
 {
   target_ulong h;
-  CPUX86CacheLine **pp;
+  CPUX86CacheLineData **pp;
   bool found;
 
   h     = X86_HTM_CNO_HASH_FCN(entry->cno);
@@ -5783,10 +5614,10 @@ bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLine *entry)
   return !found;
 }
 
-CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno)
+CPUX86CacheLineData* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno)
 {
   target_ulong h;
-  CPUX86CacheLine **pp, *ret;
+  CPUX86CacheLineData **pp, *ret;
   h = X86_HTM_CNO_HASH_FCN(cno);
   for (pp = &env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; *pp; pp = &((*pp)->next)) {
     if ((*pp)->cno == cno) {
@@ -5799,10 +5630,10 @@ CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno)
   return 0;
 }
 
-void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*))
+void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLineData*))
 {
   int i;
-  CPUX86CacheLine *p;
+  CPUX86CacheLineData *p;
   for (i = 0; i < X86_HTM_NBUCKETS; i++) {
     for (p = env->htm_hash_table[i]; p; p = p->next) {
       fn(p);
@@ -5827,16 +5658,16 @@ void cpu_htm_hash_table_reset(CPUX86State *env)
 #if defined(CONFIG_USER_ONLY)
 
 void helper_vmrun(int aflag, int next_eip_addend)
-{ 
+{
 }
-void helper_vmmcall(void) 
-{ 
+void helper_vmmcall(void)
+{
 }
 void helper_vmload(int aflag)
-{ 
+{
 }
 void helper_vmsave(int aflag)
-{ 
+{
 }
 void helper_stgi(void)
 {
@@ -5844,20 +5675,20 @@ void helper_stgi(void)
 void helper_clgi(void)
 {
 }
-void helper_skinit(void) 
-{ 
+void helper_skinit(void)
+{
 }
 void helper_invlpga(int aflag)
-{ 
+{
 }
-void helper_vmexit(uint32_t exit_code, uint64_t exit_info_1) 
-{ 
+void helper_vmexit(uint32_t exit_code, uint64_t exit_info_1)
+{
 }
 void helper_svm_check_intercept_param(uint32_t type, uint64_t param)
 {
 }
 
-void helper_svm_check_io(uint32_t port, uint32_t param, 
+void helper_svm_check_io(uint32_t port, uint32_t param,
                          uint32_t next_eip_addend)
 {
 }
@@ -5866,16 +5697,16 @@ void helper_svm_check_io(uint32_t port, uint32_t param,
 static inline void svm_save_seg(target_phys_addr_t addr,
                                 const SegmentCache *sc)
 {
-    stw_phys(addr + offsetof(struct vmcb_seg, selector), 
+    stw_phys(addr + offsetof(struct vmcb_seg, selector),
              sc->selector);
-    stq_phys(addr + offsetof(struct vmcb_seg, base), 
+    stq_phys(addr + offsetof(struct vmcb_seg, base),
              sc->base);
-    stl_phys(addr + offsetof(struct vmcb_seg, limit), 
+    stl_phys(addr + offsetof(struct vmcb_seg, limit),
              sc->limit);
-    stw_phys(addr + offsetof(struct vmcb_seg, attrib), 
+    stw_phys(addr + offsetof(struct vmcb_seg, attrib),
              ((sc->flags >> 8) & 0xff) | ((sc->flags >> 12) & 0x0f00));
 }
-                                
+
 static inline void svm_load_seg(target_phys_addr_t addr, SegmentCache *sc)
 {
     unsigned int flags;
@@ -5887,7 +5718,7 @@ static inline void svm_load_seg(target_phys_addr_t addr, SegmentCache *sc)
     sc->flags = ((flags & 0xff) << 8) | ((flags & 0x0f00) << 12);
 }
 
-static inline void svm_load_seg_cache(target_phys_addr_t addr, 
+static inline void svm_load_seg_cache(target_phys_addr_t addr,
                                       CPUState *env, int seg_reg)
 {
     SegmentCache sc1, *sc = &sc1;
@@ -5930,13 +5761,13 @@ void helper_vmrun(int aflag, int next_eip_addend)
     stq_phys(env->vm_hsave + offsetof(struct vmcb, save.efer), env->efer);
     stq_phys(env->vm_hsave + offsetof(struct vmcb, save.rflags), compute_eflags());
 
-    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.es), 
+    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.es),
                   &env->segs[R_ES]);
-    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.cs), 
+    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.cs),
                  &env->segs[R_CS]);
-    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.ss), 
+    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.ss),
                  &env->segs[R_SS]);
-    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.ds), 
+    svm_save_seg(env->vm_hsave + offsetof(struct vmcb, save.ds),
                  &env->segs[R_DS]);
 
     stq_phys(env->vm_hsave + offsetof(struct vmcb, save.rip),
@@ -5980,7 +5811,7 @@ void helper_vmrun(int aflag, int next_eip_addend)
             env->hflags2 |= HF2_HIF_MASK;
     }
 
-    cpu_load_efer(env, 
+    cpu_load_efer(env,
                   ldq_phys(env->vm_vmcb + offsetof(struct vmcb, save.efer)));
     env->eflags = 0;
     load_eflags(ldq_phys(env->vm_vmcb + offsetof(struct vmcb, save.rflags)),
@@ -6124,13 +5955,13 @@ void helper_vmsave(int aflag)
                 addr, ldq_phys(addr + offsetof(struct vmcb, save.fs.base)),
                 env->segs[R_FS].base);
 
-    svm_save_seg(addr + offsetof(struct vmcb, save.fs), 
+    svm_save_seg(addr + offsetof(struct vmcb, save.fs),
                  &env->segs[R_FS]);
-    svm_save_seg(addr + offsetof(struct vmcb, save.gs), 
+    svm_save_seg(addr + offsetof(struct vmcb, save.gs),
                  &env->segs[R_GS]);
-    svm_save_seg(addr + offsetof(struct vmcb, save.tr), 
+    svm_save_seg(addr + offsetof(struct vmcb, save.tr),
                  &env->tr);
-    svm_save_seg(addr + offsetof(struct vmcb, save.ldtr), 
+    svm_save_seg(addr + offsetof(struct vmcb, save.ldtr),
                  &env->ldt);
 
 #ifdef TARGET_X86_64
@@ -6168,7 +5999,7 @@ void helper_invlpga(int aflag)
 {
     target_ulong addr;
     helper_svm_check_intercept_param(SVM_EXIT_INVLPGA, 0);
-    
+
     if (aflag == 2)
         addr = EAX;
     else
@@ -6247,7 +6078,7 @@ void helper_svm_check_intercept_param(uint32_t type, uint64_t param)
     }
 }
 
-void helper_svm_check_io(uint32_t port, uint32_t param, 
+void helper_svm_check_io(uint32_t port, uint32_t param,
                          uint32_t next_eip_addend)
 {
     if (env->intercept & (1ULL << (SVM_EXIT_IOIO - SVM_EXIT_INTR))) {
@@ -6256,7 +6087,7 @@ void helper_svm_check_io(uint32_t port, uint32_t param,
         uint16_t mask = (1 << ((param >> 4) & 7)) - 1;
         if(lduw_phys(addr + port / 8) & (mask << (port & 7))) {
             /* next EIP */
-            stq_phys(env->vm_vmcb + offsetof(struct vmcb, control.exit_info_2), 
+            stq_phys(env->vm_vmcb + offsetof(struct vmcb, control.exit_info_2),
                      env->eip + next_eip_addend);
             helper_vmexit(SVM_EXIT_IOIO, param | (port << 16));
         }
@@ -6281,13 +6112,13 @@ void helper_vmexit(uint32_t exit_code, uint64_t exit_info_1)
     }
 
     /* Save the VM state in the vmcb */
-    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.es), 
+    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.es),
                  &env->segs[R_ES]);
-    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.cs), 
+    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.cs),
                  &env->segs[R_CS]);
-    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.ss), 
+    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.ss),
                  &env->segs[R_SS]);
-    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.ds), 
+    svm_save_seg(env->vm_vmcb + offsetof(struct vmcb, save.ds),
                  &env->segs[R_DS]);
 
     stq_phys(env->vm_vmcb + offsetof(struct vmcb, save.gdtr.base), env->gdt.base);
@@ -6336,7 +6167,7 @@ void helper_vmexit(uint32_t exit_code, uint64_t exit_info_1)
     cpu_x86_update_cr3(env, ldq_phys(env->vm_hsave + offsetof(struct vmcb, save.cr3)));
     /* we need to set the efer after the crs so the hidden flags get
        set properly */
-    cpu_load_efer(env, 
+    cpu_load_efer(env,
                   ldq_phys(env->vm_hsave + offsetof(struct vmcb, save.efer)));
     env->eflags = 0;
     load_eflags(ldq_phys(env->vm_hsave + offsetof(struct vmcb, save.rflags)),
@@ -6659,7 +6490,7 @@ void helper_mtrace_inst_ret(target_ulong target_pc)
     mtrace_inst_call(target_pc, 0, 1);
 }
 
-void helper_mtrace_insn_count(void) 
+void helper_mtrace_insn_count(void)
 {
     mtrace_inst_inc();
 }
