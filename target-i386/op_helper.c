@@ -5196,11 +5196,17 @@ static void cache_line_commit(CPUX86CacheLineData *line)
   //         (unsigned long long) *((uint64_t *)(p + i * 8)));
   //}
 
+  int i;
   printf("cache_line_commit: commit CL starting at: 0x%llx\n",
          (unsigned long long) X86_HTM_CNO_TO_ADDR(line->cno));
-  cpu_physical_memory_rw(
-      X86_HTM_CNO_TO_ADDR(line->cno),
-      &line->data[0], X86_CACHE_LINE_SIZE, 1);
+
+  // XXX: static_assert
+  assert((X86_CACHE_LINE_SIZE % sizeof(uint64_t)) == 0);
+  for (i = 0; i < X86_CACHE_LINE_SIZE; i += sizeof(uint64_t))
+    __stq_mmu(
+      X86_HTM_CNO_TO_ADDR(line->cno) + i,
+      *((uint64_t *)&line->data[i]),
+      line->mmu_idx);
 }
 
 void helper_xend(CPUX86State *env)
@@ -5275,9 +5281,10 @@ mem_idx_to_size(uint32_t idx)
 }
 
 static inline CPUX86CacheLineData*
-load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
+load_cacheline(CPUX86State *env, target_ulong cno, int mmu_idx, bool alloc)
 {
   bool r;
+  int i;
   CPUX86CacheLineData *cline;
   // load the cache line into per-cpu buffer
   if (!(cline = cpu_htm_hash_table_lookup(env, cno)) && alloc) {
@@ -5289,18 +5296,20 @@ load_cacheline(CPUX86State *env, target_ulong cno, bool alloc)
       return 0;
 
     // read the cache line from memory, to fill the buffer
-    cpu_physical_memory_rw(
-        X86_HTM_CNO_TO_ADDR(cno),
-        &cline->data[0],
-        X86_CACHE_LINE_SIZE,
-        0);
+    // XXX: static_assert
+    assert((X86_CACHE_LINE_SIZE % sizeof(uint64_t)) == 0);
+    for (i = 0; i < X86_CACHE_LINE_SIZE; i += sizeof(uint64_t))
+      *((uint64_t *)&cline->data[i]) = __ldq_mmu(X86_HTM_CNO_TO_ADDR(cno) + i, mmu_idx);
 
     cline->cno = cno;
+    cline->mmu_idx = mmu_idx;
     if (!(r = cpu_htm_hash_table_insert(env, cline)))
       assert(false);
     SANITY_ASSERT(cpu_htm_hash_table_lookup(env, cno) == cline);
   }
-  SANITY_ASSERT(!cline || cline->cno == cno);
+  // the cline->mmu_idx == mmu_idx assumption should always be valid
+  // because on ring transitions we abort txns
+  SANITY_ASSERT(!cline || (cline->cno == cno && cline->mmu_idx == mmu_idx));
   return cline;
 }
 
@@ -5311,11 +5320,15 @@ static inline target_ulong helper_htm_mem_load_helper(
   CPUX86CacheLineData *clinedata;
   target_ulong cno, retval;
   uint8_t buf[sizeof(target_ulong)];
+  int mmu_idx;
   uint32_t size, i;
   const char *reason;
 
   // num bytes to be read
   size = mem_idx_to_size(idx);
+
+  // mmu_idx
+  mmu_idx = (idx >> 2) - 1;
 
   lock_cpu_mem();
   {
@@ -5343,13 +5356,13 @@ static inline target_ulong helper_htm_mem_load_helper(
           goto abort_txn;
         }
 
-        clinedata = load_cacheline(env, cno, false);
+        clinedata = load_cacheline(env, cno, mmu_idx, false);
         if (clinedata)
           // serve the read from the local cache line
           buf[i] = clinedata->data[(a0 + i) % X86_CACHE_LINE_SIZE];
         else
           // serve the read from main memory
-          cpu_physical_memory_rw(a0 + i, &buf[i], 1, 0);
+          buf[i] = __ldb_mmu(a0 + i, mmu_idx);
       }
     } else {
       // check to see if any cache line conflicts with other outstanding txns
@@ -5366,7 +5379,31 @@ static inline target_ulong helper_htm_mem_load_helper(
       }
 
       // copy size bytes over from host physical memory into buf
-      cpu_physical_memory_rw(a0, buf, size, 0);
+      switch (idx & 3) {
+      case 0:
+        buf[0] = __ldb_mmu(a0, mmu_idx);
+        break;
+
+      case 1:
+        *((uint16_t *)buf) = __ldw_mmu(a0, mmu_idx);
+        break;
+
+      case 2:
+        *((uint32_t *)buf) = __ldl_mmu(a0, mmu_idx);
+        break;
+
+      default:
+      case 3:
+#ifdef TARGET_X86_64
+        *((uint64_t *)buf) = __ldq_mmu(a0, mmu_idx);
+        break;
+#else
+        /* Should never happen on 32-bit targets.  */
+        assert(false);
+#endif
+        break;
+      }
+
     }
 
     // at this point, the read data is stored in buf, so we simply
@@ -5442,12 +5479,15 @@ void helper_htm_mem_store(
   target_ulong cno;
   uint8_t buf[sizeof(target_ulong)];
   uint32_t size, i;
+  int mmu_idx;
   const char *reason;
-
   CPUX86State *sp;
 
-  // num bytes to be read
+  // num bytes to be written
   size = mem_idx_to_size(idx);
+
+  // mmu_idx
+  mmu_idx = (idx >> 2) - 1;
 
   // marshall t0 into buf
   switch (idx & 3) {
@@ -5504,7 +5544,7 @@ void helper_htm_mem_store(
           goto abort_txn;
         }
 
-        clinedata = load_cacheline(env, cno, true);
+        clinedata = load_cacheline(env, cno, mmu_idx, true);
         if (!clinedata) {
           reason = "no local table space";
           goto abort_txn;
@@ -5528,8 +5568,34 @@ void helper_htm_mem_store(
         }
       }
 
-      // copy size bytes over from from to host physical memory
-      cpu_physical_memory_rw(a0, buf, size, 1);
+      // copy size bytes over from buf to host physical memory
+      switch (idx & 3) {
+      case 0:
+        // st8
+        __stb_mmu(a0, buf[0], mmu_idx);
+        break;
+
+      case 1:
+        // st16
+        __stw_mmu(a0, *((uint16_t *)buf), mmu_idx);
+        break;
+
+      case 2:
+        // st32
+        __stl_mmu(a0, *((uint32_t *)buf), mmu_idx);
+        break;
+
+      default:
+      case 3:
+#ifdef TARGET_X86_64
+        // st64
+        __stq_mmu(a0, *((uint64_t *)buf), mmu_idx);
+#else
+        /* Should never happen on 32-bit targets.  */
+        assert(false);
+#endif
+        break;
+      }
     }
   }
   unlock_cpu_mem();

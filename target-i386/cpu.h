@@ -691,6 +691,7 @@ typedef struct CPUX86StateCheckpoint {
  */
 typedef struct CPUX86CacheLineData {
   target_ulong cno; /* cache line number */
+  int mmu_idx; /* for saving to softmmu */
   struct CPUX86CacheLineData *next; /* next pointer, for linked-lists */
   uint8_t data[X86_CACHE_LINE_SIZE];
 } CPUX86CacheLineData;

@@ -615,61 +615,22 @@ static inline void gen_op_addq_A0_reg_sN(int shift, int reg)
 }
 #endif
 
-/* Uses HTM helpers for user mode, otherwise does the regular thing */
 static inline void gen_op_lds_T0_A0(int idx)
 {
-#if defined(CONFIG_USER_ONLY)
-  TCGv tmp;
-  tmp = tcg_temp_new();
-  gen_helper_htm_mem_loads(tmp, cpu_env, cpu_A0, tcg_const_i32(idx));
-  tcg_gen_mov_tl(cpu_T[0], tmp);
-  tcg_temp_free(tmp);
-#else
-  int mem_index = (idx >> 2) - 1;
-  switch(idx & 3) {
-    case 0:
-      tcg_gen_qemu_ld8s(cpu_T[0], cpu_A0, mem_index);
-      break;
-    case 1:
-      tcg_gen_qemu_ld16s(cpu_T[0], cpu_A0, mem_index);
-      break;
-    default:
-    case 2:
-      tcg_gen_qemu_ld32s(cpu_T[0], cpu_A0, mem_index);
-      break;
-  }
-#endif
+    TCGv tmp;
+    tmp = tcg_temp_new();
+    gen_helper_htm_mem_loads(tmp, cpu_env, cpu_A0, tcg_const_i32(idx));
+    tcg_gen_mov_tl(cpu_T[0], tmp);
+    tcg_temp_free(tmp);
 }
 
 static inline void gen_op_ld_v(int idx, TCGv t0, TCGv a0)
 {
-#if defined(CONFIG_USER_ONLY)
     TCGv tmp;
     tmp = tcg_temp_new();
     gen_helper_htm_mem_loadu(tmp, cpu_env, a0, tcg_const_i32(idx));
     tcg_gen_mov_tl(t0, tmp);
     tcg_temp_free(tmp);
-#else
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-      case 0:
-        tcg_gen_qemu_ld8u(t0, a0, mem_index);
-        break;
-      case 1:
-        tcg_gen_qemu_ld16u(t0, a0, mem_index);
-        break;
-      case 2:
-        tcg_gen_qemu_ld32u(t0, a0, mem_index);
-        break;
-      default:
-      case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_ld64(t0, a0, mem_index);
-#endif
-        break;
-    }
-#endif
 }
 
 /* XXX: always use ldu or lds */
@@ -688,32 +649,9 @@ static inline void gen_op_ld_T1_A0(int idx)
     gen_op_ld_v(idx, cpu_T[1], cpu_A0);
 }
 
-/* Uses HTM helpers for user mode, otherwise does the regular thing */
 static inline void gen_op_st_v(int idx, TCGv t0, TCGv a0)
 {
-#if defined(CONFIG_USER_ONLY)
     gen_helper_htm_mem_store(cpu_env, t0, a0, tcg_const_i32(idx));
-#else
-    int mem_index = (idx >> 2) - 1;
-    switch(idx & 3) {
-      case 0:
-        tcg_gen_qemu_st8(t0, a0, mem_index);
-        break;
-      case 1:
-        tcg_gen_qemu_st16(t0, a0, mem_index);
-        break;
-      case 2:
-        tcg_gen_qemu_st32(t0, a0, mem_index);
-        break;
-      default:
-      case 3:
-        /* Should never happen on 32-bit targets.  */
-#ifdef TARGET_X86_64
-        tcg_gen_qemu_st64(t0, a0, mem_index);
-#endif
-        break;
-    }
-#endif
 }
 
 static inline void gen_op_st_T0_A0(int idx)
