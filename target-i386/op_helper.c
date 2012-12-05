@@ -5312,9 +5312,7 @@ static inline target_ulong helper_htm_mem_load_helper(
   target_ulong cno, retval;
   uint8_t buf[sizeof(target_ulong)];
   uint32_t size, i;
-  unsigned long pd;
-  target_phys_addr_t page;
-  PhysPageDesc *p;
+  const char *reason;
 
   // num bytes to be read
   size = mem_idx_to_size(idx);
@@ -5327,16 +5325,8 @@ static inline target_ulong helper_htm_mem_load_helper(
         goto abort_txn;
       }
 
-      page = a0 & TARGET_PAGE_MASK;
-      p = phys_page_find(page >> TARGET_PAGE_BITS);
-      if (!p)
-        pd = IO_MEM_UNASSIGNED;
-      else
-        pd = p->phys_offset;
-
       // check if reading from non-txn region (IO)
-      // see exec. for where this check comes from
-      if ((pd & ~TARGET_PAGE_MASK) > IO_MEM_ROM && !(pd & IO_MEM_ROMD)) {
+      if (!cpu_physical_memory_is_readable_ram(a0, size)) {
         reason = "reading from IO region";
         goto abort_txn;
       }
@@ -5449,12 +5439,11 @@ void helper_htm_mem_store(
 {
   CPUX86CacheLineEntry *cline;
   CPUX86CacheLineData *clinedata;
-  target_ulong cno, retval;
+  target_ulong cno;
   uint8_t buf[sizeof(target_ulong)];
   uint32_t size, i;
-  unsigned long pd;
-  target_phys_addr_t page;
-  PhysPageDesc *p;
+  const char *reason;
+
   CPUX86State *sp;
 
   // num bytes to be read
@@ -5497,16 +5486,8 @@ void helper_htm_mem_store(
         goto abort_txn;
       }
 
-      page = a0 & TARGET_PAGE_MASK;
-      p = phys_page_find(page >> TARGET_PAGE_BITS);
-      if (!p)
-        pd = IO_MEM_UNASSIGNED;
-      else
-        pd = p->phys_offset;
-
-      // check if reading from non-txn region (IO)
-      // see exec.c for where this check comes from
-      if ((pd & ~TARGET_PAGE_MASK) != IO_MEM_RAM) {
+      // check if writing to non-txn region (IO)
+      if (!cpu_physical_memory_is_writable_ram(a0, size)) {
         reason = "writing to non RAM region";
         goto abort_txn;
       }
@@ -5553,7 +5534,7 @@ void helper_htm_mem_store(
   }
   unlock_cpu_mem();
 
-  return retval;
+  return;
 
   /** WARNING: mem lock is held when coming here */
 abort_txn:
@@ -5562,7 +5543,6 @@ abort_txn:
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit();
-  return 0;
 }
 
 CPUX86CacheLineData* cpu_htm_get_free_cache_line(CPUX86State *env)

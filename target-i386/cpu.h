@@ -693,8 +693,7 @@ typedef struct CPUX86CacheLineData {
   target_ulong cno; /* cache line number */
   struct CPUX86CacheLineData *next; /* next pointer, for linked-lists */
   uint8_t data[X86_CACHE_LINE_SIZE];
-} CPUX86CacheLine;
-
+} CPUX86CacheLineData;
 
 typedef struct CPUX86State {
     /* standard registers */
@@ -1110,13 +1109,13 @@ void do_cpu_init(CPUState *env);
 void do_cpu_sipi(CPUState *env);
 
 /* mem_helper.c */
-CPUX86CacheLine* cpu_htm_get_free_cache_line(CPUX86State *env);
+CPUX86CacheLineData* cpu_htm_get_free_cache_line(CPUX86State *env);
 void cpu_htm_return_cache_line(CPUX86State *env, CPUX86CacheLineData *line);
 
-CPUX86CacheLine* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
+CPUX86CacheLineData* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cno);
 bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLineData *entry);
-CPUX86CacheLine* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
-void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLine*));
+CPUX86CacheLineData* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cno);
+void cpu_htm_hash_table_iterate(CPUX86State *env, void (*fn)(CPUX86CacheLineData*));
 void cpu_htm_hash_table_reset(CPUX86State *env);
 
 

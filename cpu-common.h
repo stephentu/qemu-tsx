@@ -81,6 +81,10 @@ void *cpu_physical_memory_map(target_phys_addr_t addr,
                               int is_write);
 void cpu_physical_memory_unmap(void *buffer, target_phys_addr_t len,
                                int is_write, target_phys_addr_t access_len);
+
+bool cpu_physical_memory_is_readable_ram(target_phys_addr_t addr, int len);
+bool cpu_physical_memory_is_writable_ram(target_phys_addr_t addr, int len);
+
 void *cpu_register_map_client(void *opaque, void (*callback)(void *opaque));
 void cpu_unregister_map_client(void *cookie);
 

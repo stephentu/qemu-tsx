@@ -229,21 +229,21 @@ static void map_exec(void *addr, long size)
     DWORD old_protect;
     VirtualProtect(addr, size,
                    PAGE_EXECUTE_READWRITE, &old_protect);
-    
+
 }
 #else
 static void map_exec(void *addr, long size)
 {
     unsigned long start, end, page_size;
-    
+
     page_size = getpagesize();
     start = (unsigned long)addr;
     start &= ~(page_size - 1);
-    
+
     end = (unsigned long)addr + size;
     end += page_size - 1;
     end &= ~(page_size - 1);
-    
+
     mprotect((void *)start, end - start,
              PROT_READ | PROT_WRITE | PROT_EXEC);
 }
@@ -480,7 +480,7 @@ static void code_gen_alloc(unsigned long tb_size)
         code_gen_buffer_size = MIN_CODE_GEN_BUFFER_SIZE;
     /* The code gen buffer location may have constraints depending on
        the host cpu and OS */
-#if defined(__linux__) 
+#if defined(__linux__)
     {
         int flags;
         void *start = NULL;
@@ -542,7 +542,7 @@ static void code_gen_alloc(unsigned long tb_size)
         }
 #endif
         code_gen_buffer = mmap(addr, code_gen_buffer_size,
-                               PROT_WRITE | PROT_READ | PROT_EXEC, 
+                               PROT_WRITE | PROT_READ | PROT_EXEC,
                                flags, -1, 0);
         if (code_gen_buffer == MAP_FAILED) {
             fprintf(stderr, "Could not allocate dynamic translator buffer\n");
@@ -555,7 +555,7 @@ static void code_gen_alloc(unsigned long tb_size)
 #endif
 #endif /* !USE_STATIC_CODE_GEN_BUFFER */
     map_exec(code_gen_prologue, sizeof(code_gen_prologue));
-    code_gen_buffer_max_size = code_gen_buffer_size - 
+    code_gen_buffer_max_size = code_gen_buffer_size -
         (TCG_MAX_OP_SIZE * OPC_MAX_SIZE);
     code_gen_max_blocks = code_gen_buffer_size / CODE_GEN_AVG_BLOCK_SIZE;
     tbs = qemu_malloc(code_gen_max_blocks * sizeof(TranslationBlock));
@@ -1909,11 +1909,11 @@ static inline void tlb_flush_jmp_cache(CPUState *env, target_ulong addr)
     /* Discard jump cache entries for any tb which might potentially
        overlap the flushed page.  */
     i = tb_jmp_cache_hash_page(addr - TARGET_PAGE_SIZE);
-    memset (&env->tb_jmp_cache[i], 0, 
+    memset (&env->tb_jmp_cache[i], 0,
             TB_JMP_PAGE_SIZE * sizeof(TranslationBlock *));
 
     i = tb_jmp_cache_hash_page(addr);
-    memset (&env->tb_jmp_cache[i], 0, 
+    memset (&env->tb_jmp_cache[i], 0,
             TB_JMP_PAGE_SIZE * sizeof(TranslationBlock *));
 }
 
@@ -4203,6 +4203,50 @@ int cpu_memory_rw_debug(CPUState *env, target_ulong addr,
 }
 #endif
 
+bool cpu_physical_memory_is_readable_ram(target_phys_addr_t addr, int len)
+{
+  target_phys_addr_t page;
+  PhysPageDesc *p;
+  unsigned long pd;
+  int i;
+
+  assert(len >= 1);
+  // XXX: optimize - at most we only need to check two pages!
+  for (i = 0; i < len; i++) {
+    page = (addr + i) & TARGET_PAGE_MASK;
+    p = phys_page_find(page >> TARGET_PAGE_BITS);
+    if (!p)
+      pd = IO_MEM_UNASSIGNED;
+    else
+      pd = p->phys_offset;
+    if ((pd & ~TARGET_PAGE_MASK) > IO_MEM_ROM && !(pd & IO_MEM_ROMD))
+      return false;
+  }
+  return true;
+}
+
+bool cpu_physical_memory_is_writable_ram(target_phys_addr_t addr, int len)
+{
+  unsigned long pd;
+  target_phys_addr_t page;
+  PhysPageDesc *p;
+  int i;
+
+  assert(len >= 1);
+  // XXX: optimize - at most we only need to check two pages!
+  for (i = 0; i < len; i++) {
+    page = (addr + i) & TARGET_PAGE_MASK;
+    p = phys_page_find(page >> TARGET_PAGE_BITS);
+    if (!p)
+      pd = IO_MEM_UNASSIGNED;
+    else
+      pd = p->phys_offset;
+    if ((pd & ~TARGET_PAGE_MASK) != IO_MEM_RAM)
+      return false;
+  }
+  return true;
+}
+
 /* in deterministic execution mode, instructions doing device I/Os
    must be at the end of the TB */
 void cpu_io_recompile(CPUState *env, void *retaddr)
@@ -4214,7 +4258,7 @@ void cpu_io_recompile(CPUState *env, void *retaddr)
 
     tb = tb_find_pc((unsigned long)retaddr);
     if (!tb) {
-        cpu_abort(env, "cpu_io_recompile: could not find TB for pc=%p", 
+        cpu_abort(env, "cpu_io_recompile: could not find TB for pc=%p",
                   retaddr);
     }
     n = env->icount_decr.u16.low + tb->icount;
@@ -4293,7 +4337,7 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf)
     cpu_fprintf(f, "Translation buffer state:\n");
     cpu_fprintf(f, "gen code size       %td/%ld\n",
                 code_gen_ptr - code_gen_buffer, code_gen_buffer_max_size);
-    cpu_fprintf(f, "TB count            %d/%d\n", 
+    cpu_fprintf(f, "TB count            %d/%d\n",
                 nb_tbs, code_gen_max_blocks);
     cpu_fprintf(f, "TB avg target size  %d max=%d bytes\n",
                 nb_tbs ? target_code_size / nb_tbs : 0,
