@@ -5330,6 +5330,9 @@ static inline target_ulong helper_htm_mem_load_helper(
   // mmu_idx
   mmu_idx = (idx >> 2) - 1;
 
+  // a0 is a *virtual* address- we must translate it to a physical address
+  // using the TLB helpers
+
   lock_cpu_mem();
   {
     if (X86_HTM_IN_TXN(env)) {
@@ -6545,4 +6548,121 @@ void helper_mtrace_inst_ret(target_ulong target_pc)
 void helper_mtrace_insn_count(void)
 {
     mtrace_inst_inc();
+}
+
+void cpu_htm_notify_io_read(target_phys_addr_t physaddr,
+                            target_ulong addr,
+                            int size, void *retaddr)
+{
+  if (X86_HTM_IN_TXN(cpu_single_env)) {
+    cpu_htm_low_level_abort(cpu_single_env);
+    cpu_loop_exit();
+  }
+}
+
+void cpu_htm_notify_io_write(target_phys_addr_t physaddr,
+                             target_ulong addr,
+                             int size, void *retaddr)
+{
+  if (X86_HTM_IN_TXN(cpu_single_env)) {
+    cpu_htm_low_level_abort(cpu_single_env);
+    cpu_loop_exit();
+  }
+}
+
+static bool cpu_htm_handle_load(
+    target_phys_addr_t host_addr, target_ulong guest_addr,
+    uint8_t *res, int data_size, bool is_signed, int mmu_idx, void *retaddr)
+{
+  assert(!X86_HTM_IN_TXN(cpu_single_env));
+  return false;
+}
+
+static bool cpu_htm_handle_store(
+    target_phys_addr_t host_addr, target_ulong guest_addr,
+    uint64_t val, int data_size, int mmu_idx, void *retaddr)
+{
+  assert(!X86_HTM_IN_TXN(cpu_single_env));
+  return false;
+}
+
+bool cpu_htm_handle_loadb(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint8_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      res, sizeof(uint8_t), true, mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_loadub(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint8_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      res, sizeof(uint8_t), false, mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_loadw(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint16_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      (uint8_t *)res, sizeof(uint16_t), true, mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_loaduw(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint16_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      (uint8_t *)res, sizeof(uint16_t), false, mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_loadl(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint32_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      (uint8_t *)res, sizeof(uint32_t), true, mmu_idx, retaddr);
+}
+
+
+bool cpu_htm_handle_loadq(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint64_t *res, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      (uint8_t *)res, sizeof(uint64_t), true, mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_storeb(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint8_t val, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_store(host_addr, guest_addr,
+      val, sizeof(uint8_t), mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_storew(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint16_t val, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_store(host_addr, guest_addr,
+      val, sizeof(uint16_t), mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_storel(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint32_t val, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_store(host_addr, guest_addr,
+      val, sizeof(uint32_t), mmu_idx, retaddr);
+}
+
+bool cpu_htm_handle_storeq(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint64_t val, int mmu_idx, void *retaddr)
+{
+  return cpu_htm_handle_store(host_addr, guest_addr,
+      val, sizeof(uint64_t), mmu_idx, retaddr);
 }

@@ -888,7 +888,7 @@ extern int mem_prealloc;
 /* physical memory access */
 
 /* MMIO pages are identified by a combination of an IO device index and
-   3 flags.  The ROMD code stores the page ram offset in iotlb entry, 
+   3 flags.  The ROMD code stores the page ram offset in iotlb entry,
    so only a limited number of ids are avaiable.  */
 
 #define IO_MEM_NB_ENTRIES  (1 << (TARGET_PAGE_BITS  - IO_MEM_SHIFT))
@@ -962,6 +962,48 @@ int cpu_physical_sync_dirty_bitmap(target_phys_addr_t start_addr,
                                    target_phys_addr_t end_addr);
 
 void dump_exec_info(FILE *f, fprintf_function cpu_fprintf);
+
+/** this is for hardware TM only */
+
+void cpu_htm_notify_io_read(target_phys_addr_t physaddr,
+                            target_ulong addr,
+                            int size, void *retaddr);
+void cpu_htm_notify_io_write(target_phys_addr_t physaddr,
+                             target_ulong addr,
+                             int size, void *retaddr);
+
+bool cpu_htm_handle_loadb(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint8_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_loadub(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint8_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_loadw(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint16_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_loaduw(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint16_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_loadl(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint32_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_loadq(target_phys_addr_t host_addr,
+                          target_ulong guest_addr,
+                          uint64_t *res, int mmu_idx, void *retaddr);
+
+bool cpu_htm_handle_storeb(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint8_t val, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_storew(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint16_t val, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_storel(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint32_t val, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_storeq(target_phys_addr_t host_addr,
+                           target_ulong guest_addr,
+                           uint64_t val, int mmu_idx, void *retaddr);
+
 #endif /* !CONFIG_USER_ONLY */
 
 int cpu_memory_rw_debug(CPUState *env, target_ulong addr,
@@ -978,11 +1020,11 @@ void REGPARM mtrace_st(target_ulong host_addr, target_ulong guest_addr, char byt
 void REGPARM mtrace_ld(target_ulong host_addr, target_ulong guest_addr, char bytes, void *retaddr);
 void REGPARM mtrace_tcg_st(target_ulong host_addr, target_ulong guest_addr, char bytes);
 void REGPARM mtrace_tcg_ld(target_ulong host_addr, target_ulong guest_addr, char bytes);
-void mtrace_io_write(void *cb, target_phys_addr_t host_addr, target_ulong guest_addr, 
+void mtrace_io_write(void *cb, target_phys_addr_t host_addr, target_ulong guest_addr,
 		     char bytes, void *retaddr);
 void mtrace_io_read(void *cb, target_phys_addr_t host_addr, target_ulong guest_addr,
 		    char bytes, void *retaddr);
-void mtrace_inst_exec(target_ulong a0, target_ulong a1, 
+void mtrace_inst_exec(target_ulong a0, target_ulong a1,
 		      target_ulong a2, target_ulong a3,
 		      target_ulong a4, target_ulong a5);
 void mtrace_inst_call(target_ulong target_pc, target_ulong return_pc,
