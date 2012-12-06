@@ -5316,149 +5316,7 @@ load_cacheline(CPUX86State *env, target_ulong cno, int mmu_idx, bool alloc)
 static inline target_ulong helper_htm_mem_load_helper(
     CPUX86State *env, target_ulong a0, uint32_t idx, bool sign)
 {
-  CPUX86CacheLineEntry *cline;
-  CPUX86CacheLineData *clinedata;
-  target_ulong cno, retval;
-  uint8_t buf[sizeof(target_ulong)];
-  int mmu_idx;
-  uint32_t size, i;
-  const char *reason;
-
-  // num bytes to be read
-  size = mem_idx_to_size(idx);
-
-  // mmu_idx
-  mmu_idx = (idx >> 2) - 1;
-
-  // a0 is a *virtual* address- we must translate it to a physical address
-  // using the TLB helpers
-
-  lock_cpu_mem();
-  {
-    if (X86_HTM_IN_TXN(env)) {
-      if (env->htm_needs_abort) {
-        reason = "aborted by another CPU";
-        goto abort_txn;
-      }
-
-      // check if reading from non-txn region (IO)
-      if (!cpu_physical_memory_is_readable_ram(a0, size)) {
-        reason = "reading from IO region";
-        goto abort_txn;
-      }
-
-      // check to see if any cache line conflicts with other outstanding txns
-      for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
-        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
-        if (!cline) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_SHARED, env)) {
-          reason = "could not acquire read lock";
-          goto abort_txn;
-        }
-
-        clinedata = load_cacheline(env, cno, mmu_idx, false);
-        if (clinedata)
-          // serve the read from the local cache line
-          buf[i] = clinedata->data[(a0 + i) % X86_CACHE_LINE_SIZE];
-        else
-          // serve the read from main memory
-          buf[i] = __ldb_mmu(a0 + i, mmu_idx);
-      }
-    } else {
-      // check to see if any cache line conflicts with other outstanding txns
-      for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
-        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
-        if (cline && cline->mode == HTM_LOCK_EXCLUSIVE) {
-          // must abort writer
-          SANITY_ASSERT(cline->owners);
-          SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners));
-          cline->owners->htm_needs_abort = true;
-          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
-        }
-      }
-
-      // copy size bytes over from host physical memory into buf
-      switch (idx & 3) {
-      case 0:
-        buf[0] = __ldb_mmu(a0, mmu_idx);
-        break;
-
-      case 1:
-        *((uint16_t *)buf) = __ldw_mmu(a0, mmu_idx);
-        break;
-
-      case 2:
-        *((uint32_t *)buf) = __ldl_mmu(a0, mmu_idx);
-        break;
-
-      default:
-      case 3:
-#ifdef TARGET_X86_64
-        *((uint64_t *)buf) = __ldq_mmu(a0, mmu_idx);
-        break;
-#else
-        /* Should never happen on 32-bit targets.  */
-        assert(false);
-#endif
-        break;
-      }
-
-    }
-
-    // at this point, the read data is stored in buf, so we simply
-    // bswap it and store it into retval
-    switch (idx & 3) {
-    case 0:
-      if (sign)
-        retval = (target_ulong) (int8_t)buf[0];
-      else
-        retval = (target_ulong) buf[0];
-      break;
-
-    case 1:
-      if (sign)
-        retval = (target_ulong) (int16_t)tswap16(*((uint16_t *)buf));
-      else
-        retval = (target_ulong) tswap16(*((uint16_t *)buf));
-      break;
-
-    case 2:
-      if (sign)
-        retval = (target_ulong) (int32_t)tswap32(*((uint32_t *)buf));
-      else
-        retval = (target_ulong) tswap32(*((uint32_t *)buf));
-      break;
-
-    default:
-    case 3:
-#ifdef TARGET_X86_64
-      if (sign)
-        retval = (target_ulong) (int64_t)tswap64(*((uint64_t *)buf));
-      else
-        retval = (target_ulong) tswap64(*((uint64_t *)buf));
-      break;
-#else
-      /* Should never happen on 32-bit targets.  */
-      assert(false);
-#endif
-      break;
-    }
-  }
-  unlock_cpu_mem();
-
-  return retval;
-
-  /** WARNING: mem lock is held when coming here */
-abort_txn:
-  SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  QPRINTF(env, "aborting txn because: %s\n", reason);
-  cpu_htm_low_level_abort(env);
-  unlock_cpu_mem();
-  cpu_loop_exit();
+  assert(false);
   return 0;
 }
 
@@ -5477,141 +5335,7 @@ target_ulong helper_htm_mem_loads(
 void helper_htm_mem_store(
     CPUX86State *env, target_ulong t0, target_ulong a0, uint32_t idx)
 {
-  CPUX86CacheLineEntry *cline;
-  CPUX86CacheLineData *clinedata;
-  target_ulong cno;
-  uint8_t buf[sizeof(target_ulong)];
-  uint32_t size, i;
-  int mmu_idx;
-  const char *reason;
-  CPUX86State *sp;
-
-  // num bytes to be written
-  size = mem_idx_to_size(idx);
-
-  // mmu_idx
-  mmu_idx = (idx >> 2) - 1;
-
-  // marshall t0 into buf
-  switch (idx & 3) {
-  case 0:
-    // st8
-    buf[0] = (uint8_t) t0;
-    break;
-
-  case 1:
-    // st16
-    *((uint16_t *)buf) = tswap16(t0);
-    break;
-
-  case 2:
-    // st32
-    *((uint32_t *)buf) = tswap32(t0);
-    break;
-
-  default:
-  case 3:
-#ifdef TARGET_X86_64
-    // st64
-    *((uint64_t *)buf) = tswap64(t0);
-#else
-    /* Should never happen on 32-bit targets.  */
-    assert(false);
-#endif
-    break;
-  }
-
-  lock_cpu_mem();
-  {
-    if (X86_HTM_IN_TXN(env)) {
-      if (env->htm_needs_abort) {
-        reason = "aborted by another CPU";
-        goto abort_txn;
-      }
-
-      // check if writing to non-txn region (IO)
-      if (!cpu_physical_memory_is_writable_ram(a0, size)) {
-        reason = "writing to non RAM region";
-        goto abort_txn;
-      }
-
-      // check to see if any cache line conflicts with other outstanding txns
-      for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
-        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
-        if (!cline) {
-          reason = "no global table space";
-          goto abort_txn;
-        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_EXCLUSIVE, env)) {
-          reason = "could not acquire write lock";
-          goto abort_txn;
-        }
-
-        clinedata = load_cacheline(env, cno, mmu_idx, true);
-        if (!clinedata) {
-          reason = "no local table space";
-          goto abort_txn;
-        }
-
-        // write the byte into the cache line
-        clinedata->data[(a0 + i) % X86_CACHE_LINE_SIZE] = buf[i];
-      }
-    } else {
-      // check to see if any cache line conflicts with other outstanding txns
-      for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(a0 + i);
-        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
-        if (cline && cline->mode > HTM_LOCK_NONE) {
-          // must abort other readers/writers
-          for (sp = cline->owners; sp; sp = sp->htm_lock_table_next) {
-            SANITY_ASSERT(X86_HTM_IN_TXN(sp));
-            sp->htm_needs_abort = 1;
-            QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
-          }
-        }
-      }
-
-      // copy size bytes over from buf to host physical memory
-      switch (idx & 3) {
-      case 0:
-        // st8
-        __stb_mmu(a0, buf[0], mmu_idx);
-        break;
-
-      case 1:
-        // st16
-        __stw_mmu(a0, *((uint16_t *)buf), mmu_idx);
-        break;
-
-      case 2:
-        // st32
-        __stl_mmu(a0, *((uint32_t *)buf), mmu_idx);
-        break;
-
-      default:
-      case 3:
-#ifdef TARGET_X86_64
-        // st64
-        __stq_mmu(a0, *((uint64_t *)buf), mmu_idx);
-#else
-        /* Should never happen on 32-bit targets.  */
-        assert(false);
-#endif
-        break;
-      }
-    }
-  }
-  unlock_cpu_mem();
-
-  return;
-
-  /** WARNING: mem lock is held when coming here */
-abort_txn:
-  SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  QPRINTF(env, "aborting txn because: %s\n", reason);
-  cpu_htm_low_level_abort(env);
-  unlock_cpu_mem();
-  cpu_loop_exit();
+  assert(false);
 }
 
 CPUX86CacheLineData* cpu_htm_get_free_cache_line(CPUX86State *env)
@@ -6572,17 +6296,232 @@ void cpu_htm_notify_io_write(target_phys_addr_t physaddr,
 
 static bool cpu_htm_handle_load(
     target_phys_addr_t host_addr, target_ulong guest_addr,
-    uint8_t *res, int data_size, bool is_signed, int mmu_idx, void *retaddr)
+    uint8_t *res, int size, bool sign, int mmu_idx, void *retaddr)
 {
-  assert(!X86_HTM_IN_TXN(cpu_single_env));
+  CPUX86State *env;
+  CPUX86CacheLineEntry *cline;
+  CPUX86CacheLineData *clinedata;
+  target_ulong cno;
+  uint8_t buf[sizeof(uint64_t)];
+  int i;
+  const char *reason;
+
+  env = cpu_single_env;
+
+  lock_cpu_mem();
+  {
+    if (X86_HTM_IN_TXN(env)) {
+      if (env->htm_needs_abort) {
+        reason = "aborted by another CPU";
+        goto abort_txn;
+      }
+
+      // XXX: optimize- should only need to lookup at most 2 cache lines!
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
+        if (!cline) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_SHARED, env)) {
+          reason = "could not acquire read lock";
+          goto abort_txn;
+        }
+
+        clinedata = load_cacheline(env, cno, mmu_idx, false);
+        if (clinedata)
+          // serve the read from the local cache line
+          buf[i] = clinedata->data[(host_addr + i) % X86_CACHE_LINE_SIZE];
+        else
+          goto do_not_handle;
+      }
+    } else {
+      // check to see if any cache line conflicts with other outstanding txns
+      // if so, abort other CPUs
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
+        if (cline && cline->mode == HTM_LOCK_EXCLUSIVE) {
+          // must abort writer
+          SANITY_ASSERT(cline->owners);
+          SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners));
+          cline->owners->htm_needs_abort = true;
+          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
+        }
+      }
+
+      goto do_not_handle;
+    }
+
+    // XXX: this sign/unsigned business doesn't actually achieve anything
+    // because we store into buffers of the exact size, so we don't need
+    // any sign extending
+    //
+    // at this point, the read data is stored in buf, so we simply
+    // bswap it and store it into res
+    switch (size) {
+    case sizeof(uint8_t):
+      if (sign)
+        *res = (int8_t)buf[0];
+      else
+        *res = buf[0];
+      break;
+
+    case sizeof(uint16_t):
+      if (sign)
+        *((uint16_t *)res) = (int16_t)tswap16(*((uint16_t *)buf));
+      else
+        *((uint16_t *)res) = tswap16(*((uint16_t *)buf));
+      break;
+
+    case sizeof(uint32_t):
+      if (sign)
+        *((uint32_t *)res) = (int32_t)tswap32(*((uint32_t *)buf));
+      else
+        *((uint32_t *)res) = tswap32(*((uint32_t *)buf));
+      break;
+
+    default:
+    case sizeof(uint64_t):
+#ifdef TARGET_X86_64
+      if (sign)
+        *((uint64_t *)res) = (int64_t)tswap64(*((uint64_t *)buf));
+      else
+        *((uint64_t *)res) = tswap64(*((uint64_t *)buf));
+      break;
+#else
+      /* Should never happen on 32-bit targets.  */
+      assert(false);
+#endif
+      break;
+    }
+  }
+  unlock_cpu_mem();
+
+  // we handled the load
+  return true;
+
+do_not_handle:
+  /** WARNING: mem lock is held when coming here */
+  unlock_cpu_mem();
+  return false;
+
+  /** WARNING: mem lock is held when coming here */
+abort_txn:
+  SANITY_ASSERT(X86_HTM_IN_TXN(env));
+  QPRINTF(env, "aborting txn because: %s\n", reason);
+  cpu_htm_low_level_abort(env);
+  unlock_cpu_mem();
+  cpu_loop_exit();
   return false;
 }
 
 static bool cpu_htm_handle_store(
     target_phys_addr_t host_addr, target_ulong guest_addr,
-    uint64_t val, int data_size, int mmu_idx, void *retaddr)
+    uint64_t val, int size, int mmu_idx, void *retaddr)
 {
-  assert(!X86_HTM_IN_TXN(cpu_single_env));
+  CPUX86CacheLineEntry *cline;
+  CPUX86CacheLineData *clinedata;
+  target_ulong cno;
+  uint8_t buf[sizeof(uint64_t)];
+  int i;
+  const char *reason;
+  CPUX86State *sp;
+
+  // marshall t0 into buf
+  switch (size) {
+  case sizeof(uint8_t):
+    // st8
+    buf[0] = (uint8_t) val;
+    break;
+
+  case sizeof(uint16_t):
+    // st16
+    *((uint16_t *)buf) = tswap16(val);
+    break;
+
+  case sizeof(uint32_t):
+    // st32
+    *((uint32_t *)buf) = tswap32(val);
+    break;
+
+  default:
+  case sizeof(uint64_t):
+#ifdef TARGET_X86_64
+    // st64
+    *((uint64_t *)buf) = tswap64(val);
+#else
+    /* Should never happen on 32-bit targets.  */
+    assert(false);
+#endif
+    break;
+  }
+
+  lock_cpu_mem();
+  {
+    if (X86_HTM_IN_TXN(env)) {
+      if (env->htm_needs_abort) {
+        reason = "aborted by another CPU";
+        goto abort_txn;
+      }
+
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
+        if (!cline) {
+          reason = "no global table space";
+          goto abort_txn;
+        } else if (!cpu_htm_mem_entry_upgrade_owner(cline, HTM_LOCK_EXCLUSIVE, env)) {
+          reason = "could not acquire write lock";
+          goto abort_txn;
+        }
+
+        clinedata = load_cacheline(env, cno, mmu_idx, true);
+        if (!clinedata) {
+          reason = "no local table space";
+          goto abort_txn;
+        }
+
+        // write the byte into the cache line
+        clinedata->data[(host_addr + i) % X86_CACHE_LINE_SIZE] = buf[i];
+      }
+    } else {
+      // check to see if any cache line conflicts with other outstanding txns
+      for (i = 0; i < size; i++) {
+        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
+        if (cline && cline->mode > HTM_LOCK_NONE) {
+          // must abort other readers/writers
+          for (sp = cline->owners; sp; sp = sp->htm_lock_table_next) {
+            SANITY_ASSERT(X86_HTM_IN_TXN(sp));
+            sp->htm_needs_abort = 1;
+            QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
+          }
+        }
+      }
+
+      goto do_not_handle;
+    }
+  }
+  unlock_cpu_mem();
+
+  // we handled the store
+  return true;
+
+do_not_handle:
+  /** WARNING: mem lock is held when coming here */
+  unlock_cpu_mem();
+  return false;
+
+  /** WARNING: mem lock is held when coming here */
+abort_txn:
+  SANITY_ASSERT(X86_HTM_IN_TXN(env));
+  QPRINTF(env, "aborting txn because: %s\n", reason);
+  cpu_htm_low_level_abort(env);
+  unlock_cpu_mem();
+  cpu_loop_exit();
   return false;
 }
 
