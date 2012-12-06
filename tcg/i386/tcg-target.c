@@ -1158,29 +1158,37 @@ static void tcg_out_qemu_ld(TCGContext *s, const TCGArg *args,
     mem_index = args[addrlo_idx + 1 + (TARGET_LONG_BITS > TCG_TARGET_REG_BITS)];
     s_bits = opc & 3;
 
-    tcg_out_tlb_load(s, addrlo_idx, mem_index, s_bits, args,
-                     label_ptr, offsetof(CPUTLBEntry, addr_read));
+    const int addrlo = args[addrlo_idx];
+    const int r0 = tcg_target_call_iarg_regs[0];
+    TCGType type = TCG_TYPE_I32;
+    if (TCG_TARGET_REG_BITS == 64 && TARGET_LONG_BITS == 64) {
+        type = TCG_TYPE_I64;
+    }
+    tcg_out_mov(s, type, r0, addrlo);
 
-    /* TLB Hit.  */
-    tcg_out_qemu_ld_direct(s, data_reg, data_reg2,
-                           tcg_target_call_iarg_regs[0], 0, opc);
+    //tcg_out_tlb_load(s, addrlo_idx, mem_index, s_bits, args,
+    //                 label_ptr, offsetof(CPUTLBEntry, addr_read));
 
-    /* Tell mtrace */
-    tcg_out_movi(s, TCG_TYPE_I32, tcg_target_call_iarg_regs[2], 1<<s_bits);
-    tcg_out_calli(s, (tcg_target_long)mtrace_tcg_ld);
+    ///* TLB Hit.  */
+    //tcg_out_qemu_ld_direct(s, data_reg, data_reg2,
+    //                       tcg_target_call_iarg_regs[0], 0, opc);
 
-    /* jmp label2 */
-    tcg_out8(s, OPC_JMP_short);
-    label_ptr[2] = s->code_ptr;
-    s->code_ptr++;
+    ///* Tell mtrace */
+    //tcg_out_movi(s, TCG_TYPE_I32, tcg_target_call_iarg_regs[2], 1<<s_bits);
+    //tcg_out_calli(s, (tcg_target_long)mtrace_tcg_ld);
+
+    ///* jmp label2 */
+    //tcg_out8(s, OPC_JMP_short);
+    //label_ptr[2] = s->code_ptr;
+    //s->code_ptr++;
 
     /* TLB Miss.  */
 
     /* label1: */
-    *label_ptr[0] = s->code_ptr - label_ptr[0] - 1;
-    if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
-        *label_ptr[1] = s->code_ptr - label_ptr[1] - 1;
-    }
+    //*label_ptr[0] = s->code_ptr - label_ptr[0] - 1;
+    //if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
+    //    *label_ptr[1] = s->code_ptr - label_ptr[1] - 1;
+    //}
 
     /* XXX: move that code at the end of the TB */
     /* The first argument is already loaded with addrlo.  */
@@ -1231,7 +1239,7 @@ static void tcg_out_qemu_ld(TCGContext *s, const TCGArg *args,
     }
 
     /* label2: */
-    *label_ptr[2] = s->code_ptr - label_ptr[2] - 1;
+    //*label_ptr[2] = s->code_ptr - label_ptr[2] - 1;
 #else
     {
         int32_t offset = GUEST_BASE;
@@ -1337,29 +1345,37 @@ static void tcg_out_qemu_st(TCGContext *s, const TCGArg *args,
     mem_index = args[addrlo_idx + 1 + (TARGET_LONG_BITS > TCG_TARGET_REG_BITS)];
     s_bits = opc;
 
-    tcg_out_tlb_load(s, addrlo_idx, mem_index, s_bits, args,
-                     label_ptr, offsetof(CPUTLBEntry, addr_write));
+    const int addrlo = args[addrlo_idx];
+    const int r0 = tcg_target_call_iarg_regs[0];
+    TCGType type = TCG_TYPE_I32;
+    if (TCG_TARGET_REG_BITS == 64 && TARGET_LONG_BITS == 64) {
+        type = TCG_TYPE_I64;
+    }
+    tcg_out_mov(s, type, r0, addrlo);
 
-    /* TLB Hit.  */
-    tcg_out_qemu_st_direct(s, data_reg, data_reg2,
-                           tcg_target_call_iarg_regs[0], 0, opc);
+    //tcg_out_tlb_load(s, addrlo_idx, mem_index, s_bits, args,
+    //                 label_ptr, offsetof(CPUTLBEntry, addr_write));
 
-    /* Tell mtrace */
-    tcg_out_movi(s, TCG_TYPE_I32, tcg_target_call_iarg_regs[2], 1<<s_bits);
-    tcg_out_calli(s, (tcg_target_long)mtrace_tcg_st);
+    ///* TLB Hit.  */
+    //tcg_out_qemu_st_direct(s, data_reg, data_reg2,
+    //                       tcg_target_call_iarg_regs[0], 0, opc);
 
-    /* jmp label2 */
-    tcg_out8(s, OPC_JMP_short);
-    label_ptr[2] = s->code_ptr;
-    s->code_ptr++;
+    ///* Tell mtrace */
+    //tcg_out_movi(s, TCG_TYPE_I32, tcg_target_call_iarg_regs[2], 1<<s_bits);
+    //tcg_out_calli(s, (tcg_target_long)mtrace_tcg_st);
+
+    ///* jmp label2 */
+    //tcg_out8(s, OPC_JMP_short);
+    //label_ptr[2] = s->code_ptr;
+    //s->code_ptr++;
 
     /* TLB Miss.  */
 
-    /* label1: */
-    *label_ptr[0] = s->code_ptr - label_ptr[0] - 1;
-    if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
-        *label_ptr[1] = s->code_ptr - label_ptr[1] - 1;
-    }
+    ///* label1: */
+    //*label_ptr[0] = s->code_ptr - label_ptr[0] - 1;
+    //if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
+    //    *label_ptr[1] = s->code_ptr - label_ptr[1] - 1;
+    //}
 
     /* XXX: move that code at the end of the TB */
     if (TCG_TARGET_REG_BITS == 64) {
@@ -1412,7 +1428,7 @@ static void tcg_out_qemu_st(TCGContext *s, const TCGArg *args,
     }
 
     /* label2: */
-    *label_ptr[2] = s->code_ptr - label_ptr[2] - 1;
+    //*label_ptr[2] = s->code_ptr - label_ptr[2] - 1;
 #else
     {
         int32_t offset = GUEST_BASE;
