@@ -5000,16 +5000,12 @@ cpu_htm_mem_free_entry(void)
 static CPUX86CacheLineEntry*
 cpu_htm_mem_hash_table_lookup(CPUX86CacheLineEntry **ht, target_ulong cno)
 {
-  int i;
   target_ulong h;
   CPUX86CacheLineEntry *p;
   h = X86_HTM_CNO_HASH_FCN(cno);
-  i = 0;
   for (p = ht[h % X86_HTM_NMEMBUCKETS]; p; p = p->next) {
     if (p->cno == cno)
       return p;
-    if ((++i % 10000) == 0)
-      printf("cpu_htm_mem_hash_table_lookup iter %d times\n", i);
   }
   return 0;
 }
@@ -5199,6 +5195,8 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
            sizeof(CPUX86StateCheckpoint));
     env->htm_abort_eip = abort_addr;
     env->htm_needs_abort = 0;
+    env->htm_restore_IF_MASK = (env->eflags & IF_MASK) != 0;
+    env->eflags &= ~IF_MASK; // XXX: HACK
 
     // assert no dirty cache lines (since we were previously not in txn)
     cpu_htm_hash_table_iterate(env, bad_cache_line_call);
@@ -5258,6 +5256,10 @@ void helper_xend(CPUX86State *env)
 
       printf("memory changes commited\n");
       assert(env->htm_nest_level == 0);
+
+      // restore interrupt flag if necessary
+      if (env->htm_restore_IF_MASK)
+        env->eflags |= IF_MASK;
     }
   }
   unlock_cpu_mem();

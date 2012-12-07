@@ -898,6 +898,8 @@ typedef struct CPUX86State {
     CPUX86CacheLineData *htm_free_list;
     CPUX86CacheLineData htm_cache_lines[X86_HTM_NBUFENTRIES];
 
+    bool htm_restore_IF_MASK;
+
     //for lock table linked list
     struct CPUX86State *htm_lock_table_next;
 
