@@ -37,7 +37,7 @@
     printf("  env->eip = 0x%llx\n", (unsigned long long) (env)->eip); \
     printf("  env->esp = 0x%llx\n", (unsigned long long) (env)->regs[R_ESP]); \
     printf("  "); \
-    printf(fmt, __VA_ARGS__); \
+    printf(fmt, ## __VA_ARGS__); \
   } while (0)
 
 //#define DEBUG_PCALL
@@ -1236,6 +1236,9 @@ static void handle_even_inj(int intno, int is_int, int error_code,
 void do_interrupt(int intno, int is_int, int error_code,
                   target_ulong next_eip, int is_hw)
 {
+    // we should catch these before they happen!
+    cpu_htm_check_can_do_interrupt(env, intno);
+
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         if ((env->cr[0] & CR0_PE_MASK)) {
             static int count;
@@ -1350,6 +1353,14 @@ static int check_exception(int intno, int *error_code)
 static void QEMU_NORETURN raise_interrupt(int intno, int is_int, int error_code,
                                           int next_eip_addend)
 {
+    if (X86_HTM_IN_TXN(env)) {
+      QPRINTF(env, "received raise_interrupt during txn... aborting txn instead\n");
+      printf("   intno=(%d), is_int=(%d), error_code=(%d), next_eip=(%llx)\n",
+             intno, is_int, error_code,
+             (unsigned long long) env->eip + next_eip_addend);
+      cpu_htm_check_can_do_interrupt(env, intno); // does not return
+    }
+
     if (!is_int) {
         helper_svm_check_intercept_param(SVM_EXIT_EXCP_BASE + intno, error_code);
         intno = check_exception(intno, &error_code);
@@ -4989,12 +5000,16 @@ cpu_htm_mem_free_entry(void)
 static CPUX86CacheLineEntry*
 cpu_htm_mem_hash_table_lookup(CPUX86CacheLineEntry **ht, target_ulong cno)
 {
+  int i;
   target_ulong h;
   CPUX86CacheLineEntry *p;
   h = X86_HTM_CNO_HASH_FCN(cno);
+  i = 0;
   for (p = ht[h % X86_HTM_NMEMBUCKETS]; p; p = p->next) {
     if (p->cno == cno)
       return p;
+    if ((++i % 10000) == 0)
+      printf("cpu_htm_mem_hash_table_lookup iter %d times\n", i);
   }
   return 0;
 }
@@ -5132,7 +5147,7 @@ cpu_htm_mem_entry_upgrade_owner(
  *
  * WARNING: assumes that mem_lock is held!
  */
-static inline void cpu_htm_low_level_abort(CPUX86State *env)
+static void cpu_htm_low_level_abort(CPUX86State *env)
 {
   QPRINTF(env, "cpu_htm_low_level_abort(%d)\n", 0);
 
@@ -6738,4 +6753,13 @@ bool cpu_htm_handle_storeq(uint8_t *host_addr,
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
       val, sizeof(uint64_t), retaddr, false);
+}
+
+void cpu_htm_check_can_do_interrupt(CPUX86State *env, int mask)
+{
+  if (X86_HTM_IN_TXN(env)) {
+    QPRINTF(env, "received CPU interrupt during txn (mask=%d)... aborting txn instead\n", mask);
+    cpu_htm_low_level_abort(env);
+    cpu_loop_exit();
+  }
 }

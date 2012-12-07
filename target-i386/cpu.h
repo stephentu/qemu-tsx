@@ -669,6 +669,44 @@ typedef struct CPUX86StateCheckpoint {
     target_ulong sysenter_eip;
     uint64_t efer;
     uint64_t star;
+
+    uint64_t vm_hsave;
+    uint64_t vm_vmcb;
+    uint64_t tsc_offset;
+    uint64_t intercept;
+    uint16_t intercept_cr_read;
+    uint16_t intercept_cr_write;
+    uint16_t intercept_dr_read;
+    uint16_t intercept_dr_write;
+    uint32_t intercept_exceptions;
+    uint8_t v_tpr;
+
+#ifdef TARGET_X86_64
+    target_ulong lstar;
+    target_ulong cstar;
+    target_ulong fmask;
+    target_ulong kernelgsbase;
+#endif
+    uint64_t system_time_msr;
+    uint64_t wall_clock_msr;
+    uint64_t async_pf_en_msr;
+
+    uint64_t tsc;
+
+    uint64_t pat;
+
+    /* exception/interrupt handling */
+    int error_code;
+    int exception_is_int;
+    target_ulong exception_next_eip;
+    target_ulong dr[8]; /* debug registers */
+    union {
+        CPUBreakpoint *cpu_breakpoint[4];
+        CPUWatchpoint *cpu_watchpoint[4];
+    }; /* break/watchpoints for dr[0..3] */
+    uint32_t smbase;
+    int old_exception;  /* exception in flight */
+
 } CPUX86StateCheckpoint;
 
 #define X86_CACHE_LINE_SIZE  64
