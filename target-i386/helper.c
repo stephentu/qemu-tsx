@@ -877,9 +877,11 @@ int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
         error_code |= PG_ERROR_I_D_MASK;
     if (env->intercept_exceptions & (1 << EXCP0E_PAGE)) {
         /* cr2 is not modified in case of exceptions */
-        stq_phys(env->vm_vmcb + offsetof(struct vmcb, control.exit_info_2), 
+        stq_phys(env->vm_vmcb + offsetof(struct vmcb, control.exit_info_2),
                  addr);
     } else {
+        printf("MMU fault: addr=" TARGET_FMT_lx " w=%d u=%d eip=" TARGET_FMT_lx "\n",
+               addr, is_write1, is_user, env->eip);
         env->cr[2] = addr;
     }
     env->error_code = error_code;

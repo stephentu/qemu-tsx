@@ -3002,6 +3002,12 @@ RAMBlock *qemu_ramblock_from_host(void *ptr)
     }
 
     fprintf(stderr, "mtrace: bad ram pointer %p\n", ptr);
+    QLIST_FOREACH(block, &ram_list.blocks, next) {
+      fprintf(stderr, "block->name: %s\n", block->idstr);
+      fprintf(stderr, "block->host: %p\n", block->host);
+      fprintf(stderr, "  block->length: %d\n", block->length);
+
+    }
     abort();
 
     return 0;
@@ -4380,5 +4386,34 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf)
 #undef env
 
 #endif
+
+void cpu_htm_do_notdirty_mem_writeb(target_phys_addr_t ram_addr, uint32_t val)
+{
+  notdirty_mem_writeb(0, ram_addr, val);
+}
+
+// so hacky
+bool cpu_htm_is_notdirty_cb(void *cb, int *size)
+{
+  if (cb == notdirty_mem_writeb) {
+    if (size)
+      *size = 1;
+    return true;
+  }
+
+  if (cb == notdirty_mem_writew) {
+    if (size)
+      *size = 2;
+    return true;
+  }
+
+  if (cb == notdirty_mem_writel) {
+    if (size)
+      *size = 4;
+    return true;
+  }
+
+  return false;
+}
 
 #include "mtrace.c"

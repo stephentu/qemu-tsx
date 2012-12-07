@@ -684,6 +684,7 @@ typedef struct CPUX86StateCheckpoint {
 #define X86_HTM_ADDR_TO_CNO(addr)    ((addr) >> X86_CACHE_LINE_SHIFT)
 #define X86_HTM_ADDR_CL_OFFSET(addr) ((addr) % X86_CACHE_LINE_SIZE)
 #define X86_HTM_CNO_TO_ADDR(cno)     ((unsigned long)(cno) << X86_CACHE_LINE_SHIFT)
+#define X86_HTM_ADDR_TO_CLADDR(addr) ((addr) & ~(X86_CACHE_LINE_SIZE - 1))
 #define X86_HTM_IN_TXN(env)          ((env)->htm_nest_level)
 
 /**
@@ -691,7 +692,9 @@ typedef struct CPUX86StateCheckpoint {
  */
 typedef struct CPUX86CacheLineData {
   target_ulong cno; /* cache line number */
-  int mmu_idx; /* for saving to softmmu */
+  uint8_t *host_addr; /* [host_addr, host_addr + X86_CACHE_LINE_SIZE) */
+  target_ulong guest_addr; /* [guest_addr, guest_addr + X86_CACHE_LINE_SIZE) -- NOT UNIQUE */
+  bool not_dirty; /* do we need to go through the "notdirty" codepath on commit? */
   struct CPUX86CacheLineData *next; /* next pointer, for linked-lists */
   uint8_t data[X86_CACHE_LINE_SIZE];
 } CPUX86CacheLineData;

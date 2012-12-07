@@ -965,44 +965,62 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf);
 
 /** this is for hardware TM only */
 
-void cpu_htm_notify_io_read(target_phys_addr_t physaddr,
-                            target_ulong addr,
+/** XXX: hacky */
+void cpu_htm_do_notdirty_mem_writeb(target_phys_addr_t ram_addr, uint32_t val);
+bool cpu_htm_is_notdirty_cb(void *cb, int *size);
+
+void cpu_htm_notify_io_read(target_phys_addr_t host_addr,
+                            target_ulong guest_addr,
                             int size, void *retaddr);
-void cpu_htm_notify_io_write(target_phys_addr_t physaddr,
-                             target_ulong addr,
-                             int size, void *retaddr);
 
-bool cpu_htm_handle_loadb(target_phys_addr_t host_addr,
-                          target_ulong guest_addr,
-                          uint8_t *res, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_loadub(target_phys_addr_t host_addr,
-                           target_ulong guest_addr,
-                           uint8_t *res, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_loadw(target_phys_addr_t host_addr,
-                          target_ulong guest_addr,
-                          uint16_t *res, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_loaduw(target_phys_addr_t host_addr,
-                           target_ulong guest_addr,
-                           uint16_t *res, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_loadl(target_phys_addr_t host_addr,
-                          target_ulong guest_addr,
-                          uint32_t *res, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_loadq(target_phys_addr_t host_addr,
-                          target_ulong guest_addr,
-                          uint64_t *res, int mmu_idx, void *retaddr);
+bool cpu_htm_handle_io_writeb(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint8_t, void *retaddr);
+bool cpu_htm_handle_io_writew(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint16_t, void *retaddr);
+bool cpu_htm_handle_io_writel(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint32_t, void *retaddr);
+bool cpu_htm_handle_io_writeq(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint64_t, void *retaddr);
 
-bool cpu_htm_handle_storeb(target_phys_addr_t host_addr,
+bool cpu_htm_handle_loadb(uint8_t *host_addr,
+                          target_ulong guest_addr,
+                          uint8_t *res, void *retaddr);
+bool cpu_htm_handle_loadub(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint8_t val, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_storew(target_phys_addr_t host_addr,
+                           uint8_t *res, void *retaddr);
+bool cpu_htm_handle_loadw(uint8_t *host_addr,
+                          target_ulong guest_addr,
+                          uint16_t *res, void *retaddr);
+bool cpu_htm_handle_loaduw(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint16_t val, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_storel(target_phys_addr_t host_addr,
+                           uint16_t *res, void *retaddr);
+bool cpu_htm_handle_loadl(uint8_t *host_addr,
+                          target_ulong guest_addr,
+                          uint32_t *res, void *retaddr);
+bool cpu_htm_handle_loadq(uint8_t *host_addr,
+                          target_ulong guest_addr,
+                          uint64_t *res, void *retaddr);
+
+bool cpu_htm_handle_storeb(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint32_t val, int mmu_idx, void *retaddr);
-bool cpu_htm_handle_storeq(target_phys_addr_t host_addr,
+                           uint8_t val, void *retaddr);
+bool cpu_htm_handle_storew(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint64_t val, int mmu_idx, void *retaddr);
+                           uint16_t val, void *retaddr);
+bool cpu_htm_handle_storel(uint8_t *host_addr,
+                           target_ulong guest_addr,
+                           uint32_t val, void *retaddr);
+bool cpu_htm_handle_storeq(uint8_t *host_addr,
+                           target_ulong guest_addr,
+                           uint64_t val, void *retaddr);
 
 #endif /* !CONFIG_USER_ONLY */
 
