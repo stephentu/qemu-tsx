@@ -37,7 +37,7 @@
     printf("  env->eip = 0x%llx\n", (unsigned long long) (env)->eip); \
     printf("  env->esp = 0x%llx\n", (unsigned long long) (env)->regs[R_ESP]); \
     printf("  "); \
-    printf(fmt, __VA_ARGS__); \
+    printf(fmt, ## __VA_ARGS__); \
   } while (0)
 
 //#define DEBUG_PCALL
@@ -1236,6 +1236,9 @@ static void handle_even_inj(int intno, int is_int, int error_code,
 void do_interrupt(int intno, int is_int, int error_code,
                   target_ulong next_eip, int is_hw)
 {
+    // we should catch these before they happen!
+    cpu_htm_check_can_do_interrupt(env, intno);
+
     if (qemu_loglevel_mask(CPU_LOG_INT)) {
         if ((env->cr[0] & CR0_PE_MASK)) {
             static int count;
@@ -1350,6 +1353,14 @@ static int check_exception(int intno, int *error_code)
 static void QEMU_NORETURN raise_interrupt(int intno, int is_int, int error_code,
                                           int next_eip_addend)
 {
+    if (X86_HTM_IN_TXN(env)) {
+      QPRINTF(env, "received raise_interrupt during txn... aborting txn instead\n");
+      printf("   intno=(%d), is_int=(%d), error_code=(%d), next_eip=(%llx)\n",
+             intno, is_int, error_code,
+             (unsigned long long) env->eip + next_eip_addend);
+      cpu_htm_check_can_do_interrupt(env, intno); // does not return
+    }
+
     if (!is_int) {
         helper_svm_check_intercept_param(SVM_EXIT_EXCP_BASE + intno, error_code);
         intno = check_exception(intno, &error_code);
@@ -5132,7 +5143,7 @@ cpu_htm_mem_entry_upgrade_owner(
  *
  * WARNING: assumes that mem_lock is held!
  */
-static inline void cpu_htm_low_level_abort(CPUX86State *env)
+static void cpu_htm_low_level_abort(CPUX86State *env)
 {
   QPRINTF(env, "cpu_htm_low_level_abort(%d)\n", 0);
 
@@ -5185,6 +5196,8 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
            sizeof(CPUX86StateCheckpoint));
     env->htm_abort_eip = abort_addr;
     env->htm_needs_abort = 0;
+    env->htm_restore_IF_MASK = (env->eflags & IF_MASK) != 0;
+    env->eflags &= ~IF_MASK; // XXX: HACK
 
     // assert no dirty cache lines (since we were previously not in txn)
     cpu_htm_hash_table_iterate(env, bad_cache_line_call);
@@ -5244,6 +5257,10 @@ void helper_xend(CPUX86State *env)
 
       printf("memory changes commited\n");
       assert(env->htm_nest_level == 0);
+
+      // restore interrupt flag if necessary
+      if (env->htm_restore_IF_MASK)
+        env->eflags |= IF_MASK;
     }
   }
   unlock_cpu_mem();
@@ -6739,4 +6756,13 @@ bool cpu_htm_handle_storeq(uint8_t *host_addr,
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
       val, sizeof(uint64_t), retaddr, false);
+}
+
+void cpu_htm_check_can_do_interrupt(CPUX86State *env, int mask)
+{
+  if (X86_HTM_IN_TXN(env)) {
+    QPRINTF(env, "received CPU interrupt during txn (mask=%d)... aborting txn instead\n", mask);
+    cpu_htm_low_level_abort(env);
+    cpu_loop_exit();
+  }
 }

@@ -968,6 +968,7 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf);
 /** XXX: hacky */
 void cpu_htm_do_notdirty_mem_writeb(target_phys_addr_t ram_addr, uint32_t val);
 bool cpu_htm_is_notdirty_cb(void *cb, int *size);
+void cpu_htm_check_can_do_interrupt(CPUState *env, int mask);
 
 void cpu_htm_notify_io_read(target_phys_addr_t host_addr,
                             target_ulong guest_addr,
