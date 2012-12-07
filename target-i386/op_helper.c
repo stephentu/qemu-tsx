@@ -31,6 +31,10 @@
 #define SANITY_ASSERT(x)
 #endif /* SANITY_CHECKING */
 
+#define DEBUG
+
+#ifdef DEBUG
+
 #define QPRINTF(env, fmt, ...) \
   do { \
     printf("%s:%d: env=(0x%llx):\n", __func__, __LINE__, (unsigned long long) (env)); \
@@ -39,6 +43,14 @@
     printf("  "); \
     printf(fmt, ## __VA_ARGS__); \
   } while (0)
+
+#define dprintf(fmt, ...)  printf(fmt, ## __VA_ARGS__); 
+
+#else
+#define QPRINTF(env, fmt, ...) 
+#define dprintf(fmt, ...)  
+
+#endif //DEBUG
 
 //#define DEBUG_PCALL
 
@@ -4867,7 +4879,7 @@ void tlb_fill(target_ulong addr, int is_write, int mmu_idx, void *retaddr)
     env = cpu_single_env;
 
     if (X86_HTM_IN_TXN(env)) {
-      printf("tlb_fill in txn with addr=0x%llx\n",
+      dprintf("tlb_fill in txn with addr=0x%llx\n",
              (unsigned long long) addr);
     }
 
@@ -5209,11 +5221,11 @@ static void cache_line_commit(CPUX86CacheLineData *line)
   RAMBlock *block;
   int i, dirty_flags;
   ram_addr_t ram_addr;
-  printf("cache_line_commit: commit CL starting at: 0x%llx\n",
+  dprintf("cache_line_commit: commit CL starting at: 0x%llx\n",
          (unsigned long long) line->host_addr);
 
   for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
-    printf("0x%llx: 0x%llx\n",
+    dprintf("0x%llx: 0x%llx\n",
            (unsigned long long)(line->guest_addr + i * 8),
            (unsigned long long) *((uint64_t *)(&line->data[i * 8])));
   }
@@ -6308,12 +6320,16 @@ void cpu_htm_notify_io_read(target_phys_addr_t host_addr,
                             target_ulong guest_addr,
                             int size, void *retaddr)
 {
+  lock_cpu_mem();
   if (X86_HTM_IN_TXN(cpu_single_env)) {
     QPRINTF(env, "io_read in txn for vaddr=(0x%llx), size=(%d)\n",
             (unsigned long long) guest_addr, size);
+    //XXX is lock held?
     cpu_htm_low_level_abort(cpu_single_env);
+    unlock_cpu_mem();
     cpu_loop_exit();
   }
+  unlock_cpu_mem();
 }
 
 static bool cpu_htm_handle_load(
@@ -6542,7 +6558,7 @@ static bool cpu_htm_handle_store(
       }
 
       for (i = 0; i < size; i++) {
-        printf("host_addr[%d] = %d\n", i, ldub_raw(host_addr + i));
+        dprintf("host_addr[%d] = %d\n", i, ldub_raw(host_addr + i));
       }
 
       // check to see if any cache line conflicts with other outstanding txns
@@ -6571,7 +6587,7 @@ static bool cpu_htm_handle_store(
         }
 
         // write the byte into the cache line
-        printf("  clinedata->data[%d] = %d\n",
+        dprintf("  clinedata->data[%d] = %d\n",
                X86_HTM_ADDR_CL_OFFSET(tracking_paddr + i), buf[i]);
         clinedata->data[X86_HTM_ADDR_CL_OFFSET(tracking_paddr + i)] = buf[i];
       }
@@ -6620,6 +6636,8 @@ static bool cpu_htm_handle_io_write(void *cb,
 {
   uint8_t *host_phys_addr;
   int cb_size;
+  //need for abort
+  lock_cpu_mem();
 
   if (X86_HTM_IN_TXN(cpu_single_env)) {
     QPRINTF(env, "io_write in txn for vaddr=(0x%llx), paddr=(0x%llx), size=(%d)\n",
@@ -6635,9 +6653,10 @@ static bool cpu_htm_handle_io_write(void *cb,
 
   if (X86_HTM_IN_TXN(cpu_single_env)) {
     cpu_htm_low_level_abort(cpu_single_env);
+    unlock_cpu_mem();
     cpu_loop_exit();
   }
-
+  unlock_cpu_mem();
   return false;
 }
 
@@ -6761,8 +6780,10 @@ bool cpu_htm_handle_storeq(uint8_t *host_addr,
 void cpu_htm_check_can_do_interrupt(CPUX86State *env, int mask)
 {
   if (X86_HTM_IN_TXN(env)) {
+    lock_cpu_mem();
     QPRINTF(env, "received CPU interrupt during txn (mask=%d)... aborting txn instead\n", mask);
     cpu_htm_low_level_abort(env);
+    unlock_cpu_mem();
     cpu_loop_exit();
   }
 }
