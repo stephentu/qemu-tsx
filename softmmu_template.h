@@ -63,13 +63,14 @@ static inline DATA_TYPE glue(io_read, SUFFIX)(target_phys_addr_t physaddr,
                                               target_ulong addr,
                                               void *retaddr)
 {
-    if (DO_HTM_INSTRUMENTATION)
-      cpu_htm_notify_io_read(physaddr, addr, DATA_SIZE, retaddr);
-
     DATA_TYPE res;
     int index;
     index = (physaddr >> IO_MEM_SHIFT) & (IO_MEM_NB_ENTRIES - 1);
     physaddr = (physaddr & TARGET_PAGE_MASK) + addr;
+
+    if (DO_HTM_INSTRUMENTATION)
+      cpu_htm_notify_io_read(physaddr, addr, DATA_SIZE, retaddr);
+
     env->mem_io_pc = (unsigned long)retaddr;
     if (index > (IO_MEM_NOTDIRTY >> IO_MEM_SHIFT)
             && !can_do_io(env)) {
@@ -137,7 +138,8 @@ DATA_TYPE REGPARM glue(glue(__ld, SUFFIX), MMUSUFFIX)(target_ulong addr,
 #endif
             addend = env->tlb_table[mmu_idx][index].addend;
             if (!DO_HTM_INSTRUMENTATION ||
-                !glue(cpu_htm_handle_load, USUFFIX)(addr + addend, addr, &res, mmu_idx, GETPC()))
+                !glue(cpu_htm_handle_load, USUFFIX)(
+                  (uint8_t *)(long)(addr + addend), addr, &res, GETPC()))
               res = glue(glue(ld, USUFFIX), _raw)((uint8_t *)(long)(addr+addend));
 	    mtrace_ld(addr + addend, addr, DATA_SIZE, GETPC());
         }
@@ -195,7 +197,8 @@ static DATA_TYPE glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(target_ulong addr,
             /* unaligned/aligned access in the same page */
             addend = env->tlb_table[mmu_idx][index].addend;
             if (!DO_HTM_INSTRUMENTATION ||
-                !glue(cpu_htm_handle_load, USUFFIX)(addr + addend, addr, &res, mmu_idx, GETPC()))
+                !glue(cpu_htm_handle_load, USUFFIX)(
+                  (uint8_t *)(long)(addr + addend), addr, &res, retaddr))
               res = glue(glue(ld, USUFFIX), _raw)((uint8_t *)(long)(addr+addend));
 	    mtrace_ld(addr + addend, addr, DATA_SIZE, retaddr);
         }
@@ -219,12 +222,10 @@ static inline void glue(io_write, SUFFIX)(target_phys_addr_t physaddr,
                                           target_ulong addr,
                                           void *retaddr)
 {
-    if (DO_HTM_INSTRUMENTATION)
-      cpu_htm_notify_io_write(physaddr, addr, DATA_SIZE, retaddr);
-
     int index;
     index = (physaddr >> IO_MEM_SHIFT) & (IO_MEM_NB_ENTRIES - 1);
     physaddr = (physaddr & TARGET_PAGE_MASK) + addr;
+
     if (index > (IO_MEM_NOTDIRTY >> IO_MEM_SHIFT)
             && !can_do_io(env)) {
         cpu_io_recompile(env, retaddr);
@@ -233,16 +234,30 @@ static inline void glue(io_write, SUFFIX)(target_phys_addr_t physaddr,
     env->mem_io_vaddr = addr;
     env->mem_io_pc = (unsigned long)retaddr;
 #if SHIFT <= 2
-    io_mem_write[index][SHIFT](io_mem_opaque[index], physaddr, val);
+    if (!DO_HTM_INSTRUMENTATION ||
+        !glue(cpu_htm_handle_io_write, SUFFIX)(
+            (void *)io_mem_write[index][SHIFT],
+            physaddr, addr, val, retaddr))
+      io_mem_write[index][SHIFT](io_mem_opaque[index], physaddr, val);
     mtrace_io_write((void *)io_mem_write[index][SHIFT], physaddr, addr, DATA_SIZE, retaddr);
 #else
 #ifdef TARGET_WORDS_BIGENDIAN
-    io_mem_write[index][2](io_mem_opaque[index], physaddr, val >> 32);
-    io_mem_write[index][2](io_mem_opaque[index], physaddr + 4, val);
+    if (!DO_HTM_INSTRUMENTATION ||
+        !glue(cpu_htm_handle_io_write, SUFFIX)(
+            (void *)io_mem_write[index][2],
+            physaddr, addr, val, retaddr)) {
+      io_mem_write[index][2](io_mem_opaque[index], physaddr, val >> 32);
+      io_mem_write[index][2](io_mem_opaque[index], physaddr + 4, val);
+    }
     mtrace_io_write((void *)io_mem_write[index][2], physaddr, addr, DATA_SIZE, retaddr);
 #else
-    io_mem_write[index][2](io_mem_opaque[index], physaddr, val);
-    io_mem_write[index][2](io_mem_opaque[index], physaddr + 4, val >> 32);
+    if (!DO_HTM_INSTRUMENTATION ||
+        !glue(cpu_htm_handle_io_write, SUFFIX)(
+            (void *)io_mem_write[index][2],
+            physaddr, addr, val, retaddr)) {
+      io_mem_write[index][2](io_mem_opaque[index], physaddr, val);
+      io_mem_write[index][2](io_mem_opaque[index], physaddr + 4, val >> 32);
+    }
     mtrace_io_write((void *)io_mem_write[index][2], physaddr, addr, DATA_SIZE, retaddr);
 #endif
 #endif /* SHIFT > 2 */
@@ -287,7 +302,8 @@ void REGPARM glue(glue(__st, SUFFIX), MMUSUFFIX)(target_ulong addr,
 #endif
             addend = env->tlb_table[mmu_idx][index].addend;
             if (!DO_HTM_INSTRUMENTATION ||
-                !glue(cpu_htm_handle_store, SUFFIX)(addr + addend, addr, val, mmu_idx, GETPC()))
+                !glue(cpu_htm_handle_store, SUFFIX)(
+                  (uint8_t *)(long)(addr+addend), addr, val, GETPC()))
               glue(glue(st, SUFFIX), _raw)((uint8_t *)(long)(addr+addend), val);
 	    mtrace_st(addr + addend, addr, DATA_SIZE, GETPC());
         }
@@ -342,7 +358,8 @@ static void glue(glue(slow_st, SUFFIX), MMUSUFFIX)(target_ulong addr,
             /* aligned/unaligned access in the same page */
             addend = env->tlb_table[mmu_idx][index].addend;
             if (!DO_HTM_INSTRUMENTATION ||
-                !glue(cpu_htm_handle_store, SUFFIX)(addr + addend, addr, val, mmu_idx, GETPC()))
+                !glue(cpu_htm_handle_store, SUFFIX)(
+                  (uint8_t *)(long)(addr + addend), addr, val, retaddr))
               glue(glue(st, SUFFIX), _raw)((uint8_t *)(long)(addr+addend), val);
 	    mtrace_st(addr + addend, addr, DATA_SIZE, retaddr);
         }

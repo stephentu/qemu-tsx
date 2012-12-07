@@ -33,7 +33,10 @@
 
 #define QPRINTF(env, fmt, ...) \
   do { \
-    printf("%s:%d: env=(0x%llx): ", __func__, __LINE__, (unsigned long long) (env)); \
+    printf("%s:%d: env=(0x%llx):\n", __func__, __LINE__, (unsigned long long) (env)); \
+    printf("  env->eip = 0x%llx\n", (unsigned long long) (env)->eip); \
+    printf("  env->esp = 0x%llx\n", (unsigned long long) (env)->regs[R_ESP]); \
+    printf("  "); \
     printf(fmt, __VA_ARGS__); \
   } while (0)
 
@@ -4852,6 +4855,11 @@ void tlb_fill(target_ulong addr, int is_write, int mmu_idx, void *retaddr)
     saved_env = env;
     env = cpu_single_env;
 
+    if (X86_HTM_IN_TXN(env)) {
+      printf("tlb_fill in txn with addr=0x%llx\n",
+             (unsigned long long) addr);
+    }
+
     ret = cpu_x86_handle_mmu_fault(env, addr, is_write, mmu_idx, 1);
     if (ret) {
         if (retaddr) {
@@ -5126,6 +5134,8 @@ cpu_htm_mem_entry_upgrade_owner(
  */
 static inline void cpu_htm_low_level_abort(CPUX86State *env)
 {
+  QPRINTF(env, "cpu_htm_low_level_abort(%d)\n", 0);
+
   assert(env->htm_nest_level);
 
   env->htm_nest_level = 0;
@@ -5182,31 +5192,29 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 
 static void cache_line_commit(CPUX86CacheLineData *line)
 {
-  //uint8_t *p;
-  //int i;
-  //p = (uint8_t *)(X86_HTM_CNO_TO_ADDR(line->cno) + GUEST_BASE);
-  //printf("cache_line_commit: commit CL starting at: 0x%llx\n",
-  //       (unsigned long long) p);
-  //memmove(p, &line->data[0], X86_CACHE_LINE_SIZE);
-  //SANITY_ASSERT(memcmp(p, &line->data[0], X86_CACHE_LINE_SIZE) == 0);
-
-  //for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
-  //  printf("0x%llx: 0x%llx\n",
-  //         (unsigned long long)(p + i * 8),
-  //         (unsigned long long) *((uint64_t *)(p + i * 8)));
-  //}
-
-  int i;
+  RAMBlock *block;
+  int i, dirty_flags;
+  ram_addr_t ram_addr;
   printf("cache_line_commit: commit CL starting at: 0x%llx\n",
-         (unsigned long long) X86_HTM_CNO_TO_ADDR(line->cno));
+         (unsigned long long) line->host_addr);
 
-  // XXX: static_assert
-  assert((X86_CACHE_LINE_SIZE % sizeof(uint64_t)) == 0);
-  for (i = 0; i < X86_CACHE_LINE_SIZE; i += sizeof(uint64_t))
-    __stq_mmu(
-      X86_HTM_CNO_TO_ADDR(line->cno) + i,
-      *((uint64_t *)&line->data[i]),
-      line->mmu_idx);
+  for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
+    printf("0x%llx: 0x%llx\n",
+           (unsigned long long)(line->guest_addr + i * 8),
+           (unsigned long long) *((uint64_t *)(&line->data[i * 8])));
+  }
+
+  if (line->not_dirty) {
+    for (i = 0; i < X86_CACHE_LINE_SIZE; i++) {
+      block = qemu_ramblock_from_host(line->host_addr + i);
+      ram_addr = (intptr_t)(line->host_addr + i) - (intptr_t)block->host + (intptr_t)block->offset;
+      assert((line->host_addr + i) == qemu_get_ram_ptr(ram_addr));
+      cpu_htm_do_notdirty_mem_writeb(ram_addr, line->data[i]);
+    }
+  } else {
+    for (i = 0; i < X86_CACHE_LINE_SIZE; i++)
+      stb_raw(line->host_addr + i, line->data[i]);
+  }
 }
 
 void helper_xend(CPUX86State *env)
@@ -5280,8 +5288,14 @@ mem_idx_to_size(uint32_t idx)
   }
 }
 
+/**
+ * [host_cl_addr, host_cl_addr + X86_CACHE_LINE_SIZE) is assumed to hold
+ * the cache line for cno
+ */
 static inline CPUX86CacheLineData*
-load_cacheline(CPUX86State *env, target_ulong cno, int mmu_idx, bool alloc)
+load_cacheline(CPUX86State *env, target_ulong cno,
+               uint8_t *host_cl_addr, target_ulong guest_addr,
+               bool not_dirty, bool alloc)
 {
   bool r;
   int i;
@@ -5296,20 +5310,18 @@ load_cacheline(CPUX86State *env, target_ulong cno, int mmu_idx, bool alloc)
       return 0;
 
     // read the cache line from memory, to fill the buffer
-    // XXX: static_assert
-    assert((X86_CACHE_LINE_SIZE % sizeof(uint64_t)) == 0);
-    for (i = 0; i < X86_CACHE_LINE_SIZE; i += sizeof(uint64_t))
-      *((uint64_t *)&cline->data[i]) = __ldq_mmu(X86_HTM_CNO_TO_ADDR(cno) + i, mmu_idx);
+    for (i = 0; i < X86_CACHE_LINE_SIZE; i++)
+      cline->data[i] = ldub_raw(host_cl_addr + i);
 
     cline->cno = cno;
-    cline->mmu_idx = mmu_idx;
+    cline->host_addr = host_cl_addr;
+    cline->guest_addr = guest_addr;
+    cline->not_dirty = not_dirty;
     if (!(r = cpu_htm_hash_table_insert(env, cline)))
       assert(false);
     SANITY_ASSERT(cpu_htm_hash_table_lookup(env, cno) == cline);
   }
-  // the cline->mmu_idx == mmu_idx assumption should always be valid
-  // because on ring transitions we abort txns
-  SANITY_ASSERT(!cline || (cline->cno == cno && cline->mmu_idx == mmu_idx));
+  SANITY_ASSERT(!cline || (cline->cno == cno));
   return cline;
 }
 
@@ -6274,43 +6286,57 @@ void helper_mtrace_insn_count(void)
     mtrace_inst_inc();
 }
 
-void cpu_htm_notify_io_read(target_phys_addr_t physaddr,
-                            target_ulong addr,
+void cpu_htm_notify_io_read(target_phys_addr_t host_addr,
+                            target_ulong guest_addr,
                             int size, void *retaddr)
 {
   if (X86_HTM_IN_TXN(cpu_single_env)) {
-    cpu_htm_low_level_abort(cpu_single_env);
-    cpu_loop_exit();
-  }
-}
-
-void cpu_htm_notify_io_write(target_phys_addr_t physaddr,
-                             target_ulong addr,
-                             int size, void *retaddr)
-{
-  if (X86_HTM_IN_TXN(cpu_single_env)) {
+    QPRINTF(env, "io_read in txn for vaddr=(0x%llx), size=(%d)\n",
+            (unsigned long long) guest_addr, size);
     cpu_htm_low_level_abort(cpu_single_env);
     cpu_loop_exit();
   }
 }
 
 static bool cpu_htm_handle_load(
-    target_phys_addr_t host_addr, target_ulong guest_addr,
-    uint8_t *res, int size, bool sign, int mmu_idx, void *retaddr)
+    uint8_t *host_addr, target_ulong guest_addr,
+    uint8_t *res, int size, bool sign, void *retaddr)
 {
   CPUX86State *env;
   CPUX86CacheLineEntry *cline;
   CPUX86CacheLineData *clinedata;
   target_ulong cno;
+  uintptr_t tracking_paddr;
   uint8_t buf[sizeof(uint64_t)];
   int i;
   const char *reason;
+  RAMBlock *block;
+
+  assert(size == 1 || size == 2 || size == 4 || size == 8);
+
+  /**
+   * careful: there is no guarantee that
+   *    X86_HTM_ADDR_CL_OFFSET(host_addr) != X86_HTM_ADDR_CL_OFFSET(guest_addr)
+   * which is the guarantee made for true va/pa mappings (since true va/pa
+   * mappings share the bottom-most log2(PAGE_SIZE) bits, and a cacheline is
+   * less than a page size)
+   */
+
+  tracking_paddr = X86_HTM_ADDR_TO_CLADDR((uintptr_t)host_addr) +
+    X86_HTM_ADDR_CL_OFFSET(guest_addr);
 
   env = cpu_single_env;
 
   lock_cpu_mem();
   {
     if (X86_HTM_IN_TXN(env)) {
+
+      QPRINTF(env, "transactional load of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), retaddr=(0x%llx)\n",
+              (unsigned long long) guest_addr,
+              (unsigned long long) host_addr,
+              size,
+              (unsigned long long) retaddr);
+
       if (env->htm_needs_abort) {
         reason = "aborted by another CPU";
         goto abort_txn;
@@ -6319,7 +6345,7 @@ static bool cpu_htm_handle_load(
       // XXX: optimize- should only need to lookup at most 2 cache lines!
       // check to see if any cache line conflicts with other outstanding txns
       for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cno = X86_HTM_ADDR_TO_CNO(tracking_paddr + i);
         cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
         if (!cline) {
           reason = "no global table space";
@@ -6329,10 +6355,17 @@ static bool cpu_htm_handle_load(
           goto abort_txn;
         }
 
-        clinedata = load_cacheline(env, cno, mmu_idx, false);
+        clinedata = load_cacheline(
+            env, cno,
+            (uint8_t *) (
+              (uintptr_t)host_addr - X86_HTM_ADDR_CL_OFFSET(tracking_paddr) +
+              X86_CACHE_LINE_SIZE * (
+                X86_HTM_ADDR_TO_CNO(tracking_paddr + i) - X86_HTM_ADDR_TO_CNO(tracking_paddr))),
+            X86_HTM_ADDR_TO_CLADDR(guest_addr + i),
+            false, false);
         if (clinedata)
           // serve the read from the local cache line
-          buf[i] = clinedata->data[(host_addr + i) % X86_CACHE_LINE_SIZE];
+          buf[i] = clinedata->data[X86_HTM_ADDR_CL_OFFSET(tracking_paddr + i)];
         else
           goto do_not_handle;
       }
@@ -6340,7 +6373,7 @@ static bool cpu_htm_handle_load(
       // check to see if any cache line conflicts with other outstanding txns
       // if so, abort other CPUs
       for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cno = X86_HTM_ADDR_TO_CNO(tracking_paddr + i);
         cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
         if (cline && cline->mode == HTM_LOCK_EXCLUSIVE) {
           // must abort writer
@@ -6353,6 +6386,9 @@ static bool cpu_htm_handle_load(
 
       goto do_not_handle;
     }
+
+    QPRINTF(env, "serving txn load of vaddr=(0x%llx), size=(%d)\n",
+            (unsigned long long) guest_addr, size);
 
     // XXX: this sign/unsigned business doesn't actually achieve anything
     // because we store into buffers of the exact size, so we don't need
@@ -6404,6 +6440,10 @@ static bool cpu_htm_handle_load(
 
 do_not_handle:
   /** WARNING: mem lock is held when coming here */
+  if (X86_HTM_IN_TXN(env)) {
+    QPRINTF(env, "not serving txn load of vaddr=(0x%llx), size=(%d)\n",
+            (unsigned long long) guest_addr, size);
+  }
   unlock_cpu_mem();
   return false;
 
@@ -6418,16 +6458,27 @@ abort_txn:
 }
 
 static bool cpu_htm_handle_store(
-    target_phys_addr_t host_addr, target_ulong guest_addr,
-    uint64_t val, int size, int mmu_idx, void *retaddr)
+    uint8_t *host_addr, target_ulong guest_addr,
+    uint64_t val, int size, void *retaddr, bool not_dirty)
 {
+  CPUX86State *env;
   CPUX86CacheLineEntry *cline;
   CPUX86CacheLineData *clinedata;
   target_ulong cno;
+  uintptr_t tracking_paddr;
   uint8_t buf[sizeof(uint64_t)];
   int i;
   const char *reason;
+  RAMBlock *block;
   CPUX86State *sp;
+
+  assert(size == 1 || size == 2 || size == 4 || size == 8);
+
+  /** see comment in cpu_htm_handle_load() */
+
+  tracking_paddr = X86_HTM_ADDR_TO_CLADDR((uintptr_t)host_addr) + X86_HTM_ADDR_CL_OFFSET(guest_addr);
+
+  env = cpu_single_env;
 
   // marshall t0 into buf
   switch (size) {
@@ -6438,19 +6489,19 @@ static bool cpu_htm_handle_store(
 
   case sizeof(uint16_t):
     // st16
-    *((uint16_t *)buf) = tswap16(val);
+    *((uint16_t *)&buf[0]) = tswap16(val);
     break;
 
   case sizeof(uint32_t):
     // st32
-    *((uint32_t *)buf) = tswap32(val);
+    *((uint32_t *)&buf[0]) = tswap32(val);
     break;
 
   default:
   case sizeof(uint64_t):
 #ifdef TARGET_X86_64
     // st64
-    *((uint64_t *)buf) = tswap64(val);
+    *((uint64_t *)&buf[0]) = tswap64(val);
 #else
     /* Should never happen on 32-bit targets.  */
     assert(false);
@@ -6461,14 +6512,24 @@ static bool cpu_htm_handle_store(
   lock_cpu_mem();
   {
     if (X86_HTM_IN_TXN(env)) {
+
+      QPRINTF(env, "transactional store of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), val=(%llu)\n",
+              (unsigned long long) guest_addr,
+              (unsigned long long) host_addr,
+              size, val);
+
       if (env->htm_needs_abort) {
         reason = "aborted by another CPU";
         goto abort_txn;
       }
 
+      for (i = 0; i < size; i++) {
+        printf("host_addr[%d] = %d\n", i, ldub_raw(host_addr + i));
+      }
+
       // check to see if any cache line conflicts with other outstanding txns
       for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cno = X86_HTM_ADDR_TO_CNO(tracking_paddr + i);
         cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, true);
         if (!cline) {
           reason = "no global table space";
@@ -6478,19 +6539,28 @@ static bool cpu_htm_handle_store(
           goto abort_txn;
         }
 
-        clinedata = load_cacheline(env, cno, mmu_idx, true);
+        clinedata = load_cacheline(
+            env, cno,
+            (uint8_t *) (
+              (uintptr_t)host_addr - X86_HTM_ADDR_CL_OFFSET(tracking_paddr) +
+              X86_CACHE_LINE_SIZE * (
+                X86_HTM_ADDR_TO_CNO(tracking_paddr + i) - X86_HTM_ADDR_TO_CNO(tracking_paddr))),
+            X86_HTM_ADDR_TO_CLADDR(guest_addr + i),
+            not_dirty, true);
         if (!clinedata) {
           reason = "no local table space";
           goto abort_txn;
         }
 
         // write the byte into the cache line
-        clinedata->data[(host_addr + i) % X86_CACHE_LINE_SIZE] = buf[i];
+        printf("  clinedata->data[%d] = %d\n",
+               X86_HTM_ADDR_CL_OFFSET(tracking_paddr + i), buf[i]);
+        clinedata->data[X86_HTM_ADDR_CL_OFFSET(tracking_paddr + i)] = buf[i];
       }
     } else {
       // check to see if any cache line conflicts with other outstanding txns
       for (i = 0; i < size; i++) {
-        cno = X86_HTM_ADDR_TO_CNO(host_addr + i);
+        cno = X86_HTM_ADDR_TO_CNO(tracking_paddr + i);
         cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
         if (cline && cline->mode > HTM_LOCK_NONE) {
           // must abort other readers/writers
@@ -6525,83 +6595,147 @@ abort_txn:
   return false;
 }
 
-bool cpu_htm_handle_loadb(target_phys_addr_t host_addr,
-                          target_ulong guest_addr,
-                          uint8_t *res, int mmu_idx, void *retaddr)
+static bool cpu_htm_handle_io_write(void *cb,
+                                    target_phys_addr_t host_addr,
+                                    target_ulong guest_addr,
+                                    uint64_t val, int size, void *retaddr)
 {
-  return cpu_htm_handle_load(host_addr, guest_addr,
-      res, sizeof(uint8_t), true, mmu_idx, retaddr);
+  uint8_t *host_phys_addr;
+  int cb_size;
+
+  if (X86_HTM_IN_TXN(cpu_single_env)) {
+    QPRINTF(env, "io_write in txn for vaddr=(0x%llx), paddr=(0x%llx), size=(%d)\n",
+            (unsigned long long) guest_addr,
+            (unsigned long long) host_addr,
+            size);
+  }
+
+  if (cpu_htm_is_notdirty_cb(cb, &cb_size)) {
+    host_phys_addr = qemu_get_ram_ptr(host_addr);
+    return cpu_htm_handle_store(host_phys_addr, guest_addr, val, size, retaddr, true);
+  }
+
+  if (X86_HTM_IN_TXN(cpu_single_env)) {
+    cpu_htm_low_level_abort(cpu_single_env);
+    cpu_loop_exit();
+  }
+
+  return false;
 }
 
-bool cpu_htm_handle_loadub(target_phys_addr_t host_addr,
+bool cpu_htm_handle_io_writeb(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint8_t val, void *retaddr)
+{
+  return cpu_htm_handle_io_write(cb, host_addr, guest_addr,
+      val, sizeof(uint8_t), retaddr);
+}
+
+bool cpu_htm_handle_io_writew(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint16_t val, void *retaddr)
+{
+  return cpu_htm_handle_io_write(cb, host_addr, guest_addr,
+      val, sizeof(uint16_t), retaddr);
+}
+
+bool cpu_htm_handle_io_writel(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint32_t val, void *retaddr)
+{
+  return cpu_htm_handle_io_write(cb, host_addr, guest_addr,
+      val, sizeof(uint32_t), retaddr);
+}
+
+bool cpu_htm_handle_io_writeq(void *cb,
+                              target_phys_addr_t host_addr,
+                              target_ulong guest_addr,
+                              uint64_t val, void *retaddr)
+{
+  return cpu_htm_handle_io_write(cb, host_addr, guest_addr,
+      val, sizeof(uint64_t), retaddr);
+}
+
+bool cpu_htm_handle_loadb(uint8_t *host_addr,
+                          target_ulong guest_addr,
+                          uint8_t *res, void *retaddr)
+{
+  return cpu_htm_handle_load(host_addr, guest_addr,
+      res, sizeof(uint8_t), true, retaddr);
+}
+
+bool cpu_htm_handle_loadub(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint8_t *res, int mmu_idx, void *retaddr)
+                           uint8_t *res, void *retaddr)
 {
   return cpu_htm_handle_load(host_addr, guest_addr,
-      res, sizeof(uint8_t), false, mmu_idx, retaddr);
+      res, sizeof(uint8_t), false, retaddr);
 }
 
-bool cpu_htm_handle_loadw(target_phys_addr_t host_addr,
+bool cpu_htm_handle_loadw(uint8_t *host_addr,
                           target_ulong guest_addr,
-                          uint16_t *res, int mmu_idx, void *retaddr)
+                          uint16_t *res, void *retaddr)
 {
   return cpu_htm_handle_load(host_addr, guest_addr,
-      (uint8_t *)res, sizeof(uint16_t), true, mmu_idx, retaddr);
+      (uint8_t *)res, sizeof(uint16_t), true, retaddr);
 }
 
-bool cpu_htm_handle_loaduw(target_phys_addr_t host_addr,
+bool cpu_htm_handle_loaduw(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint16_t *res, int mmu_idx, void *retaddr)
+                           uint16_t *res, void *retaddr)
 {
   return cpu_htm_handle_load(host_addr, guest_addr,
-      (uint8_t *)res, sizeof(uint16_t), false, mmu_idx, retaddr);
+      (uint8_t *)res, sizeof(uint16_t), false, retaddr);
 }
 
-bool cpu_htm_handle_loadl(target_phys_addr_t host_addr,
+bool cpu_htm_handle_loadl(uint8_t *host_addr,
                           target_ulong guest_addr,
-                          uint32_t *res, int mmu_idx, void *retaddr)
+                          uint32_t *res, void *retaddr)
 {
   return cpu_htm_handle_load(host_addr, guest_addr,
-      (uint8_t *)res, sizeof(uint32_t), true, mmu_idx, retaddr);
+      (uint8_t *)res, sizeof(uint32_t), true, retaddr);
 }
 
 
-bool cpu_htm_handle_loadq(target_phys_addr_t host_addr,
+bool cpu_htm_handle_loadq(uint8_t *host_addr,
                           target_ulong guest_addr,
-                          uint64_t *res, int mmu_idx, void *retaddr)
+                          uint64_t *res, void *retaddr)
 {
   return cpu_htm_handle_load(host_addr, guest_addr,
-      (uint8_t *)res, sizeof(uint64_t), true, mmu_idx, retaddr);
+      (uint8_t *)res, sizeof(uint64_t), true, retaddr);
 }
 
-bool cpu_htm_handle_storeb(target_phys_addr_t host_addr,
+bool cpu_htm_handle_storeb(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint8_t val, int mmu_idx, void *retaddr)
+                           uint8_t val, void *retaddr)
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
-      val, sizeof(uint8_t), mmu_idx, retaddr);
+      val, sizeof(uint8_t), retaddr, false);
 }
 
-bool cpu_htm_handle_storew(target_phys_addr_t host_addr,
+bool cpu_htm_handle_storew(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint16_t val, int mmu_idx, void *retaddr)
+                           uint16_t val, void *retaddr)
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
-      val, sizeof(uint16_t), mmu_idx, retaddr);
+      val, sizeof(uint16_t), retaddr, false);
 }
 
-bool cpu_htm_handle_storel(target_phys_addr_t host_addr,
+bool cpu_htm_handle_storel(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint32_t val, int mmu_idx, void *retaddr)
+                           uint32_t val, void *retaddr)
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
-      val, sizeof(uint32_t), mmu_idx, retaddr);
+      val, sizeof(uint32_t), retaddr, false);
 }
 
-bool cpu_htm_handle_storeq(target_phys_addr_t host_addr,
+bool cpu_htm_handle_storeq(uint8_t *host_addr,
                            target_ulong guest_addr,
-                           uint64_t val, int mmu_idx, void *retaddr)
+                           uint64_t val, void *retaddr)
 {
   return cpu_htm_handle_store(host_addr, guest_addr,
-      val, sizeof(uint64_t), mmu_idx, retaddr);
+      val, sizeof(uint64_t), retaddr, false);
 }
