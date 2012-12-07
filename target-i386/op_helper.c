@@ -5159,6 +5159,7 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
   printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
   printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
 
+  //XXX I assume this is for nested transactions?
   if (env->htm_needs_abort) {
     lock_cpu_mem();
     cpu_htm_low_level_abort(env);
