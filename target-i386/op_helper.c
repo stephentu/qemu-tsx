@@ -31,24 +31,31 @@
 #define SANITY_ASSERT(x)
 #endif /* SANITY_CHECKING */
 
-#define DEBUG
+//#define DEBUG
 
-#ifdef DEBUG
-
-#define QPRINTF(env, fmt, ...) \
+#define ALWAYS_QPRINTF(env, fmt, ...) \
   do { \
-    printf("%s:%d: env=(0x%llx):\n", __func__, __LINE__, (unsigned long long) (env)); \
+    printf("%s:%d: env=(0x%llx), cpu_index=%d:\n", __func__, __LINE__, \
+        (unsigned long long) (env), (env)->cpu_index); \
     printf("  env->eip = 0x%llx\n", (unsigned long long) (env)->eip); \
     printf("  env->esp = 0x%llx\n", (unsigned long long) (env)->regs[R_ESP]); \
+    printf("  env->htm_nest_level = %d\n", (int)(env)->htm_nest_level); \
+    printf("  env->htm_needs_abort = %d\n", (int)(env)->htm_needs_abort); \
     printf("  "); \
     printf(fmt, ## __VA_ARGS__); \
   } while (0)
 
-#define dprintf(fmt, ...)  printf(fmt, ## __VA_ARGS__); 
+#ifdef DEBUG
+
+#define LOW_QPRINTF ALWAYS_QPRINTF
+#define HIGH_QPRINTF ALWAYS_QPRINTF
+#define dprintf(fmt, ...)  printf(fmt, ## __VA_ARGS__);
 
 #else
-#define QPRINTF(env, fmt, ...) 
-#define dprintf(fmt, ...)  
+
+#define LOW_QPRINTF ALWAYS_QPRINTF
+#define HIGH_QPRINTF(env, fmt, ...)
+#define dprintf(fmt, ...)
 
 #endif //DEBUG
 
@@ -1366,7 +1373,7 @@ static void QEMU_NORETURN raise_interrupt(int intno, int is_int, int error_code,
                                           int next_eip_addend)
 {
     if (X86_HTM_IN_TXN(env)) {
-      QPRINTF(env, "received raise_interrupt during txn... aborting txn instead\n");
+      LOW_QPRINTF(env, "received raise_interrupt during txn... aborting txn instead\n");
       printf("   intno=(%d), is_int=(%d), error_code=(%d), next_eip=(%llx)\n",
              intno, is_int, error_code,
              (unsigned long long) env->eip + next_eip_addend);
@@ -5157,7 +5164,8 @@ cpu_htm_mem_entry_upgrade_owner(
  */
 static void cpu_htm_low_level_abort(CPUX86State *env)
 {
-  QPRINTF(env, "cpu_htm_low_level_abort(%d)\n", 0);
+  LOW_QPRINTF(env, "cpu_htm_low_level_abort(abort_eip=0x%llx)\n",
+              (unsigned long long) env->htm_abort_eip);
 
   assert(env->htm_nest_level);
 
@@ -5188,9 +5196,7 @@ static void bad_cache_line_call(CPUX86CacheLineData *line)
 
 void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 {
-  printf("helper_xbegin(): abort=0x%llx\n", (unsigned long long) abort_addr);
-  printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
-  printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
+  LOW_QPRINTF(env, "helper_xbegin(): abort=0x%llx\n", (unsigned long long) abort_addr);
 
   //XXX I assume this is for nested transactions?
   if (env->htm_needs_abort) {
@@ -5221,13 +5227,13 @@ static void cache_line_commit(CPUX86CacheLineData *line)
   RAMBlock *block;
   int i, dirty_flags;
   ram_addr_t ram_addr;
-  dprintf("cache_line_commit: commit CL starting at: 0x%llx\n",
+  printf("cache_line_commit: commit CL starting at: 0x%llx\n",
          (unsigned long long) line->host_addr);
 
   for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
-    dprintf("0x%llx: 0x%llx\n",
-           (unsigned long long)(line->guest_addr + i * 8),
-           (unsigned long long) *((uint64_t *)(&line->data[i * 8])));
+    printf("0x%llx: 0x%llx\n",
+          (unsigned long long)(line->guest_addr + i * 8),
+          (unsigned long long) *((uint64_t *)(&line->data[i * 8])));
   }
 
   if (line->not_dirty) {
@@ -5245,8 +5251,11 @@ static void cache_line_commit(CPUX86CacheLineData *line)
 
 void helper_xend(CPUX86State *env)
 {
-  printf("helper_xend()\n");
+  LOW_QPRINTF(env, "helper_xend()\n");
+
   // XXX: signal processor exception
+  if (!X86_HTM_IN_TXN(env))
+    LOW_QPRINTF(env, "improperly called XEND\n");
   assert(env->htm_nest_level > 0);
 
   lock_cpu_mem();
@@ -5258,8 +5267,6 @@ void helper_xend(CPUX86State *env)
     }
 
     if (--env->htm_nest_level == 0) {
-      printf("htm region end\n");
-
       // commit memory changes
       cpu_htm_hash_table_iterate(env, cache_line_commit);
       cpu_htm_hash_table_reset(env);
@@ -5267,7 +5274,7 @@ void helper_xend(CPUX86State *env)
       // release locks
       cpu_htm_mem_hash_table_remove_env(cpu_htm_mem_hash_table, env);
 
-      printf("memory changes commited\n");
+      LOW_QPRINTF(env, "memory changes commited\n");
       assert(env->htm_nest_level == 0);
 
       // restore interrupt flag if necessary
@@ -5402,7 +5409,7 @@ CPUX86CacheLineData* cpu_htm_hash_table_lookup(CPUX86State *env, target_ulong cn
   target_ulong h;
   CPUX86CacheLineData *p;
   h = X86_HTM_CNO_HASH_FCN(cno);
-  for (p = env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; p; p = p->next) {
+  for (p = env->htm_hash_table[h % X86_HTM_NBUCKETS]; p; p = p->next) {
     if (p->cno == cno)
       return p;
   }
@@ -5420,7 +5427,7 @@ bool cpu_htm_hash_table_insert(CPUX86State *env, CPUX86CacheLineData *entry)
 
   // assert that no other entry exists w/ the same entry, but
   // different pointer value
-  for (pp = &env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; *pp; pp = &((*pp)->next)) {
+  for (pp = &env->htm_hash_table[h % X86_HTM_NBUCKETS]; *pp; pp = &((*pp)->next)) {
     if ((*pp)->cno == entry->cno) {
       assert((*pp) == entry);
       found = 1;
@@ -5440,7 +5447,7 @@ CPUX86CacheLineData* cpu_htm_hash_table_remove(CPUX86State *env, target_ulong cn
   target_ulong h;
   CPUX86CacheLineData **pp, *ret;
   h = X86_HTM_CNO_HASH_FCN(cno);
-  for (pp = &env->htm_hash_table[h % X86_HTM_NBUFENTRIES]; *pp; pp = &((*pp)->next)) {
+  for (pp = &env->htm_hash_table[h % X86_HTM_NBUCKETS]; *pp; pp = &((*pp)->next)) {
     if ((*pp)->cno == cno) {
       ret       = *pp;
       *pp       = (*pp)->next;
@@ -6322,7 +6329,7 @@ void cpu_htm_notify_io_read(target_phys_addr_t host_addr,
 {
   lock_cpu_mem();
   if (X86_HTM_IN_TXN(cpu_single_env)) {
-    QPRINTF(env, "io_read in txn for vaddr=(0x%llx), size=(%d)\n",
+    HIGH_QPRINTF(env, "io_read in txn for vaddr=(0x%llx), size=(%d)\n",
             (unsigned long long) guest_addr, size);
     //XXX is lock held?
     cpu_htm_low_level_abort(cpu_single_env);
@@ -6365,7 +6372,7 @@ static bool cpu_htm_handle_load(
   {
     if (X86_HTM_IN_TXN(env)) {
 
-      QPRINTF(env, "transactional load of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), retaddr=(0x%llx)\n",
+      HIGH_QPRINTF(env, "transactional load of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), retaddr=(0x%llx)\n",
               (unsigned long long) guest_addr,
               (unsigned long long) host_addr,
               size,
@@ -6414,14 +6421,14 @@ static bool cpu_htm_handle_load(
           SANITY_ASSERT(cline->owners);
           SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners));
           cline->owners->htm_needs_abort = true;
-          QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
+          LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
         }
       }
 
       goto do_not_handle;
     }
 
-    QPRINTF(env, "serving txn load of vaddr=(0x%llx), size=(%d)\n",
+    HIGH_QPRINTF(env, "serving txn load of vaddr=(0x%llx), size=(%d)\n",
             (unsigned long long) guest_addr, size);
 
     // XXX: this sign/unsigned business doesn't actually achieve anything
@@ -6475,7 +6482,7 @@ static bool cpu_htm_handle_load(
 do_not_handle:
   /** WARNING: mem lock is held when coming here */
   if (X86_HTM_IN_TXN(env)) {
-    QPRINTF(env, "not serving txn load of vaddr=(0x%llx), size=(%d)\n",
+    HIGH_QPRINTF(env, "not serving txn load of vaddr=(0x%llx), size=(%d)\n",
             (unsigned long long) guest_addr, size);
   }
   unlock_cpu_mem();
@@ -6484,7 +6491,7 @@ do_not_handle:
   /** WARNING: mem lock is held when coming here */
 abort_txn:
   SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  QPRINTF(env, "aborting txn because: %s\n", reason);
+  LOW_QPRINTF(env, "aborting txn because: %s\n", reason);
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit();
@@ -6547,7 +6554,7 @@ static bool cpu_htm_handle_store(
   {
     if (X86_HTM_IN_TXN(env)) {
 
-      QPRINTF(env, "transactional store of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), val=(%llu)\n",
+      HIGH_QPRINTF(env, "transactional store of vaddr=(0x%llx), paddr=(0x%llx), size=(%d), val=(%llu)\n",
               (unsigned long long) guest_addr,
               (unsigned long long) host_addr,
               size, val);
@@ -6601,7 +6608,7 @@ static bool cpu_htm_handle_store(
           for (sp = cline->owners; sp; sp = sp->htm_lock_table_next) {
             SANITY_ASSERT(X86_HTM_IN_TXN(sp));
             sp->htm_needs_abort = 1;
-            QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
+            LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
           }
         }
       }
@@ -6622,7 +6629,7 @@ do_not_handle:
   /** WARNING: mem lock is held when coming here */
 abort_txn:
   SANITY_ASSERT(X86_HTM_IN_TXN(env));
-  QPRINTF(env, "aborting txn because: %s\n", reason);
+  LOW_QPRINTF(env, "aborting txn because: %s\n", reason);
   cpu_htm_low_level_abort(env);
   unlock_cpu_mem();
   cpu_loop_exit();
@@ -6640,7 +6647,7 @@ static bool cpu_htm_handle_io_write(void *cb,
   lock_cpu_mem();
 
   if (X86_HTM_IN_TXN(cpu_single_env)) {
-    QPRINTF(env, "io_write in txn for vaddr=(0x%llx), paddr=(0x%llx), size=(%d)\n",
+    HIGH_QPRINTF(env, "io_write in txn for vaddr=(0x%llx), paddr=(0x%llx), size=(%d)\n",
             (unsigned long long) guest_addr,
             (unsigned long long) host_addr,
             size);
@@ -6781,7 +6788,7 @@ void cpu_htm_check_can_do_interrupt(CPUX86State *env, int mask)
 {
   if (X86_HTM_IN_TXN(env)) {
     lock_cpu_mem();
-    QPRINTF(env, "received CPU interrupt during txn (mask=%d)... aborting txn instead\n", mask);
+    LOW_QPRINTF(env, "received CPU interrupt during txn (mask=%d)... aborting txn instead\n", mask);
     cpu_htm_low_level_abort(env);
     unlock_cpu_mem();
     cpu_loop_exit();
