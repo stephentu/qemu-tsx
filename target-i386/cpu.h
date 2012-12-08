@@ -899,11 +899,6 @@ typedef struct CPUX86State {
     CPUX86CacheLineData htm_cache_lines[X86_HTM_NBUFENTRIES];
 
     bool htm_restore_IF_MASK;
-
-    //for lock table linked list
-    struct CPUX86State *htm_lock_table_next;
-
-
 } CPUX86State;
 
 typedef enum HTMLockMode {
@@ -912,6 +907,12 @@ typedef enum HTMLockMode {
   HTM_LOCK_EXCLUSIVE  /* write mode */
 } HTMLockMode;
 
+// XXX: hacky
+typedef struct CPUListNode {
+  CPUX86State *elem;
+  struct CPUListNode *next;
+} CPUListNode;
+
 /**
  * The data structure entry which manages the shared memory amongst all CPUs
  */
@@ -919,7 +920,7 @@ typedef struct CPUX86CacheLineEntry {
   target_ulong cno; /* cache line number */
   struct CPUX86CacheLineEntry *next; /* next pointer, for linked-lists */
   HTMLockMode mode; /* lock mode (r/w) */
-  CPUX86State *owners; /* should be exactly one for exclusive mode */
+  CPUListNode *owners; /* should be exactly one for exclusive mode */
 } CPUX86CacheLineEntry;
 
 CPUX86State *cpu_x86_init(const char *cpu_model);

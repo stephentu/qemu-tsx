@@ -41,6 +41,7 @@
     printf("  env->esp = 0x%llx\n", (unsigned long long) (env)->regs[R_ESP]); \
     printf("  env->htm_nest_level = %d\n", (int)(env)->htm_nest_level); \
     printf("  env->htm_needs_abort = %d\n", (int)(env)->htm_needs_abort); \
+    printf("  env->htm_restore_IF_MASK = %d\n", (int)(env)->htm_restore_IF_MASK); \
     printf("  "); \
     printf(fmt, ## __VA_ARGS__); \
   } while (0)
@@ -4971,6 +4972,16 @@ static void
 cpu_htm_mem_entry_return(CPUX86CacheLineEntry *entry)
 {
   CPUX86CacheLineEntry **free_list;
+  CPUListNode *p, *pnext;
+
+  // free memory for entry->owners
+  p = entry->owners;
+  while (p) {
+    pnext = p->next;
+    qemu_free(p);
+    p = pnext;
+  }
+
   free_list = cpu_htm_mem_free_list();
   entry->next = *free_list;
   *free_list = entry;
@@ -5049,11 +5060,11 @@ cpu_htm_mem_entry_is_owner(
     const CPUX86CacheLineEntry *entry,
     HTMLockMode mode, const CPUX86State *env)
 {
-  const CPUX86State *p;
+  const CPUListNode *p;
   if (entry->mode != mode)
     return false;
-  for (p = entry->owners; p; p = p->htm_lock_table_next)
-    if (p == env)
+  for (p = entry->owners; p; p = p->next)
+    if (p->elem == env)
       return true;
   return false;
 }
@@ -5078,20 +5089,21 @@ cpu_htm_mem_hash_table_remove_env(
 {
   int i;
   CPUX86CacheLineEntry **pp, *p;
-  CPUX86State **spp;
+  CPUListNode **spp, *tmp;
 
   // XXX: inefficient implementation
   // iterate through each entry and remove this env from owners.
   // if this owner was the last one, remove the entry from the table
   for (i = 0; i < X86_HTM_NMEMBUCKETS; i++) {
-    for (pp = &cpu_htm_mem_hash_table[i]; *pp;) {
+    for (pp = &ht[i]; *pp;) {
       SANITY_ASSERT((*pp)->mode > HTM_LOCK_NONE);
       SANITY_ASSERT((*pp)->owners);
-      for (spp = &((*pp)->owners); *spp; spp = &((*spp)->htm_lock_table_next)) {
-        if (*spp == env) {
+      for (spp = &((*pp)->owners); *spp; spp = &((*spp)->next)) {
+        if ((*spp)->elem == env) {
           // purge
-          *spp = (*spp)->htm_lock_table_next;
-          env->htm_lock_table_next = 0;
+          tmp = (*spp)->next;
+          qemu_free(*spp);
+          *spp = tmp;
           break;
         }
       }
@@ -5108,6 +5120,16 @@ cpu_htm_mem_hash_table_remove_env(
   }
 }
 
+static CPUListNode*
+alloc_new_cpu_list_node(CPUX86State *elem, CPUListNode *next)
+{
+  CPUListNode *ret;
+  ret = (CPUListNode *) qemu_malloc(sizeof(CPUListNode));
+  ret->elem = elem;
+  ret->next = next;
+  return ret;
+}
+
 static inline bool
 cpu_htm_mem_entry_upgrade_owner(
     CPUX86CacheLineEntry *entry,
@@ -5119,23 +5141,22 @@ cpu_htm_mem_entry_upgrade_owner(
   switch (entry->mode) {
   case HTM_LOCK_NONE:
     // no one previously held the lock, so any upgrade is fine
-    env->htm_lock_table_next = 0;
+    SANITY_ASSERT(!entry->owners);
     entry->mode = mode;
-    entry->owners = env;
+    entry->owners = alloc_new_cpu_list_node(env, 0);
     return true;
 
   case HTM_LOCK_SHARED:
+    SANITY_ASSERT(entry->owners);
     if (mode == HTM_LOCK_SHARED) {
       if (cpu_htm_mem_entry_is_owner(entry, mode, env))
         // already owner
         return true;
-      env->htm_lock_table_next = entry->owners;
-      entry->owners = env;
+      entry->owners = alloc_new_cpu_list_node(env, entry->owners);
       return true;
     } else {
       // exclusive mode
-      SANITY_ASSERT(entry->owners);
-      if (entry->owners == env && !entry->owners->htm_lock_table_next) {
+      if (entry->owners->elem == env && !entry->owners->next) {
         // single reader -> exclusive writer upgrade
         entry->mode = HTM_LOCK_EXCLUSIVE;
         return true;
@@ -5147,8 +5168,8 @@ cpu_htm_mem_entry_upgrade_owner(
 
   case HTM_LOCK_EXCLUSIVE:
     // only if it already owns the write lock
-    SANITY_ASSERT(entry->owners && !entry->owners->htm_lock_table_next);
-    return entry->owners == env;
+    SANITY_ASSERT(entry->owners && !entry->owners->next);
+    return entry->owners->elem == env;
 
   default:
     assert(false); // should not happen
@@ -6419,9 +6440,9 @@ static bool cpu_htm_handle_load(
         if (cline && cline->mode == HTM_LOCK_EXCLUSIVE) {
           // must abort writer
           SANITY_ASSERT(cline->owners);
-          SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners));
-          cline->owners->htm_needs_abort = true;
-          LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners);
+          SANITY_ASSERT(X86_HTM_IN_TXN(cline->owners->elem));
+          cline->owners->elem->htm_needs_abort = true;
+          LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) cline->owners->elem);
         }
       }
 
@@ -6511,7 +6532,7 @@ static bool cpu_htm_handle_store(
   int i;
   const char *reason;
   RAMBlock *block;
-  CPUX86State *sp;
+  CPUListNode *sp;
 
   assert(size == 1 || size == 2 || size == 4 || size == 8);
 
@@ -6605,10 +6626,10 @@ static bool cpu_htm_handle_store(
         cline = cpu_htm_mem_hash_table_lookup_or_create(cpu_htm_mem_hash_table, cno, false);
         if (cline && cline->mode > HTM_LOCK_NONE) {
           // must abort other readers/writers
-          for (sp = cline->owners; sp; sp = sp->htm_lock_table_next) {
-            SANITY_ASSERT(X86_HTM_IN_TXN(sp));
-            sp->htm_needs_abort = 1;
-            LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp);
+          for (sp = cline->owners; sp; sp = sp->next) {
+            SANITY_ASSERT(X86_HTM_IN_TXN(sp->elem));
+            sp->elem->htm_needs_abort = 1;
+            LOW_QPRINTF(env, "aborting txn on env=(0x%llx)\n", (unsigned long long) sp->elem);
           }
         }
       }
