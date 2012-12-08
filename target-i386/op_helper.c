@@ -54,7 +54,7 @@
 
 #else
 
-#define LOW_QPRINTF ALWAYS_QPRINTF
+#define LOW_QPRINTF(env, fmt, ...)
 #define HIGH_QPRINTF(env, fmt, ...)
 #define dprintf(fmt, ...)
 
@@ -1375,7 +1375,7 @@ static void QEMU_NORETURN raise_interrupt(int intno, int is_int, int error_code,
 {
     if (X86_HTM_IN_TXN(env)) {
       LOW_QPRINTF(env, "received raise_interrupt during txn... aborting txn instead\n");
-      printf("   intno=(%d), is_int=(%d), error_code=(%d), next_eip=(%llx)\n",
+      dprintf("   intno=(%d), is_int=(%d), error_code=(%d), next_eip=(%llx)\n",
              intno, is_int, error_code,
              (unsigned long long) env->eip + next_eip_addend);
       cpu_htm_check_can_do_interrupt(env, intno); // does not return
@@ -5229,7 +5229,7 @@ void helper_xbegin(CPUX86State *env, target_ulong abort_addr)
 
   if (env->htm_nest_level++ == 0) {
     // begin of HTM region
-    printf("htm region begin- checkpointing CPU state\n");
+    dprintf("htm region begin- checkpointing CPU state\n");
     memcpy((char *) &env->htm_checkpoint_state,
            (const char *) env,
            sizeof(CPUX86StateCheckpoint));
@@ -5248,11 +5248,11 @@ static void cache_line_commit(CPUX86CacheLineData *line)
   RAMBlock *block;
   int i, dirty_flags;
   ram_addr_t ram_addr;
-  printf("cache_line_commit: commit CL starting at: 0x%llx\n",
+  dprintf("cache_line_commit: commit CL starting at: 0x%llx\n",
          (unsigned long long) line->host_addr);
 
   for (i = 0; i < X86_CACHE_LINE_SIZE/8; i++) {
-    printf("0x%llx: 0x%llx\n",
+    dprintf("0x%llx: 0x%llx\n",
           (unsigned long long)(line->guest_addr + i * 8),
           (unsigned long long) *((uint64_t *)(&line->data[i * 8])));
   }
@@ -5308,9 +5308,9 @@ void helper_xend(CPUX86State *env)
 
 void helper_xabort(CPUX86State *env, int32_t imm8)
 {
-  printf("helper_xabort(imm8=%d)\n", imm8);
-  printf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
-  printf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
+  dprintf("helper_xabort(imm8=%d)\n", imm8);
+  dprintf("current esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
+  dprintf("current ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
   if (env->htm_nest_level == 0)
     // no-op
     return;
@@ -5329,9 +5329,9 @@ void helper_xabort(CPUX86State *env, int32_t imm8)
 
   // XXX: what else do we need to do to EAX?
 
-  printf("set env to go to eip=0x%llx\n", (unsigned long long) env->eip);
-  printf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
-  printf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
+  dprintf("set env to go to eip=0x%llx\n", (unsigned long long) env->eip);
+  dprintf("restored esp: 0x%llx\n", (unsigned long long) env->regs[R_ESP]);
+  dprintf("restored ebp: 0x%llx\n", (unsigned long long) env->regs[R_EBP]);
 }
 
 static inline uint32_t
